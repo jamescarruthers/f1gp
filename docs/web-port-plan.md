@@ -1,7 +1,41 @@
-# Plan: run F1GP in a web browser
+# Plan: F1GP in the browser, with new graphics
 
 This plan covers MicroProse *Formula One Grand Prix* 1.05 (DOS, 1991–92), the
 files in `original/`.
+
+**Goal:** the same game (the same handling, AI, rules and menus) drawn at any
+resolution, in widescreen and at a smooth frame rate, in a web browser.
+
+## Approach
+
+Keep the original program for everything except the 3D view. Replace the
+3D view with a new renderer.
+
+1. `gp.exe` runs unchanged inside js-dos (DOSBox compiled to WebAssembly).
+   It still does the physics, AI, timing, sound and menus, so the handling
+   stays exact.
+2. Each frame, our code reads the game's state straight out of the emulated
+   PC's memory: where every car is, which way it points, and where the
+   camera is.
+3. A new WebGL renderer draws the scene from that state. It builds the track
+   from the game's own track files, so the circuits match. It can draw at any
+   size and aspect ratio. It can also draw between the game's frames, easing
+   each car from its last position to its next, so motion is smooth even
+   though the game itself updates 15–25 times a second.
+4. Menus and other 2D screens stay as the game draws them, scaled up.
+
+Only the renderer has to be understood and rebuilt, not the whole game. The
+physics, AI and low-level graphics code are the parts the community's
+disassembly understands least. This plan keeps the first two as they are and
+only needs to learn what the graphics code draws, not how it draws it.
+
+Rejected:
+
+- **A full rewrite.** It would mean rebuilding physics and AI that nobody has
+  yet mapped. Many months of work before anything drives the same way.
+- **Upscaling the original frames** with filters. Cheap, but the game still
+  renders at 320×200 and 15 fps, so it cannot give real detail, widescreen or
+  smooth motion.
 
 ## What we have
 
@@ -9,212 +43,159 @@ The repo holds the game's binaries and data. There is no source code.
 
 | File | What it is |
 | --- | --- |
-| `gp.exe` | The game. 16-bit real-mode DOS, packed with Microsoft EXEPACK. Unpacks to 595,216 bytes. No C runtime inside; it looks like hand-written assembly. SHA-256 `431111406de115b90166faeb49e7681f99b77130ac916863826cc9f6f28f4bb6`. |
+| `gp.exe` | The game. 16-bit real-mode DOS, packed with Microsoft EXEPACK. Unpacks to 595,216 bytes (`spike/tools/unexepack.mjs`). No C runtime inside; it looks like hand-written assembly. SHA-256 `431111406de115b90166faeb49e7681f99b77130ac916863826cc9f6f28f4bb6`. |
 | `playscr.exe`, `test.scr` | Intro player and its script. `f1gp.bat` runs the intro, then `gp /c /g`. |
-| `f1ct01.dat`–`f1ct16.dat` | The 16 tracks. Format documented by ArgDocs. |
+| `f1ct01.dat`–`f1ct16.dat` | The 16 tracks: horizon image, object shapes and placings, track sections, racing line, pit lane, camera positions. Format documented by ArgDocs. |
 | `*.fli`, `*.lbm` | 320×200, 256-colour animations and stills. |
 | `backdrop.dat`, `trackpix.dat`, `champ.dat`, `crash*.dat`, `trophy.dat`, `helmets.dat`, `flags.dat` | Image containers (`f1pcanim` header). ArgDocs covers "media containers". |
-| `f1gpdata.dat`, `f1gpdatb.dat` | Game data (starts with offset tables; not yet identified). |
-| `a*.bin`, `b*.bin`, `r*.bin` + `adlib.cat`, `beep.cat`, `roland.cat` | Sound drivers and sound banks for AdLib, PC speaker and Roland. |
-| `x*.bin` | The active sound set. Today these are byte-for-byte copies of the PC speaker (`b*`) files. |
-| `f1prefs.dat`, `f1prefs.286/.386/.486` | Preferences. `f1prefs.dat` equals the 486 preset. |
-| `f1gp.rnc` | 3.7 MB archive holding compressed copies of all the files above. Not needed at run time. |
-| `install.exe`, `hdinst.exe`, `cd1.exe`, `cdpatch.exe`, `mpscopy.exe`, `bootmake.bat` | Installer and boot-disk tools. Not needed at run time. |
-
-`gp.exe` talks to the hardware directly: VGA 320×200, keyboard, mouse
-(INT 33h), analogue joystick (port 201h), and serial port (INT 14h) for
-two-PC link play. Its switches are `/a` no animations, `/c` scrolling
-credits, `/g` don't preserve screen mode, `/m` no RTS/CTS for modem link,
-`/p` don't load preferences.
-
-## Approach
-
-Run the original `gp.exe` inside a DOS emulator compiled to WebAssembly,
-wrapped in a small web app. Use [js-dos](https://js-dos.com/) v8, which
-packages DOSBox for the browser.
-
-Why this and not a rewrite:
-
-- **It is the only route that gets a faithful game soon.** Emulation needs no
-  knowledge of the game's code.
-- **A rewrite rests on reverse engineering that is not done.** The F1GP
-  community's disassembly is about one-third mapped. Physics, AI and low-level
-  graphics, the parts a rewrite most needs, are the least understood.
-- **Recompiling the binary is hard for this program.** It is hand-written
-  16-bit assembly with segment arithmetic and interrupt handlers, so tools
-  that lift compiler output to C gain little.
-
-Phase 4 below keeps a path open to native code later, one piece at a time.
+| `f1gpdata.dat`, `f1gpdatb.dat` | Game data, starting with offset tables. Not identified yet; may hold car shapes. |
+| `a*.bin`, `b*.bin`, `r*.bin` + `adlib.cat`, `beep.cat`, `roland.cat` | Sound drivers and banks for AdLib, PC speaker and Roland. The game loads the `x*.bin` copies, which today match the PC speaker set. |
+| `f1prefs.dat`, `f1prefs.286/.386/.486` | Preferences. `f1prefs.dat` equals the 486 preset (15 fps). |
+| `f1gp.rnc`, installer tools | Not needed at run time. |
 
 ## Constraint: do not publish the game files
 
 This repository is public and contains the original, copyrighted game files.
-A web page that serves them lets anyone download the game. So the port must
-not bundle them. Instead:
+The web version must not serve them. The player supplies their own copy, the
+page checks it and stores it in the browser, and nothing leaves the machine.
+You may want to remove `original/` from the repo and its history, or make the
+repo private.
 
-- The player supplies their own copy (a folder or a zip) on first run.
-- The page checks it, builds the emulator bundle in the browser, and stores
-  it in the browser (OPFS or IndexedDB). Nothing leaves the machine.
-- Later visits start straight from the stored copy.
+DOSBox and js-dos are GPL-2.0. Publishing their files means shipping the
+licence and pointing to the matching source.
 
-You may also want to remove `original/` from the public repo and its
-history, or make the repo private. That is your call; the port does not
-depend on it.
+## Phase 0: groundwork (done)
 
-DOSBox is GPL-2.0 and js-dos builds on it. Check js-dos's licence and license
-the wrapper to match.
+The scripts are in `spike/`. See `spike/README.md` for how to run them.
 
-## Phase 0: spike (1–2 days)
+Findings:
 
-Goal: prove the game runs well in js-dos before building anything.
+- **The game runs in js-dos 8.5.0**, both in Node (for tests) and in headless
+  Chromium. Intro, menus, practice and Quick Race all work, with AdLib sound.
+- **We can read the game's memory from JavaScript.** In js-dos's direct
+  (same-thread) mode the emulator's heap is reachable as
+  `ci.transport.module.HEAPU8`, and guest RAM is one block inside it.
+  `spike/lib/guest-mem.cjs` finds it; DOS loads `gp.exe` at linear address
+  0x1A20, and the code there matches the unpacked file byte for byte. Direct
+  mode also works in the browser. No emulator rebuild is needed.
+- **Tests can drive the game.** `spike/lib/route.cjs` goes from boot to the
+  car on track by recognising each screen. It works at every speed setting
+  tried (8,000 cycles to max). It also reads the speed from the dash and the
+  "Processor Occupancy" figure (hold O in the car).
+- **Copy protection:** a manual word lookup after the language screen (the
+  same question every time). No CD check. The test route answers it.
+- **Speed:** at the 486 preset (15 fps) the game reports 25% processor
+  occupancy at 25,000 cycles in the pit lane, and 30% at a 26-car Quick Race
+  start, measured in Node in this container. So the emulator has plenty of
+  headroom, leaving CPU time for the new renderer.
+- **Hosting:** no COOP/COEP headers are needed, so GitHub Pages works. With
+  js-dos's files self-hosted, the page makes no requests to other hosts.
+- **Controls:** keyboard and mouse reach the game. js-dos has no route for
+  analogue joystick input; that needs a small change to the emulator build
+  (Phase 5).
+- **Known issues:** the DOSBox build produces about 5.9% more audio samples
+  than its stated rate, and the DOSBox-X build gives no sound. Both need a
+  fix or a workaround later.
 
-1. Build a `.jsdos` bundle by hand: a zip with the run-time files (drop
-   `f1gp.rnc` and the installer tools) and `.jsdos/dosbox.conf`.
-2. Copy `aintro.bin`, `aingame.bin`, `asound.bin`, `acredit.bin` over the
-   matching `x*.bin` files to switch from PC speaker to AdLib.
-3. Starting config:
+These findings come from the Phase 0 agents' runs. The planned independent
+re-checks were stopped when the goal changed, so treat the speed figures as
+first measurements.
 
-   ```ini
-   [cpu]
-   cycles=fixed 25000
+## Phase 1: read the game's state (1–3 weeks)
 
-   [sblaster]
-   oplmode=opl2
+Goal: a live top-down map, beside the running game, showing every car where
+the game says it is.
 
-   [joystick]
-   joysticktype=2axis
+1. **Find the car records.** Start from Trevor Kellaway's GpInfo
+   (f1gp-utils), which reads car data from the running game, and ArgDocs'
+   GP.EXE notes. Confirm each field by changing it in the game: hold A and
+   watch for a value that tracks the dash speed; steer and watch for a
+   heading; and so on. Record snapshots with `guest-mem.cjs` and diff them.
+2. **Fields needed for every car:** position along the track (section and
+   distance), sideways offset or world x/y/z, heading, pitch and roll if
+   stored, speed, steering angle, wheel spin, pit state, and whether it is
+   crashed or retired.
+3. **Find the camera:** which car, which view (cockpit, TV camera, chase),
+   and the camera's position and direction.
+4. **Find the frame tick:** the counter or flag that marks a new game frame,
+   so the renderer knows when state is fresh.
+5. **Write the map** in `web/`: a canvas that draws the track outline and
+   the cars, updated every frame, next to the original screen.
 
-   [autoexec]
-   mount c .
-   c:
-   f1gp.bat
-   ```
+Done when: the map matches the game for a full Quick Race, checked by eye and
+by a test that compares the player's speed and position with the dash and
+lap timer.
 
-4. Load it in a local page and check, writing down each result:
-   - intro plays, menus work, a race starts;
-   - whether the game asks for the CD or a manual lookup;
-   - AdLib music and engine sound work;
-   - keyboard (A accelerate, Z brake, `,` `.` steer), mouse steering with
-     pointer lock, and whether a browser gamepad reaches the DOS joystick;
-   - saving a game writes to `GPSAVES\` and the save survives a reload;
-   - speed: set the in-game frame rate to 15 fps (the 486 preset) and read
-     the game's own "Processor Occupancy" figure. Raise `cycles` until
-     occupancy stays under 100 % on a mid-range laptop, and try a phone;
-   - whether the js-dos build needs cross-origin isolation (COOP/COEP)
-     headers. GitHub Pages cannot set them; Cloudflare Pages or Netlify can.
+## Phase 2: build the track in 3D (3–8 weeks)
 
-Done when: a full race at 15 fps plays with sound on a laptop, and the
-findings are recorded in this file.
+Goal: our renderer draws the track as the game does, seen from the game's
+own camera.
 
-## Phase 1: playable in a browser (about 1 week)
+1. **Read the track files** in TypeScript: sections, widths, curvature,
+   height changes, kerbs, verges, pit lane, objects, horizon, cameras.
+   ArgDocs, ArgData and the GP2 track format notes describe most of it.
+2. **Turn sections into a 3D mesh.** The exact method the game uses is not
+   documented. Work it out by rendering at 320×200 from the game's camera and
+   comparing, pixel by pixel, with the game's own frame. Adjust until the
+   edges line up. The comparison runs as an automated test.
+3. **Trackside objects and scenery:** place the object shapes from the track
+   file. Use the horizon image for the backdrop.
+4. **Colours:** use the game's palette for now.
 
-Goal: a static site anyone with the game can use.
+Done when: for every one of the 16 circuits, our track lines up with the
+game's frame to within a pixel or two at 320×200, at several points round
+the lap.
 
-Proposed layout:
+Main risk: if the edges will not line up by comparison alone, we must read
+the game's track-drawing code. That is the least understood part of the
+disassembly, and it could double this phase.
 
-```
-web/
-  index.html
-  src/main.ts        start-up, screens, "click to start" (browsers need a click before audio)
-  src/import.ts      read the player's files, check them, build the bundle
-  src/storage.ts     keep the bundle and saves in OPFS / IndexedDB
-  src/emulator.ts    start js-dos, pause and resume, file access
-  src/dosbox.conf    template filled in from settings
-  vite.config.ts
-```
+## Phase 3: cars and cockpit (2–6 weeks)
 
-Tools: Vite and TypeScript, js-dos v8 from npm (self-hosted, not from a CDN),
-fflate to read and write zips.
+1. **Find the car shapes** (candidates: `f1gpdata.dat`, `f1gpdatb.dat`,
+   `gp.exe`) and the team colours (ArgData documents where the colours are).
+2. **Draw every car** at its position, with wheels, and check against the
+   game's frame as in Phase 2.
+3. **Cockpit and dash:** start by taking them from the game's own frame,
+   scaled up. Later, redraw them in high resolution. Mirrors need rear views
+   rendered by us.
+4. **Effects the game draws** (sparks, smoke, dust, tyre marks, if any):
+   list them and match them.
 
-Tasks:
+## Phase 4: better graphics (3–6 weeks)
 
-1. **Import.** Accept a folder (`<input webkitdirectory>`), a zip, or drag
-   and drop. Match file names without regard to case. Check that the needed
-   files exist. Hash `gp.exe`: accept the 1.05 hash above; accept other
-   versions (such as the US *World Circuit*) with a warning. Report missing
-   files by name.
-2. **Bundle.** Copy the needed files, apply the chosen sound set to the
-   `x*.bin` files, add `dosbox.conf`, and store the result.
-3. **Run.** Start js-dos in a canvas scaled to 4:3 (the game's pixels are
-   not square). Offer sharp or smooth scaling. Pause when the tab is hidden
-   and resume when it returns.
-4. **Saves.** Copy `GPSAVES\` and `F1PREFS.DAT` out of the emulator after
-   each save and on exit (js-dos's `fsReadFile` or its `fsChanges` hook) and
-   restore them on start. Add "export saves" and "import saves" as a zip.
-5. **Deploy.** A GitHub Actions job builds `web/` and publishes it to a
-   static host picked in Phase 0.
-6. **Tests.** Unit tests for import and bundle logic, using a small fake
-   file set rather than game files. One Playwright smoke test that loads
-   the page, feeds a local copy of the game (kept outside the repo, passed
-   in by path), and checks that the emulator starts.
+1. **Resolution and widescreen:** draw at the window's size. Widen the field
+   of view for wide screens, and check that nothing the game hides (cars
+   beyond its draw distance, for example) looks wrong.
+2. **Smooth motion:** draw at the screen's refresh rate and ease each car
+   between the game's last two frames. This adds up to one game frame of
+   delay (67 ms at 15 fps). Test whether the game can run faster, at 20 or
+   25 fps, to cut that delay.
+3. **Better looks, optional:** textures, lighting, shadows, anti-aliasing and
+   draw distance. Each is a separate choice; keep the original look available.
 
-Done when: a new visitor can import their copy, race, save, reload the page
-and load that save, on current Chrome, Firefox and Safari.
+## Phase 5: make it a product (2–3 weeks)
 
-## Phase 2: make it pleasant (1–2 weeks)
-
-1. **Gamepad.** If Phase 0 shows the browser gamepad does not reach the DOS
-   joystick, poll `navigator.getGamepads()` and feed the axes in. Analogue
-   steering and pedals matter in this game. This may need a small patch to
-   the DOSBox build to expose joystick input.
-2. **Touch.** On-screen pedals and gear buttons. Tilt steering from
-   `DeviceOrientationEvent` sent as mouse movement (iOS asks for permission,
-   which needs a tap).
-3. **Settings screen.** Sound device (AdLib, PC speaker, none), speed preset
-   (write the matching `f1prefs.286/.386/.486` values and `cycles`), key
-   remapping done in the page before keys reach the emulator, and scaling.
-4. **Offline.** A service worker caches the page and emulator. The game is
-   already stored locally, so the site then works with no network.
-5. **Skip the intro** as an option (run `gp /c /g` directly, as `med.bat`
-   does).
-
-Roland MT-32 is out of scope: it needs Roland's ROM images, which we cannot
-ship, and a DOSBox build with MT-32 emulation.
-
-## Phase 3: link play over the internet (optional, 2–4 weeks, uncertain)
-
-F1GP's two-player link runs over a serial cable or modem. js-dos networking
-supports only IPX, so this needs new work:
-
-1. Add a serial-port backend to the WebAssembly DOSBox build that sends bytes
-   over a WebRTC data channel (reliable, ordered), with a small signalling
-   server to pair two browsers.
-2. Test on one machine first, then with added delay, to find how much
-   latency the game tolerates before it reports "Link data mismatch" or drops
-   the link. Internet round trips of 20–100 ms may be too slow for a protocol
-   built for a cable.
-
-Decide whether to start this after the latency test. Hot-seat multiplayer
-(taking turns on one machine) already works without it.
-
-## Phase 4: native tools, and groundwork for a rewrite (optional, open-ended)
-
-This phase does not replace the emulator. It builds browser-native pieces
-that are useful alone and would form the start of a rewrite.
-
-1. **Format readers in TypeScript**, tested against all 16 original tracks:
-   track files (including the checksum in the last four bytes), `f1pcanim`
-   containers, FLI, ILBM and the palette. Use ArgDocs and ArgData as the
-   references.
-2. **Viewers:** an asset browser and a 3D track viewer in WebGL.
-3. **A rewrite, if wanted,** by differential testing: run `gp.exe` in an
-   instrumented emulator build, dump car state every frame (Trevor
-   Kellaway's GpInfo documents the car data structures), and compare it
-   with the new TypeScript physics. Start from the community's IDA
-   database. Expect this to take many months, and decide only after
-   Phase 2.
+1. **Import:** the player picks their game folder or zip. The page checks
+   the files and `gp.exe`'s hash, builds the bundle and stores it in the
+   browser (OPFS).
+2. **Saves:** copy `GPSAVES\` and `F1PREFS.DAT` out of the emulator after each
+   save, store them, and restore them on start. Offer export and import.
+3. **Controls:** keyboard, mouse, gamepad (needs the emulator change for
+   analogue input), touch.
+4. **Offline:** a service worker caches the page and emulator.
+5. **Deploy** to a static host with a GitHub Actions job.
 
 ## Risks and open questions
 
 | Risk | Effect | What to do |
 | --- | --- | --- |
-| Game files in a public repo | Anyone can download the game | Port never serves them; consider removing `original/` |
-| Slow emulation on phones | Low frame rate or stutter | Measure in Phase 0; ship presets; lower the game's frame rate |
-| Gamepad not passed through | No analogue steering | Phase 2 task 1 |
-| CD or manual check at start | Game won't reach the menu | Check in Phase 0; the CD edition's `cdpatch.exe` may be relevant |
-| Hosting needs COOP/COEP headers | GitHub Pages won't work | Pick the host in Phase 0 |
-| Serial link too sensitive to latency | No online two-player | Phase 3 test before building |
-| Browser storage cleared | Lost saves | Ask for persistent storage; offer save export |
+| Track mesh can't be matched by comparison alone | Phase 2 takes much longer | Read the track-drawing code; ask the F1GP community for their IDA database |
+| Car shapes not found or hard to decode | Cars look wrong | Search data files early (start in Phase 1) |
+| Direct mode runs the emulator on the page's main thread | Rendering and emulation compete, frames may stutter | Measure in Phase 1; if needed, rebuild the emulator to post state from its worker |
+| The game draws things not in any data file | Missing effects | List them in Phase 3 |
+| Memory layout differs between game versions | Only 1.05 European works | Support one version first; detect others by hash |
+| Game files in a public repo | Anyone can download the game | Never serve them; consider removing `original/` |
 
 ## References
 
@@ -224,5 +205,5 @@ that are useful alone and would form the start of a rewrite.
 - f1gp-utils, including GpInfo: <https://github.com/tkellaway/f1gp-utils>
 - F1GP development resources: <https://sites.google.com/view/f1gpwc/development>
 - Disassembly discussion: <https://groups.google.com/g/f1gpwc/c/nyi3loxTjMs>
-- js-dos: <https://js-dos.com/overview.html>, networking (IPX only):
-  <https://js-dos.com/networking.html>
+- GP2 track file format: <https://www.waa63.ch/racesim/TEIC/primer/GP2TrackFileFormat.htm>
+- js-dos: <https://js-dos.com/overview.html>
