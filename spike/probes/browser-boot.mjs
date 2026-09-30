@@ -4,7 +4,7 @@
 //        [--bundle dist/browser-default.jsdos] [--isolate] [--block]
 //        [--worker 1|0] [--backend dosbox|dosboxX] [--duration 45] [--interval 5]
 //        [--input ci|real] [--q key=value ...] [--keys "t:key,t:key"]
-//        [--ready-timeout ms]
+//        [--ready-timeout ms] [--no-autoplay] [--chromium-arg FLAG ...]
 //
 // Writes into out/browser/<tag>/:
 //   tNNN.png        emulator framebuffer (ci.screenshot) every --interval seconds
@@ -43,6 +43,8 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--input") opt.input = next();
   else if (a === "--keys") opt.keys = next();
   else if (a === "--ready-timeout") opt.readyTimeout = Number(next());
+  else if (a === "--no-autoplay") opt.autoplay = false;
+  else if (a === "--chromium-arg") (opt.chromiumArgs ??= []).push(next());
   else if (a === "--q") { const [k, v] = next().split("="); opt.query[k] = v; }
   else { console.error(`unknown option ${a}`); process.exit(2); }
 }
@@ -63,7 +65,7 @@ const summary = { options: opt, startedAt: new Date().toISOString() };
 try {
   emu = await launch({
     bundle: opt.bundle, page: opt.page, isolate: opt.isolate, blockNetwork: opt.block,
-    query: opt.query, input: opt.input, readyTimeout: opt.readyTimeout ?? 60000, log: (l) => console.error(`[${secs()}s] ${l}`),
+    query: opt.query, input: opt.input, readyTimeout: opt.readyTimeout ?? 60000, autoplay: opt.autoplay ?? true, chromiumArgs: opt.chromiumArgs ?? [], log: (l) => console.error(`[${secs()}s] ${l}`),
   });
   const { page, driver } = emu;
   summary.url = emu.url;

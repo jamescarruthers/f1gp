@@ -22,6 +22,8 @@
 //   viewport    default { width: 1024, height: 790 }
 //   readyTimeout  ms to wait for window.emuReady (default 60000)
 //   chromiumArgs  extra Chromium flags
+//   autoplay    pass --autoplay-policy=no-user-gesture-required (default true); false
+//               keeps Chromium's normal policy, so audio waits for a click or key
 //   log         function(line) for progress lines (default: none)
 //
 // Returns { browser, context, page, server, serverLog, requests, consoleMessages,
@@ -133,6 +135,7 @@ export async function launch({
   viewport = { width: 1024, height: 790 },
   readyTimeout = 60000,
   chromiumArgs = [],
+  autoplay = true,
   log = () => {},
 } = {}) {
   input = input ?? (keyMode === "keyboard" ? "real" : keyMode) ?? "ci";
@@ -148,7 +151,7 @@ export async function launch({
   try {
     browser = await chromium.launch({
       headless,
-      args: ["--autoplay-policy=no-user-gesture-required", ...chromiumArgs],
+      args: [...(autoplay ? ["--autoplay-policy=no-user-gesture-required"] : []), ...chromiumArgs],
     });
   } catch (e) {
     await new Promise((r) => srv.server.close(r));
