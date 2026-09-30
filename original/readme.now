@@ -1,0 +1,24 @@
+MICROPROSE FORMULA ONE GRAND PRIX
+Version 1.05
+
+IMPORTANT INFORMATION!
+
+Please make sure that you read the Technical Supplement before
+attempting to connect via modem or serial link with another PC.
+
+Detail Levels:
+
+If you have installed the game on a 486 PC, then the Frame rate 
+will be set to 15 frames per second, and all detail will be set 
+ON.  This should be OK for a 486DX and below.  If you have a DX2 
+then you may wish to use a higher Frame rate.
+
+If you have installed onto a 386 PC, then the Frame rate will be 
+set to 10 frames per second, and all detail will be ON, but 
+Texture will be OFF.  This setup is designed for slowish 386's; 
+if you have a 33mhz machine or faster you may wish to increase the 
+Frame rate.  Check the Occupancy option as described in the 
+technical supplement for instructions.
+
+On a 286 PC the Frame rate will be set to 8.1 frames per second, 
+all detail will be on, but texture will be OFF.

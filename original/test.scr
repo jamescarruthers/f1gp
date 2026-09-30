@@ -1,0 +1,13 @@
+mprose.gif -p 3 -t fadein 1 fadeout 2 // displays microprose logo for 2 secs.
+GPLOGO.FLi -p 3 -t fadein 2 fadeout 1    
+EARTH.FLi  -T FADEIN 1
+EARTH.FLi -T fadeout 1 
+DROPEN.FLi -p 1 -T FADEIN 1 fadeout 1
+FrNTEND.FLi -T FADEOUT 3
+gplogo.gif -p 8 -t fadein 0.5 fadeout 3
+
+   
+
+
+  
+
