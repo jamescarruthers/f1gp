@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1GP Spike Player</title>
+<!--
+  Phase 0 test page: runs a .jsdos bundle with the js-dos Dos() player, loaded
+  from our own node_modules copy (no CDN).
+
+  Query options (all optional):
+    bundle=dist/browser-default.jsdos   bundle URL, relative to this page
+    backend=dosbox|dosboxX              emulator build (default dosbox)
+    worker=1|0                          run DOSBox in a Web Worker (default 1)
+    aspect=4/3                          AsIs, 1/1, 5/4, 4/3, 16/10, 16/9, Fit
+    render=webgl|canvas                 player renderer (default webgl)
+    kiosk=1|0                           hide the player sidebar (default 1)
+    autostart=1|0                       skip the Play button (default 1)
+    mouse=0|1                           mouse capture / pointer lock (default 0)
+    fresh=1|0                           delete the OPFS "jsdos" folder before
+                                        start, so a cached bundle or old
+                                        saves cannot be picked up (default 1)
+    cdn=0|1                             1 = do not pass pathPrefix, so the
+                                        player loads its engine from
+                                        v8.js-dos.com (test only; default 0)
+
+  For tests it exposes:
+    window.emuReady    true once the CommandInterface is ready
+    window.ci          the js-dos CommandInterface once ready (before that,
+                       window.ci is a js-dos internal function, see below)
+    window.emuCi       the same CommandInterface
+    window.dos         the DosProps returned by Dos()
+    window.emuEvents   log array of {t, type, ...}
+    window.emuFrames   frames received (only changed frames are sent)
+    window.emuStatus() summary object (see bottom of this file)
+    window.audioProbe  {contexts, level()} - taps every node that connects
+                       to an AudioContext destination with an AnalyserNode
+-->
+<link rel="stylesheet" href="node_modules/js-dos/dist/js-dos.css">
+<style>
+  :root { --bg: #111; --fg: #ddd; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f4f4f4; --fg: #222; }
+  }
+  :root[data-theme="dark"] { --bg: #111; --fg: #ddd; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px/1.4 system-ui, sans-serif; }
+  #dos { width: 100vw; height: calc(100vh - 22px); }
+  #status { height: 22px; padding: 0 16px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="dos"></div>
+<div id="status">starting...</div>
+
+<script>
+// Audio tap: must run before the engine makes its AudioContext.
+(() => {
+  const contexts = [];
+  const taps = new Map(); // context -> analyser
+  const Orig = window.AudioContext;
+  if (Orig) {
+    window.AudioContext = function (...args) {
+      const ctx = new Orig(...args);
+      contexts.push(ctx);
+      window.emuEvents?.push({ t: performance.now(), type: "audio-context", state: ctx.state,
+        sampleRate: ctx.sampleRate });
+      ctx.addEventListener?.("statechange", () =>
+        window.emuEvents?.push({ t: performance.now(), type: "audio-state", state: ctx.state }));
+      return ctx;
+    };
+    window.AudioContext.prototype = Orig.prototype;
+  }
+  const origConnect = AudioNode.prototype.connect;
+  AudioNode.prototype.connect = function (dest, ...rest) {
+    const r = origConnect.call(this, dest, ...rest);
+    try {
+      if (dest instanceof AudioDestinationNode) {
+        const ctx = this.context;
+        let an = taps.get(ctx);
+        if (!an) { an = ctx.createAnalyser(); an.fftSize = 2048; taps.set(ctx, an); }
+        origConnect.call(this, an);
+        window.emuEvents?.push({ t: performance.now(), type: "audio-connect",
+          node: this.constructor.name });
+      }
+    } catch (e) { console.warn("audio tap failed", e); }
+    return r;
+  };
+  window.audioProbe = {
+    contexts,
+    // RMS and peak of the last 2048 samples at every tapped destination.
+    level() {
+      const out = [];
+      for (const [ctx, an] of taps) {
+        const buf = new Float32Array(an.fftSize);
+        an.getFloatTimeDomainData(buf);
+        let sum = 0, peak = 0;
+        for (const s of buf) { sum += s * s; peak = Math.max(peak, Math.abs(s)); }
+        out.push({ state: ctx.state, sampleRate: ctx.sampleRate,
+          currentTime: ctx.currentTime, rms: Math.sqrt(sum / buf.length), peak });
+      }
+      return out;
+    },
+  };
+})();
+</script>
+<script src="node_modules/js-dos/dist/js-dos.js"></script>
+<script>
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const flag = (name, dflt) => (q.get(name) ?? (dflt ? "1" : "0")) === "1";
+  const events = window.emuEvents = window.emuEvents || [];
+  const log = (type, extra = {}) => events.push({ t: performance.now(), type, ...extra });
+  const statusEl = document.getElementById("status");
+  window.emuFrames = 0;
+
+  const opts = {
+    bundle: q.get("bundle") ?? "dist/browser-default.jsdos",
+    backend: q.get("backend") ?? "dosbox",
+    worker: flag("worker", true),
+    aspect: q.get("aspect") ?? "4/3",
+    render: q.get("render") ?? "webgl",
+    kiosk: flag("kiosk", true),
+    autostart: flag("autostart", true),
+    mouse: flag("mouse", false),
+    fresh: flag("fresh", true),
+    cdn: flag("cdn", false),
+  };
+  window.emuOptions = opts;
+  log("page-start", { opts, crossOriginIsolated: window.crossOriginIsolated,
+    sharedArrayBuffer: typeof SharedArrayBuffer, secure: window.isSecureContext });
+
+  if (opts.fresh) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      await root.removeEntry("jsdos", { recursive: true });
+      log("opfs-cleared");
+    } catch (e) { log("opfs-clear-skipped", { error: String(e) }); }
+  }
+
+  // Absolute URL so the Worker (started from a blob: URL) resolves it too.
+  // cdn=1 leaves pathPrefix unset (the player then uses v8.js-dos.com); only for
+  // testing what the default setup contacts.
+  const pathPrefix = flag("cdn", false) ? undefined
+    : new URL("node_modules/js-dos/dist/emulators/", location.href).href;
+  const bundleUrl = new URL(opts.bundle, location.href).href;
+
+  window.dos = Dos(document.getElementById("dos"), {
+    url: bundleUrl,
+    pathPrefix,                 // self-hosted engine: no v8.js-dos.com
+    backend: opts.backend,
+    backendLocked: true,
+    workerThread: opts.worker,
+    renderAspect: opts.aspect,
+    renderBackend: opts.render,
+    imageRendering: "pixelated",
+    kiosk: opts.kiosk,
+    autoStart: opts.autostart,
+    mouseCapture: opts.mouse,
+    autoSave: false,
+    theme: "dark",
+    lang: "en",
+    // Networking is only used for IPX; leave startIpxServer/connectIpxAddress
+    // unset so net.dos.zone and the Google STUN servers are never contacted.
+    onEvent: (event, arg) => {
+      log("dos-event", { event, arg: typeof arg === "boolean" ? arg : undefined });
+      if (event === "ci-ready") {
+        const ci = arg;
+        // Note: js-dos.js is a classic script that leaks about 460 minified
+        // top-level names onto window, one of them a function called ci()
+        // (it reads saved changes from OPFS; used while loading a bundle and
+        // by DosProps.getLocalChanges()). So window.ci is a function before
+        // this point, and after this assignment getLocalChanges() breaks.
+        // Wait for window.emuReady, not window.ci. window.emuCi is the same
+        // object under a name that does not clash.
+        window.ci = ci;
+        window.emuCi = ci;
+        window.emuReady = true;
+        const ev = ci.events();
+        ev.onFrameSize((w, h) => log("frame-size", { w, h }));
+        ev.onFrame(() => { window.emuFrames++; });
+        ev.onStdout((m) => log("stdout", { m }));
+        ev.onMessage((type, ...args) => log("message", { level: type, m: args.join(" ") }));
+        ev.onExit(() => log("exit"));
+      }
+    },
+  });
+
+  // Status line: frames per second (changed frames), audio state.
+  let lastFrames = 0;
+  setInterval(() => {
+    const fps = window.emuFrames - lastFrames;
+    lastFrames = window.emuFrames;
+    const a = window.audioProbe.level()[0];
+    statusEl.textContent = window.emuReady
+      ? `${opts.backend}/${opts.worker ? "worker" : "direct"}  ${window.emuCi.width()}x${window.emuCi.height()}` +
+        `  frames/s ${fps}  audio ${a ? `${a.state} rms ${a.rms.toFixed(3)}` : "none"}` +
+        `  isolated ${window.crossOriginIsolated}`
+      : "loading " + opts.bundle + " ...";
+  }, 1000);
+
+  window.emuStatus = () => ({
+    ready: !!window.emuReady,
+    frames: window.emuFrames,
+    width: window.emuCi?.width() ?? 0,
+    height: window.emuCi?.height() ?? 0,
+    soundFrequency: window.emuCi?.soundFrequency() ?? null,
+    crossOriginIsolated: window.crossOriginIsolated,
+    sharedArrayBuffer: typeof SharedArrayBuffer,
+    secureContext: window.isSecureContext,
+    audio: window.audioProbe.level(),
+    options: opts,
+  });
+})().catch((e) => {
+  (window.emuEvents = window.emuEvents || []).push({ t: performance.now(), type: "page-error", error: String(e) });
+  console.error(e);
+});
+</script>
+</body>
+</html>
