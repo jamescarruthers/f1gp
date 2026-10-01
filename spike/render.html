@@ -21,6 +21,9 @@
                           alone, or the new view (game framing) laid half
                           transparent over the original screen
     cars=1|0              draw cars (boxes for now)
+    source=memory|file    build the scene from the game's memory (all parts,
+                          the game's colours, sky and horizon image) or from
+                          the track file (road, kerbs and verges only)
 -->
 <style>
   :root { --bg: #f4f3ef; --fg: #1d1d1b; --muted: #6b6a66; --panel: #ffffff; --line: #d9d7d0; }
@@ -61,6 +64,7 @@ import { createReader } from './lib/f1gp-state.mjs';
 import { parseTrack, compileTrack, compilePitLane, CIRCUITS } from './lib/track-file.mjs';
 import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
+import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -71,6 +75,7 @@ const opts = {
   smooth: (q.get('smooth') ?? '1') !== '0',
   layout: q.get('layout') ?? 'side',
   cars: (q.get('cars') ?? '1') !== '0',
+  source: q.get('source') ?? 'memory',
 };
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
 if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
@@ -132,16 +137,31 @@ function loadCircuit(st) {
   const bytes = trackFiles[name];
   if (!bytes) { log('no-track-file', { name }); return; }
   const parsed = parseTrack(bytes);
-  const compiled = compileTrack(parsed).segs;
-  const segs = fromCompiled(compiled);
-  const pitSegs = fromCompiled(compilePitLane(parsed, compiled).segs);
-  const info = renderer.setTrack(segs, { track: parsed, pitSegs, surround: parsed.header.surrounding ? 'grey' : 'green' });
+  let info;
+  if (opts.source === 'memory') {
+    // everything the game built at track load, read from its memory
+    const scene = readScene(mem);
+    info = renderer.setScene(scene, { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 });
+  } else {
+    const compiled = compileTrack(parsed).segs;
+    const segs = fromCompiled(compiled);
+    const pitSegs = fromCompiled(compilePitLane(parsed, compiled).segs);
+    info = renderer.setTrack(segs, { track: parsed, pitSegs, surround: parsed.header.surrounding ? 'grey' : 'green' });
+  }
   circuit = c;
-  log('track', { circuit: c, name: CIRCUITS[c], segments: segs.length, ...info });
-  window.renderApp.track = { circuit: c, name: CIRCUITS[c], segments: segs.length };
+  log("track", { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts });
+  window.renderApp.track = { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts };
 }
 
+let loopErrors = 0, lastPaletteAt = 0;
 function frameLoop(now) {
+  try { frame(now); } catch (e) {
+    if (loopErrors++ < 5) { log('frame-error', { error: String(e?.stack ?? e) }); console.error(e); }
+  }
+  requestAnimationFrame(frameLoop);
+}
+
+function frame(now) {
   if (perf.last !== null) perf.raf.push(now - perf.last);
   perf.last = now;
   if (ci) blitScreen();
@@ -183,11 +203,12 @@ function frameLoop(now) {
       }
       renderer.setCars(cars);
     }
+    cam.noHorizonImage = horizonOff(mem);
+    if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
     renderer.draw(cam, { framing: opts.framing });
     perf.frames++;
   }
   perf.draw.push(performance.now() - t0);
-  requestAnimationFrame(frameLoop);
 }
 
 setInterval(() => {

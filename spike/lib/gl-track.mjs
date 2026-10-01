@@ -12,6 +12,7 @@
 // track so float32 keeps sub-unit precision.
 
 import { buildMesh } from './track-mesh.mjs';
+import { buildSceneMesh } from './scene.mjs';
 
 const VS = `#version 300 es
 precision highp float;
@@ -31,11 +32,16 @@ void main() {
   vColour = aColour;
 }`;
 
+// Colours are RGB, or (palette index, -1, 0) looked up in the live palette.
 const FS = `#version 300 es
 precision mediump float;
 in vec3 vColour;
+uniform sampler2D uPalette;
 out vec4 outColour;
-void main() { outColour = vec4(vColour, 1.0); }`;
+void main() {
+  if (vColour.y < 0.0) outColour = vec4(texture(uPalette, vec2((vColour.x + 0.5) / 256.0, 0.5)).rgb, 1.0);
+  else outColour = vec4(vColour, 1.0);
+}`;
 
 // Background: sky above the horizon row, ground below.
 const BG_VS = `#version 300 es
@@ -43,16 +49,36 @@ layout(location = 0) in vec2 aPos;
 out float vY;
 void main() { vY = aPos.y; gl_Position = vec4(aPos, 0.999, 1.0); }`;
 const BG_FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in float vY;
-uniform float uHorizonNdc;
-uniform vec3 uSkyTop, uSkyHorizon, uGround;
+uniform vec4 uView;      // horizon row, viewport rows, x scale (wide framing), yaw/32 (image columns)
+uniform vec2 uCanvas;    // canvas width, height in pixels (of the viewport)
+uniform vec3 uGround;
+uniform int uUseScene;   // 1: sky and horizon from the game's tables
+uniform int uImage;      // 1: draw the horizon image
+uniform sampler2D uSky;  // sky colours, one texel per 4 game rows above the sky base
+uniform sampler2D uHorizon; // 512 x 8 horizon image
+uniform float uSkyLen;
+uniform vec3 uSkyTop, uSkyHorizon;
 out vec4 outColour;
 void main() {
-  if (vY > uHorizonNdc) {
-    float t = clamp((vY - uHorizonNdc) / max(1.0 - uHorizonNdc, 0.001), 0.0, 1.0);
+  float row = (1.0 - vY) * 0.5 * uView.y;          // game viewport row from the top
+  float above = uView.x - row;                       // rows above the horizon row
+  if (above <= 0.0) { outColour = vec4(uGround, 1.0); return; }
+  if (uUseScene == 0) {
+    float t = clamp(above / uView.x, 0.0, 1.0);
     outColour = vec4(mix(uSkyHorizon, uSkyTop, t), 1.0);
-  } else outColour = vec4(uGround, 1.0);
+    return;
+  }
+  float xn = (gl_FragCoord.x / uCanvas.x) * 2.0 - 1.0;
+  float col = 160.0 + xn * 160.0 / uView.z;          // game screen column
+  if (uImage == 1 && above <= 8.0) {
+    vec2 uv = vec2((uView.w + col) / 512.0, (8.0 - above) / 8.0);
+    outColour = vec4(texture(uHorizon, uv).rgb, 1.0);
+    return;
+  }
+  float sky = above - (uImage == 1 ? 8.0 : 0.0);
+  outColour = vec4(texture(uSky, vec2(min(sky / 4.0, uSkyLen - 0.5) / uSkyLen, 0.5)).rgb, 1.0);
 }`;
 
 /** Colours (0-255 RGB) seen in the game's frames at Monza. */
@@ -94,8 +120,11 @@ export class TrackRenderer {
     this.canvas = canvas;
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
-    this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth'].map((n) => [n, gl.getUniformLocation(this.prog, n)]));
-    this.bgU = Object.fromEntries(['uHorizonNdc', 'uSkyTop', 'uSkyHorizon', 'uGround'].map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
+    this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette'].map((n) => [n, gl.getUniformLocation(this.prog, n)]));
+    this.paletteTex = gl.createTexture();
+    this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon']
+      .map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
+    this.sceneTex = null;
     this.bg = gl.createVertexArray();
     gl.bindVertexArray(this.bg);
     const bgBuf = gl.createBuffer();
@@ -142,6 +171,71 @@ export class TrackRenderer {
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
     this.track = { vao, count: verts.length / 6, polys: polys.length };
     return this.track;
+  }
+
+  /**
+   * The scene read from the game's memory (scene.mjs readScene): every part,
+   * the game's colours, sky and horizon image.
+   * @param {object} scene
+   * @param {object} [opt] { surroundRoad: true for grey surroundings (the track header's bit 7) }
+   */
+  setScene(scene, opt = {}) {
+    const gl = this.gl;
+    const mesh = buildSceneMesh(scene, { indexed: true });
+    this.scene = scene;
+    this.origin = [mesh.origin[0], mesh.origin[1], 0];
+    this.groundIndex = opt.surroundRoad ? scene.road : scene.grass;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    this.track = { vao, count: mesh.data.length / 6, parts: mesh.counts, ranges: mesh.ranges };
+    this.setPalette(scene.palette);
+    return this.track;
+  }
+
+  /**
+   * Use a new palette (RGB, 0-255, 768 bytes), e.g. read from the game every
+   * second: the game changes it for fades and for wet weather.
+   */
+  setPalette(pal) {
+    const gl = this.gl, scene = this.scene;
+    if (!scene) return;
+    if (this.lastPalette && this.lastPalette.every((v, i) => v === pal[i])) return;
+    this.lastPalette = Uint8Array.from(pal);
+    const rgb = (i) => [pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]];
+    this.ground = rgb(this.groundIndex);
+    const palPx = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) palPx.set([pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2], 255], i * 4);
+    gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, palPx);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    // sky: one texel per sky-table step (3 solid rows + 1 dithered row = 4 rows)
+    const steps = scene.tables.sky.map((e) => rgb(e.colour));
+    const skyPx = new Uint8Array(steps.length * 4);
+    steps.forEach((c, i) => skyPx.set([c[0], c[1], c[2], 255], i * 4));
+    const horizonPx = new Uint8Array(512 * 8 * 4);
+    for (let i = 0; i < 4096; i++) { const c = rgb(scene.horizon[i]); horizonPx.set([c[0], c[1], c[2], 255], i * 4); }
+    const tex = (w, h, px, wrapS, filter) => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      return t;
+    };
+    this.sceneTex = {
+      sky: tex(steps.length, 1, skyPx, gl.CLAMP_TO_EDGE, gl.LINEAR), skyLen: steps.length,
+      horizon: tex(512, 8, horizonPx, gl.REPEAT, gl.NEAREST),
+    };
   }
 
   /**
@@ -209,10 +303,19 @@ export class TrackRenderer {
 
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(this.bgProg);
-    gl.uniform1f(this.bgU.uHorizonNdc, cy);
+    gl.uniform4f(this.bgU.uView, cam.horizon, rows, xScale, (cam.heading >> 5) & 511);
+    gl.uniform2f(this.bgU.uCanvas, w, h);
+    gl.uniform3fv(this.bgU.uGround, this.ground.map((k) => k / 255));
     gl.uniform3fv(this.bgU.uSkyTop, COLOURS.skyTop.map((k) => k / 255));
     gl.uniform3fv(this.bgU.uSkyHorizon, COLOURS.skyHorizon.map((k) => k / 255));
-    gl.uniform3fv(this.bgU.uGround, this.ground.map((k) => k / 255));
+    const st = this.sceneTex;
+    gl.uniform1i(this.bgU.uUseScene, st ? 1 : 0);
+    gl.uniform1i(this.bgU.uImage, st && !cam.noHorizonImage ? 1 : 0);
+    if (st) {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, st.sky); gl.uniform1i(this.bgU.uSky, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, st.horizon); gl.uniform1i(this.bgU.uHorizon, 1);
+      gl.uniform1f(this.bgU.uSkyLen, st.skyLen);
+    }
     gl.bindVertexArray(this.bg);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
@@ -220,12 +323,27 @@ export class TrackRenderer {
     gl.enable(gl.DEPTH_TEST);
     gl.clear(gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.prog);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex); gl.uniform1i(this.u.uPalette, 0);
     gl.uniform3f(this.u.uCam, cam.x - o[0], cam.y - o[1], cam.z);
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
     gl.uniform4f(this.u.uProj, sx, sy, cy, 0);
     gl.uniform2f(this.u.uDepth, 64, 64 * 16 * 1200); // 1 ft to about 6 km
     gl.bindVertexArray(this.track.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, this.track.count);
+    const R = this.track.ranges;
+    if (R) {
+      // road, then the flat lines and markings on top of it (no depth writes,
+      // pulled forward), then the raised parts
+      gl.drawArrays(gl.TRIANGLES, R.ground.first, R.ground.count);
+      gl.depthMask(false);
+      gl.enable(gl.POLYGON_OFFSET_FILL);
+      gl.polygonOffset(-2, -4);
+      gl.depthFunc(gl.LEQUAL);
+      gl.drawArrays(gl.TRIANGLES, R.decals.first, R.decals.count);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
+      gl.depthMask(true);
+      gl.depthFunc(gl.LESS);
+      gl.drawArrays(gl.TRIANGLES, R.raised.first, R.raised.count);
+    } else gl.drawArrays(gl.TRIANGLES, 0, this.track.count);
     if (this.cars.count) {
       gl.bindVertexArray(this.cars.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.cars.count);

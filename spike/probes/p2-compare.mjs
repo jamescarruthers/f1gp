@@ -8,28 +8,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 import { parseTrack, compileTrack } from '../lib/track-file.mjs';
 import { fromCompiled, fromMemory, buildMesh } from '../lib/track-mesh.mjs';
 import { cameraFromState, render, CLASS } from '../lib/soft-render.mjs';
+import { decodePng } from '../lib/png.mjs';
 
 const require = createRequire(import.meta.url);
 const { encodePng } = require('../lib/node-emu.cjs');
 
-export function decodePng(buf) {
-  const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
-  const idat = [];
-  for (let p = 8; p < buf.length;) {
-    const len = buf.readUInt32BE(p), type = buf.toString('ascii', p + 4, p + 8);
-    if (type === 'IDAT') idat.push(buf.subarray(p + 8, p + 8 + len));
-    p += 12 + len;
-  }
-  const raw = zlib.inflateSync(Buffer.concat(idat));
-  const data = new Uint8Array(w * h * 4);
-  for (let y = 0; y < h; y++) raw.copy(data, y * w * 4, y * (w * 4 + 1) + 1, (y + 1) * (w * 4 + 1));
-  return { width: w, height: h, data };
-}
 
 const PALETTE = { 1: [120, 170, 255], 2: [40, 140, 40], 3: [90, 90, 100], 4: [200, 200, 60], 5: [230, 30, 30], 6: [255, 255, 255] };
 

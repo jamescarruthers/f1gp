@@ -35,7 +35,7 @@ try {
   await route.toTrack(driver, { mode: 'quickrace', log });
   summary.autopilot = await page.evaluate(installAutopilot);
   const tap = (code) => page.evaluate(async (c) => { window.ci.sendKeyEvent(c, true); await new Promise((r) => setTimeout(r, 120)); window.ci.sendKeyEvent(c, false); }, code);
-  const plan = [
+  const plan = opt('short', '0') === '1' ? [{ at: 4, view: 'cockpit' }, { at: 8, key: KEYS.pagedown, view: 'chase' }, { at: 14, key: KEYS.left, view: 'tv' }] : [
     { at: 6, view: 'cockpit' }, { at: 14, key: KEYS.pagedown, view: 'chase' }, { at: 22, view: 'chase' },
     { at: 30, key: KEYS.left, view: 'tv' }, { at: 38, view: 'tv' }, { at: 46, key: KEYS.delete, view: 'reverse' },
     { at: 54, key: KEYS.right, view: 'cockpit' }, { at: 62, view: 'cockpit' },
@@ -52,6 +52,7 @@ try {
     log(name, JSON.stringify(info));
   }
   summary.events = await page.evaluate(() => window.emuEvents);
+  summary.pageErrors = emu.pageErrors;
 } catch (e) {
   summary.error = String(e?.stack ?? e);
   log('error', summary.error);

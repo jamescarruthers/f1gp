@@ -132,3 +132,50 @@ export function projectPoint(cam, p) {
   const v = toCamera(cam, p);
   return v[1] < NEAR ? null : project(cam, v);
 }
+
+/**
+ * Render coloured triangles (from scene.mjs buildSceneMesh) into an RGBA
+ * buffer at the game's resolution, far to near, over a background.
+ * @param {Float32Array} data   x, y, z, r, g, b per vertex (x/y fine units relative to origin)
+ * @param {number[]} origin     [x, y] fine units
+ * @param {object} cam          from cameraFromState()
+ * @param {object} [opt]        { background(x, y) -> [r, g, b] (0-255), width, height }
+ * @returns {Uint8Array} RGBA; alpha 255 where a triangle was drawn, 128 for background
+ */
+export function renderMesh(data, origin, cam, opt = {}) {
+  const width = opt.width ?? 320, height = opt.height ?? 200;
+  const rgba = new Uint8Array(width * height * 4);
+  const y0 = cam.top, y1 = cam.top + cam.rows;
+  for (let y = y0; y < y1; y++) for (let x = 0; x < width; x++) {
+    const c = opt.background ? opt.background(x, y) : [0, 0, 0];
+    rgba.set([c[0], c[1], c[2], 128], (y * width + x) * 4);
+  }
+  const tris = [];
+  for (let i = 0; i < data.length; i += 18) {
+    const cs = [];
+    let far = -Infinity, near = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const o = i + 6 * k;
+      const v = toCamera(cam, [data[o] + origin[0], data[o + 1] + origin[1], data[o + 2]]);
+      cs.push(v);
+      if (v[1] > far) far = v[1];
+      if (v[1] < near) near = v[1];
+    }
+    if (far < NEAR || near > (opt.maxDepth ?? 60000)) continue;
+    // painter's key: mean depth; raised parts (kerbs, fences) drawn after flat ones at the same depth
+    const mean = (cs[0][1] + cs[1][1] + cs[2][1]) / 3;
+    tris.push({ cs, key: mean, col: [data[i + 3] * 255, data[i + 4] * 255, data[i + 5] * 255] });
+  }
+  tris.sort((a, b) => b.key - a.key);
+  const ids = new Uint32Array(width * height);
+  tris.forEach((t, k) => {
+    const clipped = clipNear(t.cs);
+    if (clipped.length >= 3) fill(ids, width, y0, y1, clipped.map((v) => project(cam, v)), k + 1);
+  });
+  for (let p = 0; p < ids.length; p++) {
+    if (!ids[p]) continue;
+    const c = tris[ids[p] - 1].col, o = p * 4;
+    rgba[o] = c[0]; rgba[o + 1] = c[1]; rgba[o + 2] = c[2]; rgba[o + 3] = 255;
+  }
+  return rgba;
+}
