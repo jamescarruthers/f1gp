@@ -924,6 +924,8 @@ stored code of those segments is 3, grey).
 - The mirrors are drawn by the scene renderer itself (0F47:8A09–8B9E, then
   19E8 in mirror mode). They show **cars only**, no track and no objects, over
   a fixed backdrop (sky and grey ground) that is part of the cockpit image.
+  The sky step copies the backdrop into the back buffer each frame in the
+  cockpit view (0F47:72E4 calls 19ED:3AFA; see "Replacing the renderer").
   A listed car whose reference point is nearer than R:0058 (3.25 ft) or behind
   the camera goes to a mirror:
   ```
@@ -1024,6 +1026,76 @@ floating-point instead of the game's integer arithmetic −1 to −1.5 (polygon)
   against frames (the pit-lane scene is missing).
 - What makes car+97 bit 80h (the mechanic behind the car) in play (0:8D62);
   the meaning of car+9A bits 01h and 02h (02h is set on the player's car).
-- Where the mirror backdrop is restored each frame.
 - Other circuits and frame rates: all car frames are from Monza at 15 fps;
   DS:2225 and DS:0156 depend on the frame-rate setting and must be read.
+
+## Replacing the renderer (one screen)
+
+This section covers what the one-screen page (`spike/lib/overlay.mjs`)
+relies on: how the game's frame reaches the screen, and which parts of the
+scene renderer are 2D drawing that must stay when its 3D drawing goes.
+
+### The copy to the screen (19ED:31FA)
+
+The main loop calls 19ED:31FA after the renderer. It copies the back buffer
+(far pointer DS:04BC; the 2D routines below write through DS:04B8, which
+pointed at the same buffer in our runs)
+to A000:0000, by view (DS:0981):
+
+- Outside views (DS:0981 ≠ 0): rows 0–179 (7080h words), all of them.
+- Cockpit (0): rows 0–102 and 64 pixels of row 103 (4060h words); then, for
+  rows 103–163 (table SS:6364, a row's screen offset, 0 = none), the two spans
+  [SS:6364+1F2h, +A6h) and [+14Ch, +298h) of the row, the gaps between the
+  cockpit's sides where the road shows; then, for rows 116–137, the spans
+  [0, +A6h) and [+14Ch, 320), the mirrors with their housings.
+
+Everything else on screen in the cockpit (the cockpit image, the dash) is
+drawn once and updated in place on the screen; it never passes through the
+back buffer. SC.
+
+### 2D parts of the renderer
+
+| Routine | Called from | Draws | Evidence |
+| --- | --- | --- | --- |
+| 19ED:008C | between the renderer's steps (4 times) | nothing: calls the sound driver (8B6E:0000, AX = 7) when SS:08DA ≠ 0 | SC |
+| 19ED:3AFA | the sky step, 0F47:72E4, cockpit only | the mirror backdrop: 22 rows (116–137) of 48 bytes at columns 0 and 272, from the cockpit image (far pointer DS:8783, +1400h) | SC; DT (without it the mirrors and their housings are gone) |
+| 19ED:3B46 | the draw step's end, 0F47:8145, when DS:0981 is 0 or A0h and DS:2923 ≠ 0 | the start lights, from the cockpit image (+14E0h) to the back buffer (+0AE0h, row 8, column 224); DS:290D (1–6) is the light state | SC; DT (red then green with the fill in place) |
+| 19ED:3C1A | the draw step's end, 0F47:8151, cockpit only | two 5×4 cockpit patches at row 140, columns 25 and 290 | SC |
+| 0F47:A944 | the draw step's end, 0F47:8161, cockpit, when the viewed car's +97 has bit 40h | pit-stop images (bitmaps 19E8 with ids AAh, ABh, ...), by car+97 bits 08h, 10h, 20h; otherwise DS:2919–291D = 8000h | SC |
+
+The draw step's end (0F47:812B–8179) runs all of the last three and ends
+with `pop ds; ret`; 0F47:802A pushes DS for it at 8041.
+
+### The replacement
+
+`sceneRoutine()` writes 82 bytes over 0F47:81CE (the routine is only entered
+there) and keeps the original bytes to put back. The replacement:
+
+1. saves DS, ES and the general registers and counts its calls (a word after
+   its code; the page uses it to see the game drawing a race view);
+2. fills from R:001C (R = SS:00F4; the 3D view's first pixel) with the marker
+   colour: 180 rows in the cockpit (the renderer draws below row 103 too,
+   seen through the cockpit's gaps), 164 rows in the outside views;
+3. makes the four sound-driver calls;
+4. in the cockpit, calls 19ED:3AFA (mirror backdrop);
+5. pushes DS and jumps to 0F47:812B (start lights, cockpit patches, pit-stop
+   images), which returns to it.
+
+Of the renderer's steps (section 1) only the end of step 10 runs; the others,
+the pit-box colours of step 1 among them, are skipped. `install()` checks the first bytes at every address
+it writes or calls and refuses on a different gp.exe.
+
+The marker is one of 10h–1Fh (grass and road shades) whose RGB no other
+palette entry has, 17h first. In Monza races none of 10h–1Fh appears in the
+cockpit, the dash or the messages. The game fades its palette in and out
+through the DAC (race start, leaving the circuit), so the page takes the
+marker's colour from the frame (the colour covering at least half of the 3D
+view) and dims its own view by the same factor.
+
+The cars in the mirrors come from the car step, which the fill replaces; the
+page draws them on the game's frame with `mirrorImage` and the game's bitmap
+scaler (`drawSprite` in objects.mjs, 0F47:19E8), clipped to the glass
+(`mirrorClip`). DT (`spike/probes/p3-overlay.mjs`, Monza Quick Race): with the
+fill in place the cockpit shows its mirrors, housings and start lights; the
+pause screen stops the routine (0 calls) while the session continues; the
+Esc menu ends the session.

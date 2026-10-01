@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>F1GP Track Renderer</title>
 <!--
-  Phase 2 test page: the game runs in js-dos direct mode; the page reads its
-  state every animation frame and draws the track with WebGL from the game's
-  camera, at the canvas's full resolution, next to the original screen.
+  The game runs in js-dos direct mode; the page reads its state every
+  animation frame and draws the 3D view with WebGL from the game's camera, at
+  the canvas's full resolution. By default it shows one screen: the game's
+  own screen in the menus, and in the car our view with the game's cockpit,
+  dash, mirrors and messages laid over it.
 
     cd spike && node serve.mjs --port 8080
     http://127.0.0.1:8080/render.html?bundle=dist/p2-render-25000.jsdos
@@ -18,9 +20,18 @@
     framing=wide|original wide keeps the game's vertical scale and shows more
                           at the sides; original matches the game's framing
     smooth=1|0            ease between game frames (one game frame behind)
-    layout=side|gl|overlay  original screen beside the new view, the new view
-                          alone, or the new view (game framing) laid half
-                          transparent over the original screen
+    layout=single|side|gl|overlay  single (default): one screen, the game's screen
+                          in menus and our 3D view when you are in the car, with
+                          the game's cockpit, dash and messages laid over it;
+                          side: the original screen beside the new view; gl: the
+                          new view alone; overlay: the new view (game framing)
+                          laid half transparent over the original screen
+    screen=new|original   new (default in the single layout): the game's own 3D
+                          drawing is replaced by a fill (lib/overlay.mjs; the game
+                          still draws its mirror backdrop and start lights, the page
+                          the cars in the mirrors) and our view shows instead;
+                          original (default in the others): the game draws its 3D
+                          as it always did. Also a menu.
     cars=1|0              draw the cars as the game does (boxes with source=file)
     objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
     style=modern|classic  modern: every car as a 3D model at any distance, 3D wheels
@@ -68,10 +79,21 @@
   #overgl { display: none; position: absolute; left: 8px; top: 8px; opacity: 0.5; pointer-events: none; image-rendering: pixelated; }
   body.overlay #overgl { display: block; }
   @media (max-width: 700px) { #screen { width: 100%; } main { padding: 0 16px 16px; } }
+  /* one screen */
+  body.single main { display: block; padding: 0 16px 12px; }
+  #stage { position: relative; width: 100%; height: calc(100vh - 72px); min-height: 240px; background: #000; overflow: hidden; border-radius: 6px; }
+  #stage canvas { position: absolute; top: 0; height: 100%; display: block; image-rendering: pixelated; }
+  #stage #screen, #stage #hud { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
+  #stage #gl { left: 0; width: 100%; aspect-ratio: auto; image-rendering: auto; }
+  body.classic #stage #gl { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
+  #stage #hud { pointer-events: none; }
+  #stage [hidden] { display: none; }
+  body.single #perf { margin: 6px 0 0; }
 </style>
 </head>
 <body>
 <header><h1>F1GP track renderer</h1>
+  <label>Screen <select id="screenmode"><option value="new">New view</option><option value="original">Original game</option></select></label>
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
   <span id="status">loading...</span><span id="notice"></span></header>
 <main>
@@ -90,6 +112,7 @@ import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
 import { manualHelper } from './lib/manual.mjs';
+import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -98,7 +121,9 @@ const opts = {
   bundle: q.get('bundle') ?? 'dist/f1gp.jsdos',
   framing: q.get('framing') ?? 'wide',
   smooth: (q.get('smooth') ?? '1') !== '0',
-  layout: q.get('layout') ?? 'side',
+  layout: q.get('layout') ?? 'single',
+  // the single layout swaps to our view; the comparison layouts keep the game's drawing unless asked
+  screen: q.get('screen') ?? ((q.get('layout') ?? 'single') === 'single' ? 'new' : 'original'),
   cars: (q.get('cars') ?? '1') !== '0',
   source: q.get('source') ?? 'memory',
   objects: (q.get('objects') ?? '1') !== '0',
@@ -113,6 +138,7 @@ function applyStyle(style) {
   opts.style = style;
   opts.haze = opts.hazeParam ?? (style === 'classic' ? 'classic' : 'smooth');
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
+  document.body.classList.toggle('classic', style === 'classic');
 }
 applyStyle(opts.style);
 {
@@ -127,6 +153,32 @@ applyStyle(opts.style);
   });
 }
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
+if (opts.layout === 'single') {
+  // one stage: the game's screen, our view and the game's screen as an overlay, in one box
+  document.body.classList.add('single');
+  const stage = document.createElement('div');
+  stage.id = 'stage';
+  const hudCanvas = document.createElement('canvas');
+  hudCanvas.id = 'hud'; hudCanvas.width = 320; hudCanvas.height = 200; hudCanvas.hidden = true;
+  const gl = $('gl'), scr = $('screen'), perfEl = $('perf');
+  document.querySelector('main').prepend(stage);
+  stage.append(gl, hudCanvas, scr);
+  gl.hidden = true;
+  stage.after(perfEl);
+  document.querySelector('.origpane').remove();
+  document.querySelector('.glpane').remove();
+}
+{
+  const sel = $('screenmode');
+  sel.value = opts.screen;
+  sel.addEventListener('change', () => {
+    opts.screen = sel.value;
+    const u = new URL(location.href);
+    u.searchParams.set('screen', sel.value);
+    history.replaceState(null, '', u);
+    sel.blur();
+  });
+}
 if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
 const events = window.emuEvents = [];
 const log = (type, extra = {}) => events.push({ t: Math.round(performance.now()), type, ...extra });
@@ -149,7 +201,8 @@ const CODE_TO_KEY = (() => {
 // ------------------------------------------------------------ original screen
 const screen = $('screen'), g = screen.getContext('2d');
 let image = g.createImageData(320, 200), pending = null;
-function blitScreen() {
+let hud = null; // { ctx, image } of the overlay canvas (single layout)
+function blitScreen(hudView) {
   if (!pending) return;
   const src = pending; pending = null;
   const w = ci.width(), h = ci.height();
@@ -158,6 +211,21 @@ function blitScreen() {
   if (src.length === dst.length) dst.set(src);
   else for (let i = 0, j = 0; j < dst.length;) { dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = 255; }
   g.putImageData(image, 0, 0);
+  // the game's cockpit, dash and messages over our view: its screen with the marker see-through
+  if (hudView && w === 320 && h === 200) {
+    if (!hud) { const c = $('hud').getContext('2d'); hud = { ctx: c, image: c.createImageData(320, 200) }; }
+    // the marker as shown (the game fades the screen in and out), and our view faded to match
+    const shown = shownMarker(src, hudView.marker, hudView);
+    keyFrame(src, hud.image.data, shown.rgb, hudView);
+    const filter = shown.brightness < 0.99 ? `brightness(${shown.brightness.toFixed(3)})` : '';
+    if (glCanvas.style.filter !== filter) glCanvas.style.filter = filter;
+    // the cars in the cockpit mirrors: the game draws them in the step the fill replaces
+    if (hudView.cockpit && carData && mirrorCars.length) {
+      const pal = shown.brightness < 0.99 ? hudView.palette.map((v) => Math.round(v * shown.brightness)) : hudView.palette;
+      paintMirrors(hud.image.data, mirrorCars, carData, pal);
+    }
+    hud.ctx.putImageData(hud.image, 0, 0);
+  }
 }
 
 // ------------------------------------------------------------ new view
@@ -178,6 +246,10 @@ const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
 let prev = null, cur = null; // last two kept frames: { st, cam, at, cars }
 let carData = null;           // readCars(mem) for the circuit (source=memory)
+let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
+let swapped = false;          // single layout: our view is showing
+let mirrorCars = [];          // frameCars().mirrors of the last drawn frame (cockpit)
+const routineSeen = { calls: -1, at: -1e9 }; // when the routine's call counter last moved
 const perf = { raf: [], draw: [], frames: 0, kept: 0, last: null };
 
 const teamColour = (car) => (car.isPlayer ? [255, 120, 20] : [235, 235, 235]);
@@ -208,6 +280,7 @@ function loadCircuit(st) {
     info = renderer.setTrack(segs, { track: parsed, pitSegs, surround: parsed.header.surrounding ? 'grey' : 'green' });
   }
   circuit = c;
+  if (routine) routine.setK(chooseMarker(readPalette(mem)));
   log("track", { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts });
   window.renderApp.track = { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts, objects: info.objects };
 }
@@ -223,7 +296,27 @@ function frameLoop(now) {
 function frame(now) {
   if (perf.last !== null) perf.raf.push(now - perf.last);
   perf.last = now;
-  if (ci) blitScreen();
+  // the game's own 3D drawing: replaced by the fill for the new view, put back for the original
+  if (mem && !routine) routine = sceneRoutine(mem, chooseMarker(readPalette(mem)));
+  if (routine) {
+    if (opts.screen === 'new' && !routine.installed) { if (routine.install()) log('game-3d-off', { marker: routine.k }); }
+    else if (opts.screen === 'original' && routine.installed) { routine.uninstall(); log('game-3d-on'); }
+  }
+  // the game draws a race view while the routine runs (it stops in pause, where the frame stays)
+  if (routine && routine.installed) { const c = routine.calls; if (c !== routineSeen.calls) { routineSeen.calls = c; routineSeen.at = now; } }
+  const drawing = !!routine && routine.installed && (now - routineSeen.at < 500 || (!!cur && cur.st.paused));
+  const swap = opts.layout === 'single' && opts.screen === 'new' && !!cur && drawing;
+  let hudView = null;
+  if (swap) {
+    const v = viewportFill(cur.st.view.mode), pal = readPalette(mem), k = routine.k;
+    hudView = { top: v.top, rows: v.rows, cockpit: cur.st.view.mode === 'cockpit', marker: [pal[k * 3], pal[k * 3 + 1], pal[k * 3 + 2]], palette: pal };
+  }
+  if (ci) blitScreen(hudView);
+  if (opts.layout === 'single' && swap !== swapped) {
+    swapped = swap;
+    $('gl').hidden = !swap; $('hud').hidden = !swap; $('screen').hidden = swap;
+    log(swap ? 'swap-new-view' : 'swap-game-screen');
+  }
   sizeCanvas();
   if (mem) {
     const st = reader.read();
@@ -231,6 +324,7 @@ function frame(now) {
     if (st.inSession && st.track.lapSegments > 0) {
       if (st.session.circuit !== circuit) loadCircuit(st);
       if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
+        if (routine && routine.installed) routine.setView(viewportFill(st.view.mode));
         prev = cur;
         cur = { st, cam: cameraFromState(st), at: now, cars: null };
         // the cars' poses and the game's choice of cars, read at the same moment as st
@@ -244,7 +338,7 @@ function frame(now) {
   }
   const t0 = performance.now();
   const note = $('glnote');
-  if (note.hidden !== !!cur) note.hidden = !!cur;
+  if (note && note.hidden !== !!cur) note.hidden = !!cur;
   if (cur) {
     let cam = cur.cam, alpha = 1;
     const st = cur.st;
@@ -261,6 +355,7 @@ function frame(now) {
         { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : cur.cars.drawn, all: modern,
           modern, paletteRgb: renderer.lastPalette, wide: modern || opts.framing === 'wide' });
       renderer.setCarFrame(fc, carData);
+      mirrorCars = fc.mirrors;
     } else if (opts.cars) {
       const cars = [];
       for (let i = 0; i < st.cars.length; i++) {
@@ -281,10 +376,12 @@ function frame(now) {
     cam.noHorizonImage = horizonOff(mem);
     // the original framing: the canvas takes the shape of the game's 3D view (320 columns by
     // cam.rows rows of a 4:3 screen), so nothing is stretched
-    const shape = opts.framing === 'original' && opts.layout !== 'overlay' ? `320 / ${(cam.rows * 1.2).toFixed(1)}` : '';
+    const shape = opts.framing === 'original' && opts.layout !== 'overlay' && opts.layout !== 'single' ? `320 / ${(cam.rows * 1.2).toFixed(1)}` : '';
     if (glCanvas.style.aspectRatio !== shape) glCanvas.style.aspectRatio = shape;
     if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
-    renderer.draw(cam, { framing: opts.framing, haze: opts.haze, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+    if (opts.layout !== 'single' || swapped) {
+      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+    }
     perf.frames++;
   }
   perf.draw.push(performance.now() - t0);

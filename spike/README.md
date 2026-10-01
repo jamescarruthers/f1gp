@@ -40,7 +40,8 @@ node build-bundle.mjs --autoexec "gp /g" --out dist/route-g-25000.jsdos
 | `lib/browser-emu.mjs` | Starts `serve.mjs` and headless Chromium, opens a test page, and returns a driver for `route.cjs`. |
 | `serve.mjs` | Local static server on 127.0.0.1; `--isolate` adds COOP/COEP headers. |
 | `index.html` | Test page using the js-dos `Dos()` player (the site's landing page is `site/index.html`). |
-| `render.html` | The new view: the game beside (or under) our WebGL renderer, `style=modern|classic`. |
+| `render.html` | The new view: one screen, our WebGL view with the game's cockpit, dash and messages over it (`layout=side` puts the game beside it), `style=modern|classic`. |
+| `lib/overlay.mjs` | Replaces the game's 3D drawing with a fill, so the page can lay the game's screen over its own view. |
 | `lib/cars.mjs` | The cars as the game draws them (classic), or as 3D models with 3D wheels and helmets (modern). |
 | `lib/audio.mjs` | Sound for the direct-mode pages (an AudioWorklet fed by the emulator). |
 | `build-site.mjs` | Builds the GitHub Pages site. |
