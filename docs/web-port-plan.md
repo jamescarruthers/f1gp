@@ -187,6 +187,29 @@ Done when: for every one of the 16 circuits, our track lines up with the
 game's frame to within a pixel or two at 320×200, at several points round
 the lap.
 
+Progress:
+
+- **The track's shape: done.** 778 paused reference frames on all 16
+  circuits (cockpit, chase and TV views; standing and moving; texture on and
+  off), each with the exact game state (`spike/probes/p2-capture.cjs`).
+  Projected from the game's camera, the track edges land on the game's road
+  edges with a median error of 0–0.3 px on every circuit, and 97% of edge
+  samples within 2 px (`spike/tests/p2-alignment.test.mjs`). Two TV frames
+  on hills (Imola, Magny-Cours) are 4–5 px off near the camera; the cause is
+  not known yet.
+- **What the game draws for the track is decoded** (`docs/renderer-notes.md`):
+  road edges, white lines, kerbs with their stripes and end ramps, fences,
+  road markings, colours, sky and horizon image. 3,657 of 3,664 points the
+  game projected were reproduced exactly.
+- **The WebGL view draws all of it from the game's memory**
+  (`spike/lib/scene.mjs`, `spike/render.html`), with the game's live palette,
+  at any resolution, in widescreen, with every part drawn at every distance.
+- **While the car moves, the screen shows the frame before the one the
+  state reader calls current.** Tests that compare moving frames must use
+  the previous frame's camera.
+- **In progress:** trackside objects (stands, buildings, trees, signs). Their
+  shape format is only partly decoded; cars use the same machinery.
+
 Main risk: the scenery. How the game builds walls, fences, verges and
 buildings from the track file's commands and objects is only partly
 documented. If comparison alone does not settle it, we must read the game's
