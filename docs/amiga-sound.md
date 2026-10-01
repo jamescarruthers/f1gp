@@ -1,9 +1,9 @@
-# Amiga sound: title tune and engine
+# Amiga sound: title tune, engine and effects
 
 How the Amiga version of *Formula One Grand Prix* (MicroProse, four disks,
-`original/amiga/`) makes its title tune and engine sound, and how they compare
-with the DOS version's AdLib sound. The tools are in `spike/amiga/`; recordings
-are not kept in the repository.
+`original/amiga/`) makes its title tune, engine and race effects, and how they
+compare with the DOS version's AdLib sound. The tools are in `spike/amiga/`;
+recordings are not kept in the repository.
 
 ## The disks
 
@@ -62,6 +62,28 @@ interrupt stops after one pass.
   value has the same scale as the DOS one (car+62); both are rpm by their
   ranges, and the two engines' harmonics line up at equal revs.
 
+## Race effects (f1gp)
+
+All nine effects in the table at 9D79Ah. The player at 8084C starts one when
+the race code writes its number to 808E0h. "Code" means the code that plays
+it makes its purpose plain; "likely" is inferred from the code around it and
+the sound's shape. Period 300 is 11.8 kHz (3,546,895 Hz / period).
+
+| # | Sample | Bytes | Period | Vol | Channel | Sound |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 891C8h | 12,730 | 300 | 16 | 3 | Pit stop: the wheel guns (likely; the pit timers 4A764h/4A768h) |
+| 1 | 82A62h | 15,248 | 300 | 48 | 3 | A car passing close and fast, pitch from its speed (code, 9D940h) |
+| 2 | 916A8h | 13,300 | 300 | 64 | 3 | Collision: two cars touching, one of them the car in view (likely) |
+| 3 | 866F2h | 10,710 | 300 | 48 | 2 | Passing car, second variant picked at random (code, 9D940h) |
+| 4 | 94B9Ch | 14,678 | 300 | 48 | 2 | Unknown: a slow, low swell; no code found that plays it |
+| 5 | 80A46h | 7,964 | 350 | 64 | 1 or 3 | Kerb or verge rumble, on the side that hit it (likely) |
+| 6 | 8C482h | 7,942 | 300 | 48 | 1 | Tyres (code, above) |
+| 7 | 8E488h | 12,576 | 300 | 64 | 1 | Pit stop: the car dropped off its jacks, not in TV views (likely) |
+| 8 | 984F2h | 21,160 | 300 | 40 | 0 | Engine, looped (code, above) |
+
+`spike/amiga/effects.py` lists the table, renders each effect once through
+the A500 filters and measures it (attack, decay, spectral centroid).
+
 ## DOS (AdLib) for comparison
 
 - **Sound devices.** AdLib (`a*.bin`), Roland MT-32 (`r*.bin`) and PC speaker
@@ -88,3 +110,5 @@ own Amiga disks in the browser:
 - **Engine:** loop the engine sample in WebAudio, with its playback rate set
   each 1/50 s from the DOS game's revs by the rule above, and silence the AdLib
   engine.
+- **Effects:** trigger the table's samples from game state the page already
+  reads (slip, nearby cars and their speeds, contact, kerbs, pit stops).
