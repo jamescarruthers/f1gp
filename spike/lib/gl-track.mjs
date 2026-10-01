@@ -28,6 +28,7 @@ uniform vec2 uDepth;    // near, far
 out vec3 vColour;
 out float vDepth;
 out vec2 vUv;
+out vec3 vWorld;
 void main() {
   vec3 d = aPos - uCam;
   float lat = d.x * uSinCos.y - d.y * uSinCos.x;
@@ -37,6 +38,7 @@ void main() {
   vColour = aColour;
   vDepth = depth;
   vUv = aUv;
+  vWorld = aPos;
 }`;
 
 // The ground texture (the game's T option, 0F47:7F64): the road and the grass
@@ -93,25 +95,41 @@ vec3 hazeColour(sampler2D pal, int idx, float level) {
 // Colours are RGB, or (palette index, -1, haze) looked up in the live palette,
 // where haze is 0 (none: road, grass), 1 (track parts) or 2 + n (object n).
 // In races the game fills colour 1Bh (the stands) with a crowd: pixels copied
-// from a strip, each screen row starting at its own offset (0F47:142A). We do
-// the same per game pixel, so the crowd has the original's grain.
+// from a strip, each screen row starting at its own offset (0F47:142A). The
+// game does it in screen space, so the crowd stays put on the screen while the
+// stands move under it. Mode 2 (default) lays the same strip and row offsets on
+// the stand itself: columns along the face, rows up it, a crowd texel about
+// half a foot wide. Where texels get smaller than a pixel, they double in size
+// step by step, along the face and up it separately (a stand seen at a slant
+// shrinks along the face only), blending between steps, so a far crowd is
+// still a speckle of people rather than a shimmer; uCrowdSharp keeps every texel.
+// Mode 1 keeps the game's screen-space crowd.
 const FS = `#version 300 es
 precision highp float;
 in vec3 vColour;
 in float vDepth;
 in vec2 vUv;
+in vec3 vWorld;
 uniform sampler2D uPalette;
 uniform int uRoadIdx;
+uniform int uCrowdSharp;       // 1: every texel at any distance (classic)
 uniform sampler2D uCrowd;      // R8, 512 x 1: the crowd strip (palette indices)
 uniform sampler2D uCrowdRows;  // R8, 64 x 1: each row's start offset
 uniform vec2 uCell;            // canvas pixels per game pixel
-uniform int uCrowdOn;
+uniform int uCrowdOn;           // 0 off, 1 screen space (the game's), 2 on the stands
 uniform sampler2D uObjects;    // RGBA32F, 256 wide: each object's centre x, y and size (fine units)
 uniform vec3 uCam;
 uniform vec2 uSinCos;
 out vec4 outColour;
 ${HAZE}
 ${GROUND_TEXTURE}
+// the crowd strip at texel (uv / 2^lod), each row from its own start offset; each
+// step takes rows further on in the table, so a coarser step is not a copy of the finer one
+int crowdAt(vec2 uv, vec2 lod) {
+  ivec2 c = ivec2(floor(uv / exp2(lod)));
+  int r = int(texelFetch(uCrowdRows, ivec2((c.y + int(lod.x + lod.y) * 17) & 63, 0), 0).r * 255.0 + 0.5);
+  return int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
+}
 void main() {
   if (vColour.y < 0.0) {
     int idx = int(vColour.x + 0.5);
@@ -120,10 +138,25 @@ void main() {
       outColour = vec4(groundShade(uPalette, idx, texture(uNoise, vUv / vec2(32.0, 8.0)).r, -2, 1), 1.0);
       return;
     }
+    int idx2 = -1; float blend = 0.0;  // a second crowd texel to blend in (mode 2, far away)
     if (uCrowdOn == 1 && idx == 27) {
       ivec2 c = ivec2(floor(gl_FragCoord.xy / uCell));
       int r = int(texelFetch(uCrowdRows, ivec2(c.y & 63, 0), 0).r * 255.0 + 0.5);
       idx = int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
+    } else if (uCrowdOn == 2 && idx == 27) {
+      // the stand's face from the position's derivatives: an axis along it (level) and one up it
+      vec3 n = cross(dFdx(vWorld), dFdy(vWorld));
+      vec2 th = vec2(-n.y, n.x);
+      vec3 t = dot(th, th) > 1e-6 ? vec3(normalize(th), 0.0) : vec3(1.0, 0.0, 0.0);
+      vec3 b = normalize(cross(n, t));
+      if (b.z < 0.0) b = -b;
+      vec2 uv = vec2(dot(vWorld, t), dot(vWorld, b)) / vec2(32.0, 40.0); // 0.5 ft by 0.625 ft
+      vec2 lod = uCrowdSharp == 1 ? vec2(0.0) : max(log2(fwidth(uv)) + 0.5, vec2(0.0));
+      vec2 l0 = floor(lod), f = lod - l0;
+      idx = crowdAt(uv, l0);
+      // blend towards the next step on the axis nearer to it
+      blend = max(f.x, f.y);
+      if (blend > 0.0) idx2 = crowdAt(uv, l0 + (f.x >= f.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0)));
     }
     int cls = int(vColour.z + 0.5);
     float level = 0.0;
@@ -133,7 +166,9 @@ void main() {
       vec2 d = o.xy - uCam.xy;
       level = objectHaze(max(d.x * uSinCos.x + d.y * uSinCos.y, o.z) / 8.0);
     }
-    outColour = vec4(hazeColour(uPalette, idx, level), 1.0);
+    vec3 colour = hazeColour(uPalette, idx, level);
+    if (idx2 >= 0) colour = mix(colour, hazeColour(uPalette, idx2, level), blend);
+    outColour = vec4(colour, 1.0);
   } else outColour = vec4(vColour, 1.0);
 }`;
 
@@ -278,7 +313,7 @@ export class TrackRenderer {
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
     this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn',
-      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx']
+      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp']
       .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
@@ -662,7 +697,9 @@ export class TrackRenderer {
    * @param {object} cam  { x, y (fine), z, heading, horizon (row), rows (viewport rows), top (first screen row) }
    * @param {object} [opt] { framing: 'original'|'wide'|'screen'|'stage', haze: 'off' (default) | 'classic' (the
    *   game's steps) | 'smooth', texture: 'off' (default) | 'classic' (the game's shades) | 'smooth' (the
-   *   ground texture, with setScene), pitLane: true when the camera is in the pit lane }
+   *   ground texture, with setScene), crowd: 'stands' (default: on the stands, coarser texels far
+   *   away) | 'sharp' (on the stands, every texel) | 'screen' (the game's, fixed to the screen),
+   *   pitLane: true when the camera is in the pit lane }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
@@ -739,7 +776,8 @@ export class TrackRenderer {
     if (O && O.crowdTex) {
       gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, O.crowdTex); gl.uniform1i(this.u.uCrowd, 3);
       gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, O.crowdRowsTex); gl.uniform1i(this.u.uCrowdRows, 4);
-      gl.uniform1i(this.u.uCrowdOn, 1);
+      gl.uniform1i(this.u.uCrowdOn, opt.crowd === 'screen' ? 1 : 2);
+      gl.uniform1i(this.u.uCrowdSharp, opt.crowd === 'sharp' ? 1 : 0);
     } else {
       // the samplers still need valid units
       gl.uniform1i(this.u.uCrowd, 0); gl.uniform1i(this.u.uCrowdRows, 0);
