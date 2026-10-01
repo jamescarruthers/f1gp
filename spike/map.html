@@ -19,6 +19,8 @@
   Query options (all optional):
     bundle=dist/f1gp.jsdos           bundle URL, relative to this page (default)
     audio=own|off                    own: our AudioWorklet (as raw.html); off: no sound
+    manual=auto|off                  auto: take the player through the manual check and
+                                     the joystick question (lib/manual.mjs)
     map=1|0                          read the state and draw the map (0 = game only)
     smooth=1|0                       interpolate cars between game frames
     trails=0|1, trailSeconds=10      car trails
@@ -155,6 +157,7 @@
 <script type="module">
 import { attach } from './lib/f1gp-mem.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
+import { manualHelper } from './lib/manual.mjs';
 import { createReader, readTrack } from './lib/f1gp-state.mjs';
 import { parseTrack, trackOutline, CIRCUITS } from './lib/track-file.mjs';
 import { MapView, CarTable, outlineFromTrackFile, outlineFromMemory, compareOutlines, snapState, tableRows } from './lib/map-view.mjs';
@@ -192,6 +195,7 @@ const q = new URLSearchParams(location.search);
 const opts = {
   bundle: q.get("bundle") ?? "dist/f1gp.jsdos",
   audio: q.get("audio") ?? "own",
+  manual: q.get("manual") ?? "auto",
   map: (q.get("map") ?? "1") !== "0",
   smooth: (q.get("smooth") ?? "1") !== "0",
   trails: q.get("trails") === "1",
@@ -527,6 +531,11 @@ requestAnimationFrame(frameLoop);
   ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
   log("ci-ready", { ms: Math.round(performance.now() - t0) });
   window.ci = ci; window.emuCi = ci; window.emuReady = true;
+  // the game's manual question: type the word for the player (lib/manual.mjs)
+  if (opts.manual === "auto") {
+    const helper = manualHelper({ image: () => image, sendKey: (code, down) => ci.sendKeyEvent(code, down), onLanguage: (key) => log("manual-language", { key }), onJoystick: (key) => log("manual-joystick", { key }), onAnswer: (q) => log("manual-answered", q) });
+    setInterval(helper.check, 250);
+  }
 
   const ev = ci.events();
   ev.onFrameSize((w, h) => setSize(w, h));

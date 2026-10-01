@@ -180,7 +180,8 @@ export async function launch({
   page.on("websocket", (ws) => websockets.push({ t: Date.now() - t0, url: ws.url() }));
   page.on("worker", (w) => consoleMessages.push({ t: Date.now() - t0, type: "worker-started", text: w.url() }));
 
-  const params = new URLSearchParams({ bundle, ...Object.fromEntries(
+  // manual=off: the route answers the manual question itself (the pages would type it too)
+  const params = new URLSearchParams({ bundle, manual: "off", ...Object.fromEntries(
     Object.entries(query).map(([k, v]) => [k, String(v)])) });
   const url = `${srv.url}${pageName}?${params}`;
   log(`open ${url}`);
