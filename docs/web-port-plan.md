@@ -101,54 +101,91 @@ These findings come from the Phase 0 agents' runs. The planned independent
 re-checks were stopped when the goal changed, so treat the speed figures as
 first measurements.
 
-## Phase 1: read the game's state (1–3 weeks)
+## Phase 1: read the game's state (done)
 
 Goal: a live top-down map, beside the running game, showing every car where
-the game says it is.
+the game says it is. The details are in `docs/memory-map.md`; the code is
+`spike/lib/f1gp-mem.mjs`, `spike/lib/f1gp-state.mjs`,
+`spike/lib/track-file.mjs` and `spike/map.html`.
 
-1. **Find the car records.** Start from Trevor Kellaway's GpInfo
-   (f1gp-utils), which reads car data from the running game, and ArgDocs'
-   GP.EXE notes. Confirm each field by changing it in the game: hold A and
-   watch for a value that tracks the dash speed; steer and watch for a
-   heading; and so on. Record snapshots with `guest-mem.cjs` and diff them.
-2. **Fields needed for every car:** position along the track (section and
-   distance), sideways offset or world x/y/z, heading, pitch and roll if
-   stored, speed, steering angle, wheel spin, pit state, and whether it is
-   crashed or retired.
-3. **Find the camera:** which car, which view (cockpit, TV camera, chase),
-   and the camera's position and direction.
-4. **Find the frame tick:** the counter or flag that marks a new game frame,
-   so the renderer knows when state is fresh.
-5. **Write the map** in `web/`: a canvas that draws the track outline and
-   the cars, updated every frame, next to the original screen.
+What we now know:
 
-Done when: the map matches the game for a full Quick Race, checked by eye and
-by a test that compares the player's speed and position with the dash and
-lap timer.
+- **Every car's position, exactly.** The 26 car records sit at a fixed
+  place in the game's data. The player's world X/Y is live. Computer cars
+  keep only a track position (segment, distance along it, sideways offset);
+  the game works out their X/Y when it draws them. `f1gp-state.mjs` does the
+  same integer arithmetic. In cockpit view, the game's own camera position
+  equalled our position for the viewed car in every one of 11,797 frames,
+  over 15 different computer cars, with zero error.
+- **The track, exactly.** `track-file.mjs` builds each circuit from its
+  track file the way the game does at load time. On all 16 circuits, every
+  16 ft segment equals the game's own segment array in memory: position,
+  height, heading, pitch and width. The game also keeps that array in
+  memory, so the renderer can read it directly.
+- **The camera.** View mode, viewed car, and the camera's position, height,
+  yaw and pitch for every view. The game has no camera roll or pitch
+  rotation: pitch only moves the horizon. The projection formula is known
+  (a fixed 256-pixel focal length on a 320×164 view).
+- **Timing.** The game moves every car exactly once per drawn frame, with a
+  time step of one frame (1/15 s at the shipped setting). There is no
+  separate physics tick. The game clock changes once per frame, and a pause
+  flag says when it stops. So the renderer must ease cars between the last
+  two frames; it cannot sample a smoother physics clock.
+- **Reading is cheap.** Reading the whole state takes 4–15 µs.
+- **The map works.** `spike/map.html` runs the game in the browser (js-dos
+  direct mode) next to a live map of every car, with the camera's view
+  wedge, trails and a car table. The page held 60 frames per second, and
+  the game stayed at full speed.
 
-## Phase 2: build the track in 3D (3–8 weeks)
+How it was checked:
+
+- Three whole 3-lap Quick Races at Monza, run at 2× speed (the emulated
+  PC unchanged), checked frame by frame. Dash speed matched memory in
+  1,154/1,154 samples; lap and position in 1,060/1,060; lap times exactly in
+  94/94. All 26 cars had a position in every frame, with no jumps. Every
+  computer car stayed within 1 m of the track edges built from the track
+  file. The finishing order matched the results screen.
+- A separate agent repeated the core checks at Silverstone, the Hungaroring,
+  Monaco and Suzuka, at 10 and 15 fps and at 18,000 and 40,000 cycles.
+- REALTIME_RACE_RESULT
+
+Fixed after the checks: the reader's "consistent read" flag could pass a read
+taken while the game was half-way through its next frame. It now keeps a
+fixed reference for the session; in the Silverstone race the bad reads fell
+from 1,427 to 0. Outside races there is no reliable marker yet, and about
+2% of reads in practice can be a frame ahead.
+
+Still unknown, needed later: height (Z) units, the front-wheel steering
+angle, wheel spin, crash and damage state, which cars the game chooses not
+to draw, how mirrors are drawn, and qualifying, wet races and replays in
+depth.
+
+## Phase 2: build the track in 3D (2–5 weeks)
 
 Goal: our renderer draws the track as the game does, seen from the game's
 own camera.
 
-1. **Read the track files** in TypeScript: sections, widths, curvature,
-   height changes, kerbs, verges, pit lane, objects, horizon, cameras.
-   ArgDocs, ArgData and the GP2 track format notes describe most of it.
-2. **Turn sections into a 3D mesh.** The exact method the game uses is not
-   documented. Work it out by rendering at 320×200 from the game's camera and
-   comparing, pixel by pixel, with the game's own frame. Adjust until the
-   edges line up. The comparison runs as an automated test.
+Phase 1 removed this phase's main risk: the track's shape and the camera
+are now exact. What remains is everything beside and on the road.
+
+1. **Road mesh** from the segment array (or `track-file.mjs`): road surface,
+   kerbs, verges, pit lane and banking, in WebGL.
+2. **Match the game's frame.** Render at 320×164 from the game's camera with
+   the game's projection, and compare pixel by pixel with the game's own
+   frame. This runs as an automated test on all 16 circuits.
 3. **Trackside objects and scenery:** place the object shapes from the track
-   file. Use the horizon image for the backdrop.
+   file (`track-file.mjs` already parses them). Use the horizon image for
+   the backdrop.
 4. **Colours:** use the game's palette for now.
 
 Done when: for every one of the 16 circuits, our track lines up with the
 game's frame to within a pixel or two at 320×200, at several points round
 the lap.
 
-Main risk: if the edges will not line up by comparison alone, we must read
-the game's track-drawing code. That is the least understood part of the
-disassembly, and it could double this phase.
+Main risk: the scenery. How the game builds walls, fences, verges and
+buildings from the track file's commands and objects is only partly
+documented. If comparison alone does not settle it, we must read the game's
+drawing code.
 
 ## Phase 3: cars and cockpit (2–6 weeks)
 
@@ -168,9 +205,9 @@ disassembly, and it could double this phase.
    of view for wide screens, and check that nothing the game hides (cars
    beyond its draw distance, for example) looks wrong.
 2. **Smooth motion:** draw at the screen's refresh rate and ease each car
-   between the game's last two frames. This adds up to one game frame of
-   delay (67 ms at 15 fps). Test whether the game can run faster, at 20 or
-   25 fps, to cut that delay.
+   between the game's last two frames. Physics runs once per drawn frame, so
+   this adds one game frame of delay (67 ms at 15 fps). The game's 25 fps
+   setting cuts that to 40 ms, at the cost of more emulator CPU; measure it.
 3. **Better looks, optional:** textures, lighting, shadows, anti-aliasing and
    draw distance. Each is a separate choice; keep the original look available.
 
@@ -190,9 +227,9 @@ disassembly, and it could double this phase.
 
 | Risk | Effect | What to do |
 | --- | --- | --- |
-| Track mesh can't be matched by comparison alone | Phase 2 takes much longer | Read the track-drawing code; ask the F1GP community for their IDA database |
-| Car shapes not found or hard to decode | Cars look wrong | Search data files early (start in Phase 1) |
-| Direct mode runs the emulator on the page's main thread | Rendering and emulation compete, frames may stutter | Measure in Phase 1; if needed, rebuild the emulator to post state from its worker |
+| Scenery (walls, fences, buildings) can't be matched by comparison alone | Phase 2 takes longer | Read the game's drawing code; ask the F1GP community for their IDA database |
+| Car shapes not found or hard to decode | Cars look wrong | Search the data files at the start of Phase 3; nobody has looked yet |
+| Direct mode runs the emulator on the page's main thread | In this container the emulator slowed once the page spent more than 5–7 ms per frame of its own work | Keep the renderer's CPU work small, or run the emulator and the state reader together in our own worker and post the state to the page; measure on a real desktop GPU first |
 | The game draws things not in any data file | Missing effects | List them in Phase 3 |
 | Memory layout differs between game versions | Only 1.05 European works | Support one version first; detect others by hash |
 | Game files in a public repo | Anyone can download the game | Never serve them; consider removing `original/` |

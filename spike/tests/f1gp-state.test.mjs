@@ -170,6 +170,31 @@ test('synthetic: frame number from the clock, settled and carsAhead flags', () =
   assert.equal(st.settled, false); assert.equal(st.carsAhead, true); assert.equal(st.consistent, false);
 });
 
+test('synthetic: a late read that looks settled but holds the next frame is not consistent', () => {
+  const w = fakeRam();
+  w.u32(DS, 0x2241, 66); w.u16(DS, 0x2245, 43624);
+  const step = 66 + 43624 / 65536;
+  const setFrame = (f) => {
+    const total = f * step;
+    w.u32(DS, 0x2955, Math.floor(total)); w.u16(DS, 0x2959, Math.round((total % 1) * 65536));
+  };
+  const r = createReader(fromRam(w.ram, { imageSeg: IMG }));
+  // five frames read between frames: DS:2977 = 2*frame + 5
+  w.u16(DS, 0x2c63, 7);
+  for (let f = 300; f < 305; f++) {
+    setFrame(f); w.u8(DS, 0x2977, (2 * f + 5) & 0xff); w.u16(SS, 0x05c8, 12);
+    assert.equal(r.read().consistent, true, `frame ${f}`);
+  }
+  // clock still at 304, but the next frame's work has already bumped DS:2977,
+  // and SS:05C8 has caught up with DS:2C63 again, so the read looks settled
+  w.u8(DS, 0x2977, (2 * 305 + 5) & 0xff); w.u16(SS, 0x05c8, 7);
+  const st = r.read();
+  assert.equal(st.settled, true); assert.equal(st.carsAhead, true); assert.equal(st.consistent, false);
+  // the offset stays fixed: the next proper read is consistent again
+  setFrame(305); w.u16(SS, 0x05c8, 12);
+  assert.equal(r.read().consistent, true);
+});
+
 test('synthetic: gameCos interpolates the table like image 0000:03C8', () => {
   const C = cosTable();
   for (let a = 0; a < 0x10000; a += 97) {

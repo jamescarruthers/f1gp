@@ -589,13 +589,14 @@ export function trackOutline(track, opt = {}) {
 
 /**
  * The compiled segment for a segment number read from the game (word +1A of
- * the segment a car's +12 pointer points at): bits 0-12 index, bit 2000h pit
+ * the segment a car's +12 pointer points at): bits 0-11 index, bit 1000h a
+ * run-time flag (seen on segments where a car was crawling), bit 2000h pit
  * lane (index = firstNr + pit index), bits 4000h/8000h camera flags. Works
  * whichever array the game currently keeps the pit lane in.
  * @returns {{pit:boolean, index:number, seg:object}|null}
  */
 export function lookupSegment(geo, nr) {
-  const n = nr & 0x1fff;
+  const n = nr & 0x0fff;
   if (nr & 0x2000) {
     const i = n - geo.pit.firstNr;
     return i >= 0 && i < geo.pitSegs.length ? { pit: true, index: i, seg: geo.pitSegs[i] } : null;

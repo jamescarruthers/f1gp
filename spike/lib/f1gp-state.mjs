@@ -153,7 +153,11 @@ export function createReader(mem, rOpts = {}) {
   const D = ADDR.ds, S = ADDR.ss;
   const pose = [0, 0, 0, 0];
   let names = null, namesKey = '', lastTick = -1;
-  let workOffset = null; // (DS:2977 - 2*frame) & FFh, learned from settled reads
+  // (DS:2977 - 2*frame) & FFh on a read between frames. Fixed for a session:
+  // the most common value seen on settled reads. A late read can look settled
+  // while the cars are already a frame ahead, so it must not move the offset.
+  let workOffset = null;
+  const offsetCounts = new Map();
 
   function read(opts = {}) {
     const H = mem.heap(), B = mem.memBase;
@@ -173,6 +177,7 @@ export function createReader(mem, rOpts = {}) {
 
     // driver names: re-read when the session changes or the clock goes back
     const key = `${typeRaw}/${circuit}/${playerPtr}`;
+    if (key !== namesKey || tick < lastTick) { workOffset = null; offsetCounts.clear(); }
     if (!names || key !== namesKey || tick < lastTick || opts.names) {
       names = [];
       for (let n = 0; n < 40; n++) names.push(readName(H, ss + S.driverNames + n * 24));
@@ -250,7 +255,11 @@ export function createReader(mem, rOpts = {}) {
     const workCounter = H[ds + D.workCounter];
     const race = (typeRaw & 0x80) !== 0;
     const off = (workCounter - 2 * frame) & 0xff;
-    if (settled && race) workOffset = off;
+    if (settled && race) {
+      const n = (offsetCounts.get(off) || 0) + 1;
+      offsetCounts.set(off, n);
+      if (workOffset === null || n > offsetCounts.get(workOffset)) workOffset = off;
+    }
     const carsAhead = race && workOffset !== null && off !== workOffset;
     return {
       ok: mem.checked !== false,

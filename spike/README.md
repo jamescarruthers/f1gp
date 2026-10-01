@@ -31,14 +31,28 @@ node build-bundle.mjs --autoexec "gp /g" --out dist/route-g-25000.jsdos
 | `serve.mjs` | Local static server on 127.0.0.1; `--isolate` adds COOP/COEP headers. |
 | `index.html` | Test page using the js-dos `Dos()` player. |
 | `raw.html` | Test page using the lower-level engine API with our own canvas, input and audio. |
+| `lib/f1gp-mem.mjs` | Browser-safe version of `guest-mem.cjs`: finds the game in the emulator heap and reads it. |
+| `lib/f1gp-state.mjs` | `readState()`: every car's position, speed, lap and flags, the camera, view, clock and pause state. `readTrack()`: the game's segment array. See `../docs/memory-map.md`. |
+| `lib/track-file.mjs` | Parses a track file (`F1CTnn.DAT`) and builds the track exactly as the game does. |
+| `map.html`, `lib/map-view.mjs` | The game in the browser (direct mode) beside a live map of every car. |
 | `tools/unexepack.mjs` | Removes the EXEPACK compression from `gp.exe`. |
-| `probes/` | One-off experiments from Phase 0. `route-demo.cjs` and `mem-locate.cjs` are the ones to start with. |
+| `tools/disasm.py` | Disassembly helper for the unpacked image (needs capstone or objdump). |
+| `tests/` | `node --test tests/*.test.mjs`. Tests that need recorded runs or the game files skip when those are missing. |
+| `probes/` | Experiments. `route-demo.cjs`, `mem-locate.cjs`, `p1-state-watch.cjs` and `p1-accuracy-run.cjs` are the ones to start with. |
 
 ## Examples
 
 ```sh
 # Drive a Quick Race: route to the grid, accelerate, brake, steer.
 timeout 180 node probes/route-demo.cjs dist/route-g-25000.jsdos demo --mode quickrace
+
+# Watch the game state during a Quick Race.
+node build-bundle.mjs --autoexec "gp /g" --cycles 25000 --out dist/p1-state-25000.jsdos
+timeout 240 node probes/p1-state-watch.cjs --tag drive --seconds 195
+
+# The live map in a browser: open the URL it prints.
+node build-bundle.mjs --autoexec "gp /g" --cycles 25000 --out dist/p1-map-25000.jsdos
+node serve.mjs --port 8080   # then http://127.0.0.1:8080/map.html?bundle=dist/p1-map-25000.jsdos
 
 # Find gp.exe in emulated memory.
 node build-bundle.mjs --autoexec "gp /g" --out dist/mem-probe.jsdos

@@ -33,10 +33,10 @@ segment, it is also the code offset `0:NNNN`.
 - **DT**: dynamic test in the emulator. The run is named after the result.
 - **Confidence**: high, medium or low. "Unknown" means we do not know.
 
-**Runs.** All runs are Quick Races at Monza: 3 laps, Rookie, dry, 26 cars,
-15 fps (SS:1230 = 20), DOSBox at 25,000 cycles, `gp /g`. Runs named
-`p1-state/*` are this task's. The others are by the Phase 1 research agents.
-Their data is in `spike/out/` (git-ignored, because it holds game data).
+**Runs.** Unless a row says otherwise, runs are Quick Races at Monza: 3
+laps, Rookie, dry, 26 cars, 15 fps (SS:1230 = 20), DOSBox at 25,000 cycles,
+`gp /g`. Their data is in `spike/out/` (git-ignored, because it holds game
+data).
 
 | Run | What it did |
 | --- | --- |
@@ -46,6 +46,11 @@ Their data is in `spike/out/` (git-ignored, because it holds game data).
 | `p1-fields/{drive1,drive2,coast1}` | 100 ms snapshots of all car records, plus full-RAM dumps. |
 | `p1-camera/{views2,replay,drive-n*}` | Every game frame of DS and SS, with view keys, pause, replay and 3 frame rates. |
 | `p1-track/{qr1, prac-*}` | Quick Race dumps and practice-session dumps of all 16 circuits. |
+| `p1-accuracy/race{1,2,3}` | Three whole Quick Races, green light to the results, with the emulator clock at 2× real time (the emulated PC is unchanged). Every game frame, the dash every 0.5 game s, view-key taps. |
+| `p1-verify/ncr-gb` | Non-Championship Race at Silverstone from 26th on the grid, 18,000 cycles. View keys, a drive off the track, a stop. |
+| `p1-verify/fp-hun` | Free practice at the Hungaroring, 10 fps, 40,000 cycles. |
+| `p1-verify/prac-mon`, `bmap-japan` | Practice at Monaco; `spike/map.html` in headless Chromium at Suzuka. |
+| `p1-verify/ncr-gb-fix` | The Silverstone race again, after the consistency fix below. |
 
 ## Finding the game in memory
 
@@ -98,7 +103,7 @@ session, the main loop (image 0xEE13–0xEEFC, SC) does this in order:
 | DS:2241 dword, DS:2245 word | Clock step per frame: whole ms, and fraction. Computed as DS:2C5D × 1000, which gives 66 ms + 43,624/65,536 at 15 fps. | ms | SC 0x092D; DT | high |
 | (derived) | Frame number = round((DS:2955 + DS:2959/65536) / step). `readState().frame` computes it. It is exact, and it stays right when a read lands between the clock's two adds. | frames | DT: one such torn read in 2,916 frames (tick 1 ms short); frame was still right | high |
 | DS:2977 byte | +2 per frame, at the start of the frame's work, before the cars move. Races only: both increments are on the session-type-80h branch (0xDA68, 0xDAA9). | count | SC; DT | high (races) |
-| DS:294F dword | Session and lap timer. In races it advances by frame ms × DS:0220/4000h (= 1.0223), so it runs 2.23% faster than DS:2955. Other sessions use DS:0214. | ms | SC 0x0951; DT (camera agent): +10,222 per 10,000 | high |
+| DS:294F dword | Session and lap timer. Each frame it advances by frame ms × DS:0220/4000h in races, or × DS:0214/4000h in other sessions. Both are per-circuit factors from 1.003 to 1.069, so read them; do not assume a value | ms | SC 0x0951; DT: 1.0223 at Monza (416Eh), 1.0618 in a Silverstone race (43F7h), 1.0197 in Hungaroring free practice (DS:0214 = 4145h) | high |
 | SS:1230 word | Frame-rate setting: 300 Hz ticks per frame; fps = 300/N. 20 in the Quick Race. Comes from F1PREFS.DAT byte 1160. | ticks | DT, SC | high |
 | SS:05C8 word | 300 Hz ticks since the last flip. Reset at the flip (0xC2BF). | ticks | DT, SC | high |
 | SS:05D2 word / SS:05D4 word | Free-running 300 Hz counter / 18.2 Hz counter. | ticks | DT | high |
@@ -111,16 +116,28 @@ session, the main loop (image 0xEE13–0xEEFC, SC) does this in order:
 `tick`, or part-way through the car loop. `readState` reports two flags:
 
 - `settled` = SS:05C8 ≥ DS:2C63. It means the game is in its frame-rate wait.
-  It is worked out from a single read.
-- `carsAhead`. The reader learns (DS:2977 − 2·frame) & FFh from settled
-  reads, and flags reads where that value has moved on. Races only.
+  It is worked out from a single read. It is not enough on its own: a read
+  late in the next frame's work can also pass it, with the cars already one
+  frame ahead.
+- `carsAhead`. (DS:2977 − 2·frame) & FFh is constant between frames in a
+  race. The reader keeps the most common value seen on settled reads as the
+  session's reference (reset when the session changes or the clock goes
+  back), and flags reads where the value differs. Races only.
 
 `consistent` = settled and not carsAhead. Measured:
 
-- **Node, polling every 3 ms (about 19 polls per frame).** In 3,385 polls
-  (drive) and 3,100 (coast), cars had moved since the previous poll while the
-  clock had not. Every one of them had `settled` false and `carsAhead` true.
-  The first poll after each clock change was settled in 2,909 of 2,918 frames.
+- **Before the fix**, the reader re-learned the reference from every settled
+  read, so `carsAhead` was never true on a settled read. In the Silverstone
+  race at 18,000 cycles, 1,427 reads flagged consistent held the cars one
+  frame ahead (in 1,309 of 2,506 frames), and races at 2× speed showed the
+  same.
+- **After the fix**, in the same race (`ncr-gb-fix`, 59,011 polls, 2,247
+  frames): 0 reads flagged consistent were a frame ahead; good reads were
+  accepted at the same rate as before (31,133 consistent, 1,290 not).
+- **Outside races** DS:2977 does not count, so only `settled` is available.
+  In Monaco practice at the shipped settings, 2.3% of reads were a frame
+  ahead (1,103 reads). DS:2901, written before the car loop in every session
+  (image 0xC3B4), is an untested lead for a marker.
 - **Browser, one read per requestAnimationFrame.** 300 of 1,202 reads (25%)
   were not consistent. All 301 game frames had at least one consistent read.
 
@@ -137,8 +154,8 @@ kept states.
 | SS:123C word | Race laps | 3 | DT: the dash "OF 3" matched 597/597 | high |
 | SS:1222 byte | Opposition standard 0–4 | 0 = Rookie | CD; DT one value | medium |
 | SS:122E word | Wet race: 0 dry, 60h wet | 0 | CD; DT dry only | medium |
-| DS:2967 word | Runners (cars still in the race) | count | DT: dash RUNNERS 597/597. Equals 26 − (cars with +96 bit 20h) in every frame of both runs; dropped 26→22 when 4 cars retired at once (drive), 26→25 when the player retired (coast) | high |
-| DS:298B byte | Laps the leader has completed (= leader's car +22 − 1) | count | DT: 772/772 trace samples | high |
+| DS:2967 word | Runners (cars still in the race). **Races only**: 0 in other sessions | count | DT: dash RUNNERS 597/597. Equals 26 − (cars with +96 bit 20h) in every race frame; dropped 26→22 when 4 cars retired at once (drive), 26→25 when the player retired (coast), 26→23 in race2 | high (races) |
+| DS:298B byte | Laps the leader has completed: 0 on the grid, then the leader's car +22 − 1. **Races only** | count | DT: 780/780 trace samples and 16,358/16,358 frames of three races; 1,531/1,647 in free practice | high (races) |
 | SS:1940, 26 bytes | Car IDs (+AC) in race order | IDs | DT: equals sorting by +AA in every trace sample | high |
 | DS:0C65, 26 words | Car record offsets (from DS:0D1B) in race order; the car loop walks it. DS:049A = end pointer | offsets | SC; DT (static agent) | high |
 | DS:28FD word | The player's car record (DS offset). Becomes 0 when the session is left, **and about 15 s after the player's car retires** | near pointer | DT: 0F5Bh while racing; 0 from 83.5 s in coast (retired at 68.8 s) | high |
@@ -158,7 +175,7 @@ kept states.
 | DS:097D word | Object the camera is computed from: = DS:097F in cockpit, = 099Bh (camera record) in external views | near pointer | DT | high |
 | DS:0983 byte | One-frame view-key request bits | bits | DT (camera agent) | high |
 | DS:099B, C0h bytes | Camera pseudo-car record for external views (+28/+2C position, +1A yaw, +7E bit 01 set) | car-record layout | DT (camera agent) | high |
-| DS:2259 / DS:225D dword | Camera world X / Y for this frame, in every view | world units | DT: in cockpit view it equals our position of the viewed car **exactly**: 0 units of error in all 5,311 cockpit frames, including 2,687 frames riding in computer cars whose positions are derived | high |
+| DS:2259 / DS:225D dword | Camera world X / Y for this frame, in every view | world units | DT: in cockpit view it equals our position of the viewed car **exactly**: 0 units of error in all 5,311 cockpit frames, including 2,683 frames riding in computer cars whose positions are derived | high |
 | SS:013E word | Camera Z = pose height + eye height DS:233F (160 in cockpit, 384 outside) | Z units | DT (camera agent) | high |
 | DS:2261 word | Camera yaw | angle | DT | high |
 | DS:2257 word (+ DS:2269 in cockpit) | Camera pitch; DS:2269 is the cockpit head nod. Pitch only shifts the horizon: no pitch rotation, no roll | angle | DT (camera agent) | high |
@@ -195,15 +212,15 @@ section).
 | +28 / +2C | dd / dd | World X / Y. **Valid only in physics mode**; otherwise stale, often thousands of feet away | world units | DT: player and physics-mode cars match the derived position within 0.17 ft; computer cars in track mode are stale by a median of 2,500–2,850 ft (fields agent) | high |
 | +3C | b | 80h on the grid, cleared after the start. Bit 10h ("retired" in GPDEF.INC) was never set, even on retired cars | bits | DT: all dumps; 5 retirements | medium |
 | +40 | dd | Last lap time. Flags: 10000000h = none yet, 40000000h = the partial lap from the grid to the first crossing | ms of DS:294F | DT: dash LAPTIME equals it in 39/39 readings; it equals the difference of successive +54 values | high |
-| +54 | dd | Session time (DS:294F) at which the current lap started, interpolated within the frame. C0000000h on the grid | ms | DT: it lies within one frame before the crossing frame; in 2 crossings it equalled timer(previous frame) − along/(2·speed) to within 1 ms, but the reason for the factor 2 is unknown | high (meaning) |
+| +54 | dd | Session time (DS:294F) at which the current lap started, interpolated within the frame. C0000000h on the grid | ms | DT: it lies within one frame before the crossing frame; in 3 crossings it equalled timer(previous frame) − along/(2·speed) to within 1–2 ms, but the reason for the factor 2 is unknown | high (meaning) |
 | +5E | b | Flags: 20h on the player's car at the start; 72h/F2h/FAh on retired cars (bit 10h set) | bits | DT: 5 retirements | low |
 | +62 | w | Engine RPM. Kept only in physics mode | rpm | DT | high |
 | +66 | b | Index in race order (used by Up/Down) | index | CD; DT (camera agent) | medium |
 | +67 | b | Pit-stop state: 0 on track, 1 in the pit lane, 2 on the jacks (speed set to 0), … 9 | enum | DT: values 0–9 seen on the 4 cars that pitted in the coast run; meanings from CD (GPDEF.INC) | medium |
 | +7E | b | Bit 01 = physics mode (world X/Y integrated). Bit 04 = computer driver. The player has 01 (with E0h trouble bits sometimes); computer cars have 04, and 05 or similar briefly within about 10–30 ft of another car, and after a crash or retirement | bits | SC image 0x5CBC, 0x1142/0x119A; DT | high |
 | +8C | w | Height above the track (added to the interpolated segment Z) | Z units | DT: exact in the Z formula | high |
-| +96 | b | Bit 20h = no driver in the car: retired in a race, parked in the garage in practice. Bit 80h = car not drawn (practice garages, and 2 of 4 retired cars). Bit 40h was set when DS:28FD was cleared | bits | DT: set at the very frame the runner count dropped, for all 5 retirements; A0h on garage cars in 16 practice dumps; CD (GP_SI) | high (20h), medium (80h) |
-| +AA | b | Race position × 2 (leader = 0) | count | DT: dash POS 636/636 (player), 664/664 (computer cars) | high |
+| +96 | b | Bit 20h = no driver in the car: retired in a race, parked in the garage in practice. So "retired" holds only in races. Bit 80h = car not drawn (practice garages, and 2 of 4 retired cars). Bit 40h was set when DS:28FD was cleared | bits | DT: set at the very frame the runner count dropped, for all 5 retirements; A0h on garage cars in 16 practice dumps; CD (GP_SI) | high (20h), medium (80h) |
+| +AA | b | Race position × 2 (leader = 0). **Races only**: in free practice the values are not a permutation | count | DT: dash POS 636/636 (player), 664/664 (computer cars), 1,060/1,060 over three races | high (races) |
 | +AC | b | Car ID: & 3Fh = car number; 80h = the player's car; 40h = player car driven by the computer | bits | DT: dash CAR 636/636; CD | high |
 | +AE | dd | Best lap; 20000000h = none yet | ms | DT | medium |
 | +B2 | b | Tyre compound (4 = Q, 5 = W according to the game code; the community docs disagree) | enum | CD | medium |
@@ -211,6 +228,11 @@ section).
 Unknown or unverified (see `spike/out/research-phase1/docs/car-record.md`
 for the community names): +0C, +20, +26, +80, +84, +88 and the meaning of
 most flag bits.
+
+**Outside races** the game reuses the 26 records: in free practice one
+driver appeared in two records (#18 in slots 11 and 16), and parked cars
+carry +96 bit 20h. Skip records with +96 bit 80h, and treat race position,
+runners and "retired" as race-only (DT, verifier).
 
 ## Track segment arrays
 
@@ -231,7 +253,7 @@ Each entry is 2Eh bytes, one per 16 ft segment:
 | +0C / +0E | Half-width vector X / Y in bits 6–15 (1/8 ft). Right edge = centre + 8·(sx, −sy) fine. Bits 0–5 of +0C = half-width >> 5 | mixed | DT (track agent) | high |
 | +14 | Heading change term, used for the along correction in corners | — | SC 0x1544; DT (exact formula) | high |
 | +16 / +18 | Racing line offset / angle | fine / angle | CD; DT (fields agent) | medium |
-| +1A | Segment number. Bits 0–11 = index: the track index, or for the pit lane the track index of the pit entry plus the pit index. 2000h = pit-lane entry. 8000h = TV camera here, 4000h = camera on the right. **1000h is a run-time flag**: it was set on segments 93–95 under the slowly rolling player car (coast run, 54–59 s) and cleared later; meaning unknown | bits | DT | high (index, 2000h); medium (cameras, track agent); low (1000h) |
+| +1A | Segment number. Bits 0–11 = index: the track index, or for the pit lane the track index of the pit entry plus the pit index. 2000h = pit-lane entry. 8000h = TV camera here, 4000h = camera on the right. **1000h is a run-time flag**. It was set and later cleared on segments 93–95 under the player's car rolling at 6 mph (coast run, 54–59 s), and on segments 173–223 (24–32 s) and 541–543 (67–68 s) of the drive run, where at least one car was nearly stopped. Meaning unknown; it may mark an obstacle | bits | DT | high (index, 2000h); medium (cameras, track agent); low (1000h) |
 | +21 | Fine bits of X (0–2) and Y (4–6) | — | DT | high |
 
 **Pit lane.** Computer cars that pit switch their +14 to the pit array (326Ch)
@@ -239,6 +261,12 @@ and move along entries numbered 2000h + 1107 … 2000h + 1267 at Monza. They
 leave track segment 1106 and rejoin at track segment 79. Their positions
 stay continuous. The only outliers are the frames where the car stops on the
 jacks (DT, coast run: 4 cars).
+
+**TV cameras.** Which segments carry a camera (+1A bit 8000h, about every
+16th segment, including segment 0) is confirmed. Where each camera stands is
+not: positions predicted from the track file's camera definitions (4 ft
+outside the edge) were 0.1–41 m from the game's actual camera (DT, accuracy
+agent). Read the camera from DS:2259/225D at run time.
 
 **Practice sessions.** With the player in the pit garage, the game splices
 the pit lane into the track array and moves the bypassed track into the pit
@@ -285,14 +313,14 @@ The evidence that this is exactly where the game draws every car:
 - **The camera agrees.** In cockpit view the game's own camera position
   (DS:2259/225D, computed by the game from the same routine) equalled our
   position for the viewed car in all 5,311 cockpit frames, with 0 units of
-  error. 2,687 of those frames rode in 16 different computer cars in track
+  error. 2,683 of those frames rode in 15 different computer cars in track
   mode. (DT, drive and coast runs; test "the game camera in cockpit view…".)
 - **The formula reproduces the player's live position.** Applied to the
   player's track fields, it is within median 4.3 and at most 11.1 fine units
   (0.17 ft) of the live X/Y over 2,918 frames. Z equals the live value in
   every frame, and pitch equals +02 in all physics-mode samples.
-- **Every car moves continuously at its speed.** Over 132,000 car-frame
-  steps, the displacement per frame over speed × dt has median 1.000. 99.6%
+- **Every car moves continuously at its speed.** Over 132,228 car-frame
+  steps, the displacement per frame over speed × dt has median 1.000. 99.66%
   of steps are within 0.8–1.25; the rest are contacts and pit stops.
 - **The track model agrees.** The segments `readTrack()` reads equal
   lib/track-file.mjs `trackOutline()` exactly, on all 16 circuits. Placing
@@ -314,13 +342,13 @@ game's own data. It also follows the pit-lane splice.
 - Z units (assumed 1/64 ft) are not verified.
 - The meaning of segment +1A bit 1000h.
 - Car +20, +26, +80, +84 and +88, most flag bits, and the gap +04.
-- Why +54 (lap start) equals timer − along/(2·speed), and why DS:294F runs
-  2.23% fast in races.
-- No run covered a full 3-lap Quick Race: runs are capped at 240 s, and the
-  race needs about 6 min plus 30 s of menus. Laps 1 and 2 are covered. The
-  finish (end-of-race state, chequered flag) is not.
-- Only Quick Races at Monza were recorded live. Other sessions are covered
-  only by the practice dumps. `carsAhead` depends on DS:2977, which counts
-  only in races.
+- Why +54 (lap start) equals timer − along/(2·speed), and where the
+  per-circuit timer factors DS:0214/DS:0220 come from.
+- Whole races were checked at 2× speed (`p1-accuracy/race{1,2,3}`) and in
+  part at real speed; see `docs/web-port-plan.md` for the real-speed run.
+- Live runs cover races at Monza and Silverstone and practice at Monaco,
+  the Hungaroring and Suzuka. Qualifying, wet races, replays in depth and
+  builds other than European 1.05 are not covered.
+- No reliable consistency marker outside races (see above).
 - `settled` could be wrong when the previous frame's work took 0–1 ticks
   (a much faster guest). It was never wrong at 25,000 cycles.
