@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GL from RAM</title>
+<!--
+  Draws our WebGL view from a RAM capture (no emulator), in the game's
+  framing ('screen'), beside the game's own frame of that moment.
+  Driven by probes/p4-gl-ram.mjs:
+    probes/gl-ram.html?ram=<path>&png=<path>&style=modern|classic&texture=smooth|classic|off&size=960
+  The page sets window.glRam = { ok, error } when it has drawn.
+-->
+<style>
+  body { margin: 0; background: #000; display: flex; gap: 0; }
+  canvas, img { width: var(--w); height: calc(var(--w) * 0.75); image-rendering: pixelated; display: block; }
+</style>
+</head>
+<body>
+<img id="game" alt="">
+<canvas id="gl"></canvas>
+<script type="module">
+import { fromRam } from '../lib/f1gp-mem.mjs';
+import { createReader } from '../lib/f1gp-state.mjs';
+import { readScene, readPalette } from '../lib/scene.mjs';
+import { readObjects, readCrowd } from '../lib/objects.mjs';
+import { readCars, carStates, selectCars, frameCars } from '../lib/cars.mjs';
+import { TrackRenderer, cameraFromState } from '../lib/gl-track.mjs';
+
+const q = new URLSearchParams(location.search);
+const size = +(q.get('size') ?? 960);
+document.body.style.setProperty('--w', `${size}px`);
+window.glRam = null;
+try {
+  const ram = new Uint8Array(await (await fetch(q.get('ram'))).arrayBuffer());
+  const mem = fromRam(ram, { imageSeg: 0x1a2 });
+  if (q.get('png')) document.getElementById('game').src = q.get('png');
+  const st = createReader(mem).read();
+  const canvas = document.getElementById('gl');
+  canvas.width = size; canvas.height = Math.round(size * 0.75);
+  const r = new TrackRenderer(canvas);
+  const scene = readScene(mem);
+  r.setScene(scene, {});
+  const cars = readCars(mem);
+  r.setObjects(readObjects(mem), readCrowd(mem), { cars });
+  r.setPalette(readPalette(mem));
+  const cam = cameraFromState(st);
+  const style = q.get('style') ?? 'classic', modern = style === 'modern';
+  const states = carStates(cars, st);
+  const fc = frameCars(cars, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
+    { origin: [r.origin[0], r.origin[1]], indexed: true, states, drawn: modern ? undefined : selectCars(cars, states).drawn, all: modern, modern, paletteRgb: r.lastPalette });
+  r.setCarFrame(fc, cars);
+  r.draw(cam, { framing: 'screen', haze: modern ? 'smooth' : 'classic', texture: q.get('texture') ?? 'off' });
+  window.glRam = { ok: true, view: st.view.mode, frame: st.frame };
+} catch (e) {
+  window.glRam = { ok: false, error: String(e?.stack ?? e) };
+}
+</script>
+</body>
+</html>

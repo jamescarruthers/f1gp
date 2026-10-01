@@ -112,6 +112,8 @@ session, the main loop (image 0xEE13–0xEEFC, SC) does this in order:
 | DS:2C61 word | Integer fps. | fps | DT | high |
 | DS:0156 word | 4000000h / DS:2C5D (0:7C2B), used in signed multiplies (imul) by the physics (0:282C, 2DBC, 2F8F, 3214, 33ED, 34F4, 6118, 6274, 75ED) and for the cars' yaw wobble. 3C00h at 15 fps, 7807h at 30 fps; below 10 ticks per frame it passes 7FFFh and changes sign, at 4 ticks the division overflows. | factor | SC; DT (`spike/probes/p4-framerate.mjs`: at 30 fps the start matches 15 fps within the start's timing: 100 mph in 3.88 s against 3.82 s, 160 mph in 7.56 s against 7.77 s) | high |
 | DS:2225 word | clamp(30 − SS:1230/2, 12, 23): cars the renderer takes in race order (0:7CAF). 20 at 15 fps, 23 at 30. | cars | SC; DT | high |
+| SS:1220 byte | Driving aids chosen (menu "SETUP OPTIONS", 6BE7:04B6; keys in the race, 0:E2BC): bit 0 Auto Brakes, 1 Auto Gears, 2 Self-Righting Spins, 3 Indestructable, 4 Dotted 'Best Line', 5 Suggested Gear | bits | SC; DT (3Fh in Quick Race captures) | high |
+| DS:297D byte | The aids in force: SS:1220 & DS:2251 (0:E25E; DS:2251 is the mask the skill level allows) | bits | SC; DT | high |
 
 **Reading between frames.** The cars move (step 3) before the clock changes
 (step 6). So a read during a frame's work can see cars one frame ahead of

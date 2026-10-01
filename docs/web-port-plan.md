@@ -206,6 +206,13 @@ Progress:
 - **The WebGL view draws all of it from the game's memory**
   (`spike/lib/scene.mjs`, `spike/render.html`), with the game's live palette,
   at any resolution, in widescreen, with every part drawn at every distance.
+- **Road markings in full:** the grid slots and the start line (the game's
+  special marking shapes), wide markings, and the "Dotted 'Best Line'"
+  driving aid, which the game writes into marking B when a session starts
+  or the aid is switched; the page rebuilds its track when the markings
+  change (`docs/renderer-notes.md`, "Road markings"). Checked against the
+  game's frames with `spike/probes/p4-gl-ram.mjs`, which draws our view from
+  a RAM capture beside the game's frame.
 - **While the car moves, the screen shows the frame before the one the
   state reader calls current.** Tests that compare moving frames must use
   the previous frame's camera.
