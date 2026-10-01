@@ -20,12 +20,14 @@ const VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aColour;
+layout(location = 2) in vec2 aUv;  // road: feet along and across the track (0, 0 elsewhere)
 uniform vec3 uCam;      // camera position relative to the origin
 uniform vec2 uSinCos;   // sin(yaw), cos(yaw)
 uniform vec4 uProj;     // sx, sy, cy, unused
 uniform vec2 uDepth;    // near, far
 out vec3 vColour;
 out float vDepth;
+out vec2 vUv;
 void main() {
   vec3 d = aPos - uCam;
   float lat = d.x * uSinCos.y - d.y * uSinCos.x;
@@ -34,6 +36,28 @@ void main() {
   gl_Position = vec4(uProj.x * lat, uProj.y * d.z + uProj.z * depth, (depth * (f + n) - 2.0 * f * n) / (f - n), depth);
   vColour = aColour;
   vDepth = depth;
+  vUv = aUv;
+}`;
+
+// The ground texture (the game's T option, 0F47:7F64): the road and the grass
+// take the neighbouring shades of their colour, road 18h-1Bh around 1Ah and
+// grass 11h-13h around 12h (each circuit's ramps run dark to light). The game
+// does it in screen space, as streaks that follow the camera's motion; here a
+// noise texture lies on the ground: along the track on the road (streaks four
+// times longer than wide), in world space on the grass. Mode 1 keeps the
+// game's whole shades; mode 2 blends between them. Mipmaps fade it with
+// distance, as the shades average out.
+const GROUND_TEXTURE = `
+uniform sampler2D uNoise;   // R8, tileable noise, mipmapped
+uniform int uTexMode;       // 0 off, 1 the game's shades, 2 smooth
+vec3 groundShade(sampler2D pal, int idx, float noise, int lo, int hi) {
+  float n = noise * 2.0 - 1.0;
+  if (uTexMode == 1) return texelFetch(pal, ivec2(idx + clamp(int(floor(n * 1.6 + 0.5)), lo, hi), 0), 0).rgb;
+  float f = clamp(n * 1.6, float(lo), float(hi));
+  int k = int(floor(f));
+  vec3 a = texelFetch(pal, ivec2(idx + k, 0), 0).rgb;
+  vec3 b = texelFetch(pal, ivec2(idx + min(k + 1, hi), 0), 0).rgb;
+  return mix(a, b, f - float(k));
 }`;
 
 // Distance haze as the game does it: a haze level 0-4 from the distance, and
@@ -75,7 +99,9 @@ const FS = `#version 300 es
 precision highp float;
 in vec3 vColour;
 in float vDepth;
+in vec2 vUv;
 uniform sampler2D uPalette;
+uniform int uRoadIdx;
 uniform sampler2D uCrowd;      // R8, 512 x 1: the crowd strip (palette indices)
 uniform sampler2D uCrowdRows;  // R8, 64 x 1: each row's start offset
 uniform vec2 uCell;            // canvas pixels per game pixel
@@ -85,9 +111,15 @@ uniform vec3 uCam;
 uniform vec2 uSinCos;
 out vec4 outColour;
 ${HAZE}
+${GROUND_TEXTURE}
 void main() {
   if (vColour.y < 0.0) {
     int idx = int(vColour.x + 0.5);
+    // the road only (it alone has u, v; a car part in the road's colour has none)
+    if (uTexMode > 0 && idx == uRoadIdx && int(vColour.z + 0.5) == 0 && any(notEqual(vUv, vec2(0.0)))) {
+      outColour = vec4(groundShade(uPalette, idx, texture(uNoise, vUv / vec2(32.0, 8.0)).r, -2, 1), 1.0);
+      return;
+    }
     if (uCrowdOn == 1 && idx == 27) {
       ivec2 c = ivec2(floor(gl_FragCoord.xy / uCell));
       int r = int(texelFetch(uCrowdRows, ivec2(c.y & 63, 0), 0).r * 255.0 + 0.5);
@@ -168,11 +200,28 @@ uniform sampler2D uSky;  // sky colours, one texel per 4 game rows above the sky
 uniform sampler2D uHorizon; // 512 x 8 horizon image
 uniform float uSkyLen;
 uniform vec3 uSkyTop, uSkyHorizon;
+uniform sampler2D uPalette;
+uniform int uGroundIdx, uRoadIdx;
+uniform vec3 uCam;       // camera relative to the origin (fine units, Z units)
+uniform vec2 uSinCos;
+uniform vec4 uProj;      // as the track's: sx, sy, cy
+uniform float uCamH;     // camera height over the ground (Z units)
 out vec4 outColour;
+${GROUND_TEXTURE}
 void main() {
   float row = (1.0 - vY) * 0.5 * uView.y;          // game viewport row from the top
   float above = uView.x - row;                       // rows above the horizon row
-  if (above <= 0.0) { outColour = vec4(uGround, 1.0); return; }
+  if (above <= 0.0) {
+    if (uTexMode == 0 || uUseScene == 0) { outColour = vec4(uGround, 1.0); return; }
+    // the ground plane under the camera: where this pixel's ray meets it (the track's projection inverted)
+    float xn = (gl_FragCoord.x / uCanvas.x) * 2.0 - 1.0;
+    float depth = uProj.y * uCamH / max(uProj.z - vY, 1e-4);
+    float lat = xn * depth / uProj.x;
+    vec2 w = uCam.xy + vec2(lat * uSinCos.y + depth * uSinCos.x, -lat * uSinCos.x + depth * uSinCos.y);
+    float noise = texture(uNoise, w / (64.0 * 16.0)).r;
+    outColour = vec4(groundShade(uPalette, uGroundIdx, noise, uGroundIdx == uRoadIdx ? -2 : -1, 1), 1.0);
+    return;
+  }
   if (uUseScene == 0) {
     float t = clamp(above / uView.x, 0.0, 1.0);
     outColour = vec4(mix(uSkyHorizon, uSkyTop, t), 1.0);
@@ -229,13 +278,14 @@ export class TrackRenderer {
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
     this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn',
-      'uHazeMode', 'uHaze', 'uObjects']
+      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx']
       .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
     this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette', 'uHazeMode', 'uHaze'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
     this.objects = null;
-    this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon']
+    this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon',
+      'uPalette', 'uGroundIdx', 'uRoadIdx', 'uCam', 'uSinCos', 'uProj', 'uCamH', 'uNoise', 'uTexMode']
       .map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
     this.sceneTex = null;
     this.bg = gl.createVertexArray();
@@ -261,6 +311,18 @@ export class TrackRenderer {
     this.carFrame = null;
     // placeholders for samplers with nothing to read yet
     this.hazeTex = this.texture(gl.R8, 256, 4, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1024));
+    // the ground texture: tileable noise, mipmapped and repeating
+    this.noiseTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.noiseTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 256, 256, 0, gl.RED, gl.UNSIGNED_BYTE, groundNoise(256));
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.REPEAT);
+    const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+    if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
     this.noObjectsTex = this.texture(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4));
   }
 
@@ -332,20 +394,24 @@ export class TrackRenderer {
    */
   setScene(scene, opt = {}) {
     const gl = this.gl;
-    const mesh = buildSceneMesh(scene, { indexed: true });
+    const mesh = buildSceneMesh(scene, { indexed: true, uv: true });
     this.scene = scene;
     this.origin = [mesh.origin[0], mesh.origin[1], 0];
     this.groundIndex = opt.surroundRoad ? scene.road : scene.grass;
+    this.groundSegs = [...scene.lap.filter(Boolean), ...scene.pit];
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, mesh.data, gl.STATIC_DRAW);
+    const bytes = mesh.stride * 4;
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, bytes, 0);
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-    this.track = { vao, count: mesh.data.length / 6, parts: mesh.counts, ranges: mesh.ranges };
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, bytes, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, bytes, 24);
+    this.track = { vao, count: mesh.data.length / mesh.stride, parts: mesh.counts, ranges: mesh.ranges };
     this.setPalette(scene.palette);
     return this.track;
   }
@@ -570,10 +636,30 @@ export class TrackRenderer {
   }
 
   /**
+   * The ground's height near (x, y) (fine units): the height of the nearest
+   * segment of the lap or pit lane, for the ground plane of the texture.
+   */
+  groundZ(x, y) {
+    const segs = this.groundSegs;
+    if (!segs || !segs.length) return 0;
+    const d2 = (s) => (s.x - x) ** 2 + (s.y - y) ** 2;
+    // look near the last answer first: the camera moves a few segments per frame
+    let best = this.groundAt ?? 0, bestD = d2(segs[best]);
+    for (let k = -24; k <= 24; k++) {
+      const i = (best + k + segs.length) % segs.length, d = d2(segs[i]);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (bestD > (1024 * 4) ** 2) for (let i = 0; i < segs.length; i++) { const d = d2(segs[i]); if (d < bestD) { bestD = d; best = i; } }
+    this.groundAt = best;
+    return segs[best].z;
+  }
+
+  /**
    * Draw one frame.
    * @param {object} cam  { x, y (fine), z, heading, horizon (row), rows (viewport rows), top (first screen row) }
    * @param {object} [opt] { framing: 'original'|'wide'|'screen'|'stage', haze: 'off' (default) | 'classic' (the
-   *   game's steps) | 'smooth', pitLane: true when the camera is in the pit lane }
+   *   game's steps) | 'smooth', texture: 'off' (default) | 'classic' (the game's shades) | 'smooth' (the
+   *   ground texture, with setScene), pitLane: true when the camera is in the pit lane }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
@@ -607,8 +693,24 @@ export class TrackRenderer {
     const o = this.origin || [0, 0, 0];
     const a = (cam.heading / 65536) * 2 * Math.PI;
 
+    // the ground texture: the noise on unit 7, the palette for the ground's shades on unit 2
+    const texMode = this.scene ? ({ classic: 1, smooth: 2 }[opt.texture] ?? 0) : 0;
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, this.noiseTex);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
+
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(this.bgProg);
+    gl.uniform1i(this.bgU.uTexMode, texMode);
+    gl.uniform1i(this.bgU.uNoise, 7);
+    gl.uniform1i(this.bgU.uPalette, 2);
+    if (texMode) {
+      gl.uniform1i(this.bgU.uGroundIdx, this.groundIndex);
+      gl.uniform1i(this.bgU.uRoadIdx, this.scene.road);
+      gl.uniform3f(this.bgU.uCam, cam.x - o[0], cam.y - o[1], cam.z);
+      gl.uniform2f(this.bgU.uSinCos, Math.sin(a), Math.cos(a));
+      gl.uniform4f(this.bgU.uProj, sx, sy, cy, 0);
+      gl.uniform1f(this.bgU.uCamH, Math.max(8, cam.z - this.groundZ(cam.x, cam.y)));
+    }
     gl.uniform4f(this.bgU.uView, horizon, rows, xScale, (cam.heading >> 5) & 511);
     gl.uniform2f(this.bgU.uCanvas, w, h);
     gl.uniform3fv(this.bgU.uGround, this.ground.map((k) => k / 255));
@@ -646,6 +748,9 @@ export class TrackRenderer {
     gl.uniform1i(this.u.uHazeMode, hazeMode);
     gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, this.hazeTex); gl.uniform1i(this.u.uHaze, 5);
     gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, this.noObjectsTex); gl.uniform1i(this.u.uObjects, 6);
+    gl.uniform1i(this.u.uNoise, 7);
+    gl.uniform1i(this.u.uTexMode, texMode);
+    gl.uniform1i(this.u.uRoadIdx, this.scene ? this.scene.road : -1);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform3f(this.u.uCam, cam.x - o[0], cam.y - o[1], cam.z);
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
@@ -766,6 +871,36 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   this.drawSprites(spriteQuads(set.mesh.sprites, O.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, O.objs, set.mesh.origin, fr.sprites, set.mesh.placements));
   this.lastObjects = { layers: fr.layers.map((l) => l.length / 3), lines: fr.lines.length / 2, sprites: fr.sprites.length };
 };
+
+/**
+ * Tileable noise for the ground texture: value noise in six octaves, from 4 to
+ * 128 cells across, bytes around 128 (standard deviation about 50). Fixed seed.
+ * @returns {Uint8Array} size x size
+ */
+export function groundNoise(size = 256) {
+  const out = new Float32Array(size * size);
+  let seed = 0x9e3779b9;
+  const rand = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; };
+  const smooth = (t) => t * t * (3 - 2 * t);
+  let amp = 1;
+  for (const cells of [4, 8, 16, 32, 64, 128]) {
+    const lattice = Float32Array.from({ length: cells * cells }, rand);
+    const at = (i, j) => lattice[((j + cells) % cells) * cells + ((i + cells) % cells)];
+    for (let y = 0; y < size; y++) {
+      const fy = (y * cells) / size, j = Math.floor(fy), ty = smooth(fy - j);
+      for (let x = 0; x < size; x++) {
+        const fx = (x * cells) / size, i = Math.floor(fx), tx = smooth(fx - i);
+        const top = at(i, j) + (at(i + 1, j) - at(i, j)) * tx, bottom = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * tx;
+        out[y * size + x] += amp * (top + (bottom - top) * ty - 0.5);
+      }
+    }
+    amp *= 0.75;
+  }
+  let sum = 0, sq = 0;
+  for (const v of out) { sum += v; sq += v * v; }
+  const mean = sum / out.length, sd = Math.sqrt(sq / out.length - mean * mean) || 1;
+  return Uint8Array.from(out, (v) => Math.max(0, Math.min(255, Math.round(128 + ((v - mean) / sd) * 50))));
+}
 
 /** The camera for draw() from a readState() result (fine units). */
 export function cameraFromState(st) {

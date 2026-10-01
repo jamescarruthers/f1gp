@@ -118,11 +118,15 @@ export function horizonOff(mem) {
  *                          indexed: true to store (palette index, -1, haze) instead of RGB, so a
  *                          renderer can look colours up in the live palette; haze is 1 for the
  *                          parts the game hazes with distance (lines, markings, kerbs, fences),
- *                          0 for the road }
- * @returns {{ data: Float32Array, origin: number[], counts: object, ranges: object }}
- *   data = x, y, z, r, g, b per vertex, grouped: ground (road), decals (white
- *   lines, markings: flat on the road), raised (kerbs, fences); ranges give
- *   each group's first vertex and vertex count.
+ *                          0 for the road;
+ *                          uv: true to add u, v per vertex on the road (u: feet along the
+ *                          track, modulo 1024; v: feet across from the centre line), for a
+ *                          surface texture; 0, 0 on the other parts }
+ * @returns {{ data: Float32Array, origin: number[], counts: object, ranges: object, stride: number }}
+ *   data = x, y, z, r, g, b (and u, v with opt.uv) per vertex, grouped: ground
+ *   (road), decals (white lines, markings: flat on the road), raised (kerbs,
+ *   fences); ranges give each group's first vertex and vertex count; stride is
+ *   floats per vertex (6, or 8 with uv).
  */
 export function buildSceneMesh(scene, opt = {}) {
   const pal = scene.palette, T = scene.tables;
@@ -140,9 +144,18 @@ export function buildSceneMesh(scene, opt = {}) {
   };
   // point C + k*h + m*w at height z
   const P = (s, k, m, z) => [s.x + 8 * (k * s.hx + m * s.wx) - origin[0], s.y - 8 * (k * s.hy + m * s.wy) - origin[1], z];
-  const quad = (a0, a1, b1, b0, c, kind) => {
+  // feet across from the centre line to C + k*h + m*w (w lies along h)
+  const across = (s, k, m) => { const hl = Math.hypot(s.hx, s.hy) || 1; return (8 * (k * hl + (m * (s.wx * s.hx + s.wy * s.hy)) / hl)) / 64; };
+  const stride = opt.uv ? 8 : 6;
+  // uv: [u, v] for a0, a1, b1, b0, or none
+  const quad = (a0, a1, b1, b0, c, kind, uv = null) => {
     const out = groups[groupOf[kind]];
-    for (const p of [a0, a1, b1, a0, b1, b0]) out.push(p[0], p[1], p[2], c[0], c[1], c[2]);
+    const corners = [a0, a1, b1, b0];
+    for (const k of [0, 1, 2, 0, 2, 3]) {
+      const p = corners[k];
+      out.push(p[0], p[1], p[2], c[0], c[1], c[2]);
+      if (opt.uv) out.push(uv ? uv[k][0] : 0, uv ? uv[k][1] : 0);
+    }
     counts[kind] = (counts[kind] || 0) + 1;
   };
 
@@ -165,8 +178,11 @@ export function buildSceneMesh(scene, opt = {}) {
       const a = segs[i], b = segs[(i + 1) % n];
       if (!a || !b) continue;
       const lift = 1;
-      // road between the outer edges of the white lines, then the lines
-      quad(P(a, -1, -1, a.z), P(b, -1, -1, b.z), P(b, 1, 1, b.z), P(a, 1, 1, a.z), colours.road, 'road');
+      // road between the outer edges of the white lines, then the lines; u runs on 16 ft
+      // a segment, modulo 1024 ft (the texture repeats within that), across the quad
+      const u = (i * 16) % 1024;
+      const uv = opt.uv ? [[u, across(a, -1, -1)], [u + 16, across(b, -1, -1)], [u + 16, across(b, 1, 1)], [u, across(a, 1, 1)]] : null;
+      quad(P(a, -1, -1, a.z), P(b, -1, -1, b.z), P(b, 1, 1, b.z), P(a, 1, 1, a.z), colours.road, 'road', uv);
       if (a.parts & PART.roadLeft) quad(P(a, -1, -1, a.z + lift), P(b, -1, -1, b.z + lift), P(b, -1, 0, b.z + lift), P(a, -1, 0, a.z + lift), colours.lineLeft, 'line');
       if (a.parts & PART.roadRight) quad(P(a, 1, 0, a.z + lift), P(b, 1, 0, b.z + lift), P(b, 1, 1, b.z + lift), P(a, 1, 1, a.z + lift), colours.lineRight, 'line');
       // road markings: a = C + f/64 half-widths, b = a + w/2
@@ -211,11 +227,11 @@ export function buildSceneMesh(scene, opt = {}) {
   if (scene.pit.length > 1) strip(scene.pit, false);
   const ranges = {};
   let total = 0;
-  for (const g of ['ground', 'decals', 'raised']) { ranges[g] = { first: total, count: groups[g].length / 6 }; total += groups[g].length / 6; }
-  const data = new Float32Array(total * 6);
+  for (const g of ['ground', 'decals', 'raised']) { ranges[g] = { first: total, count: groups[g].length / stride }; total += groups[g].length / stride; }
+  const data = new Float32Array(total * stride);
   let o = 0;
   for (const g of ['ground', 'decals', 'raised']) { data.set(groups[g], o); o += groups[g].length; }
-  return { data, origin, counts, ranges };
+  return { data, origin, counts, ranges, stride };
 }
 
 // Runs of segments whose +26 has `bit` (bridged fence on that side). For each

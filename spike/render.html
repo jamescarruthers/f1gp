@@ -45,6 +45,15 @@
                           key or click), or none
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
                           in the game's steps, or none (default from the style)
+    texture=smooth|classic|off  the ground texture (the game's T option): the road and
+                          grass in their neighbouring shades, blended or in the game's
+                          whole shades, or flat (default from the style)
+    fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
+                          (30, the default, is the most the game's physics allows; game
+                          keeps the game's own setting, 15 in the Quick Race)
+    cycles=auto|fixed     auto: the emulated CPU runs slower (8,000 cycles, raised when
+                          the game's load climbs) while our view replaces the game's
+                          drawing, and at 25,000 otherwise; fixed: as the bundle says
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -113,6 +122,7 @@ import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib
 import { makeOwnAudio } from './lib/audio.mjs';
 import { manualHelper } from './lib/manual.mjs';
 import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
+import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -129,14 +139,20 @@ const opts = {
   objects: (q.get('objects') ?? '1') !== '0',
   style: q.get('style') === 'classic' ? 'classic' : 'modern',
   hazeParam: q.get('haze'),
+  textureParam: q.get('texture'),
   audio: q.get('audio') ?? 'own',
   manual: q.get('manual') ?? 'auto',
   framingParam: q.get('framing'),
+  // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
+  fps: q.get('fps') === 'game' ? null : Math.min(30, Math.max(8, +(q.get('fps') ?? 30) || 30)),
+  // auto: a low emulated CPU speed while our view replaces the game's drawing, raised when the game needs it
+  cycles: q.get('cycles') ?? 'auto',
 };
 // the style sets the defaults; explicit haze= and framing= win
 function applyStyle(style) {
   opts.style = style;
   opts.haze = opts.hazeParam ?? (style === 'classic' ? 'classic' : 'smooth');
+  opts.texture = opts.textureParam ?? (style === 'classic' ? 'classic' : 'smooth');
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
   document.body.classList.toggle('classic', style === 'classic');
 }
@@ -244,7 +260,9 @@ function sizeCanvas() {
 
 const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
-let prev = null, cur = null; // last two kept frames: { st, cam, at, cars }
+let cur = null;               // the newest game frame: { st, cam, cars, t, step }
+const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
+let governor = null;          // the emulated CPU speed (cycles=auto)
 let carData = null;           // readCars(mem) for the circuit (source=memory)
 let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
 let swapped = false;          // single layout: our view is showing
@@ -325,34 +343,42 @@ function frame(now) {
       if (st.session.circuit !== circuit) loadCircuit(st);
       if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
         if (routine && routine.installed) routine.setView(viewportFill(st.view.mode));
-        prev = cur;
-        cur = { st, cam: cameraFromState(st), at: now, cars: null };
+        cur = { st, cam: cameraFromState(st), cars: null, t: st.frame * st.frameMs, step: st.frameMs };
         // the cars' poses and the game's choice of cars, read at the same moment as st
         if (carData) {
           const states = carStates(carData, st);
           cur.cars = { states, drawn: selectCars(carData, states).drawn };
         }
+        pacer.add(cur);
         perf.kept++;
+        // the emulated CPU speed: low while the fill draws nothing, raised when the game's load climbs
+        if (governor) governor.update({ racing: drawing, work: readWorkTicks(mem), ticks: readFrameTicks(mem), now });
       }
-    } else { prev = cur = null; }
+    } else {
+      cur = null;
+      pacer.clear();
+      // the frame rate takes effect when the next session loads
+      if (opts.fps && setFrameRate(mem, opts.fps)) log('frame-rate', { fps: 300 / frameTicks(opts.fps) });
+      if (governor) governor.update({ racing: false, now });
+    }
   }
   const t0 = performance.now();
   const note = $('glnote');
   if (note && note.hidden !== !!cur) note.hidden = !!cur;
   if (cur) {
-    let cam = cur.cam, alpha = 1;
-    const st = cur.st;
-    if (opts.smooth && prev && !st.paused && cur.st.frame === prev.st.frame + 1 && prev.cam.rows === cur.cam.rows) {
-      alpha = Math.min(1, (now - cur.at) / st.frameMs);
-      cam = lerpCamera(prev.cam, cur.cam, alpha);
-    }
-    if (opts.cars && carData && cur.cars) {
-      const smoothCars = alpha < 1 && prev && prev.cars;
-      const states = smoothCars ? lerpCarStates(prev.cars.states, cur.cars.states, alpha) : cur.cars.states;
+    // between the two game frames around the render clock (one frame behind the newest);
+    // not across a change of view or a camera cut
+    const { a: prev, b: shown, alpha } = pacer.pick(now, cur.st.paused,
+      (a, b) => a.cam.rows !== b.cam.rows || Math.hypot(a.cam.x - b.cam.x, a.cam.y - b.cam.y) > 64 * 200);
+    const cam = alpha < 1 ? lerpCamera(prev.cam, shown.cam, alpha) : { ...shown.cam };
+    const st = shown.st;
+    if (opts.cars && carData && shown.cars) {
+      const smoothCars = alpha < 1 && prev.cars;
+      const states = smoothCars ? lerpCarStates(prev.cars.states, shown.cars.states, alpha) : shown.cars.states;
       const modern = opts.style === 'modern';
       // classic: the game's choice of cars; modern: every car on the circuit, 3D at any distance
       const fc = frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
-        { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : cur.cars.drawn, all: modern,
+        { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : shown.cars.drawn, all: modern,
           modern, paletteRgb: renderer.lastPalette, wide: modern || opts.framing === 'wide' });
       renderer.setCarFrame(fc, carData);
       mirrorCars = fc.mirrors;
@@ -362,7 +388,7 @@ function frame(now) {
         const c = st.cars[i];
         if (c.pos === 'none' || !c.visible) continue;
         let x = c.x / 256, y = c.y / 256, z = c.z, heading = c.heading;
-        const p = prev && alpha < 1 ? prev.st.cars[i] : null;
+        const p = alpha < 1 ? prev.st.cars[i] : null;
         if (p && p.pos !== 'none') {
           x = p.x / 256 + (x - p.x / 256) * alpha; y = p.y / 256 + (y - p.y / 256) * alpha; z = p.z + (z - p.z) * alpha;
           heading = (p.heading + ((((heading - p.heading + 0x18000) % 0x10000) - 0x8000) * alpha) + 0x10000) % 0x10000;
@@ -380,7 +406,7 @@ function frame(now) {
     if (glCanvas.style.aspectRatio !== shape) glCanvas.style.aspectRatio = shape;
     if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
     if (opts.layout !== 'single' || swapped) {
-      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: opts.texture, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     }
     perf.frames++;
   }
@@ -392,8 +418,9 @@ setInterval(() => {
   const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
   const st = cur && cur.st;
   $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
-  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}`;
-  window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, size: [glCanvas.width, glCanvas.height] };
+  const gameFps = st ? st.session.fps : null, cycles = governor ? governor.cycles : null;
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game ${gameFps ?? '-'} fps, frames kept ${perf.kept}/s${cycles ? ` · ${cycles} cycles` : ''} · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}, texture ${opts.texture}`;
+  window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, gameFps, cycles, size: [glCanvas.width, glCanvas.height] };
   perf.kept = 0;
 }, 1000);
 
@@ -428,6 +455,9 @@ requestAnimationFrame(frameLoop);
   }
   window.ci = ci; window.emuCi = ci; window.emuReady = true;
   log('ci-ready');
+  if (opts.cycles === 'auto') {
+    governor = cyclesGovernor({ send: (c) => { ci.sendBackendEvent({ type: 'wc-trigger-event', event: `cycles:${c}` }); log('cycles', { cycles: c }); } });
+  }
   const ev = ci.events();
   ev.onFrame((rgb, rgba) => { pending = rgb ?? rgba; });
   const tryAttach = setInterval(() => {

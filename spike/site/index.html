@@ -66,6 +66,7 @@
 
   <h2>How it works</h2>
   <p>The game runs in <a href="https://js-dos.com/">js-dos</a>, DOSBox compiled to WebAssembly. The page reads the cars, the camera and the track from the emulated PC's memory every frame and draws them with WebGL, using the game's own projection, colours and drawing rules, which were decoded from the program. The source and the notes are on <a href="https://github.com/jamescarruthers/f1gp">GitHub</a>.</p>
+  <p>Because the page does the 3D drawing, the game has time to spare: it runs at 30 frames a second, twice its usual rate, on a slower emulated processor. The page draws at your screen's rate and blends between the game's frames.</p>
   <p class="small">Formula One Grand Prix © 1991 MicroProse, by Geoff Crammond.</p>
 </main>
 </body>
