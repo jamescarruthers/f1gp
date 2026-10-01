@@ -29,7 +29,7 @@ const summary = { tag: TAG, shots: [] };
 try {
   emu = await launch({
     bundle: opt('bundle', 'dist/p2-render-25000.jsdos'), page: 'render.html', input: 'real',
-    viewport: { width: 1600, height: 900 }, query: { framing: opt('framing', 'wide'), smooth: opt('smooth', '1') }, log,
+    viewport: { width: 1600, height: 900 }, query: { framing: opt('framing', 'wide'), smooth: opt('smooth', '1'), layout: opt('layout', 'side') }, log,
   });
   const { page, driver } = emu;
   await route.toTrack(driver, { mode: 'quickrace', log });

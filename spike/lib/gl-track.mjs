@@ -110,11 +110,13 @@ export class TrackRenderer {
 
   /**
    * @param {object[]} segs  from track-mesh fromCompiled()/fromMemory()
-   * @param {object} [opt]   { track: parseTrack() result, surround: 'green'|'grey' }
+   * @param {object} [opt]   { track: parseTrack() result, surround: 'green'|'grey',
+   *                           pitSegs: pit-lane segments in the same form }
    */
   setTrack(segs, opt = {}) {
     const gl = this.gl;
     const polys = buildMesh(segs, { track: opt.track });
+    if (opt.pitSegs && opt.pitSegs.length > 1) polys.push(...buildMesh(opt.pitSegs, { closed: false }));
     this.origin = [segs[0].x, segs[0].y, 0];
     this.ground = opt.surround === 'grey' ? COLOURS.groundGrey : COLOURS.ground;
     const verts = [];
@@ -176,13 +178,22 @@ export class TrackRenderer {
 
   /**
    * Draw one frame.
-   * @param {object} cam  { x, y (fine), z, heading, horizon (row), rows (viewport rows) }
-   * @param {object} [opt] { framing: 'original'|'wide' }
+   * @param {object} cam  { x, y (fine), z, heading, horizon (row), rows (viewport rows), top (first screen row) }
+   * @param {object} [opt] { framing: 'original'|'wide'|'screen' }
+   *   'screen' draws into the part of the canvas where the game's 320x200 screen
+   *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
   draw(cam, opt = {}) {
     const gl = this.gl, cv = this.canvas;
-    const w = cv.width, h = cv.height;
-    gl.viewport(0, 0, w, h);
+    let w = cv.width, h = cv.height, y0 = 0;
+    if (opt.framing === 'screen') {
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const rowPx = cv.height / 200;
+      y0 = Math.round((200 - cam.top - cam.rows) * rowPx);
+      h = Math.round(cam.rows * rowPx);
+    }
+    gl.viewport(0, y0, w, h);
     // The game's viewport is 320 columns by cam.rows rows, shown at 4:3 (each
     // row 1.2 columns tall). In 'wide' framing the canvas keeps the vertical
     // scale and shows more to the sides.
@@ -228,7 +239,7 @@ export function cameraFromState(st) {
   return {
     x: st.camera.x / 256, y: st.camera.y / 256, z: st.camera.z,
     heading: st.camera.heading, horizon: st.camera.horizonRow,
-    rows: cockpit ? 103 : 164,
+    rows: cockpit ? 103 : 164, top: cockpit ? 0 : 16,
   };
 }
 
@@ -238,6 +249,6 @@ export function lerpCamera(a, b, t) {
   return {
     x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t,
     heading: (a.heading + dh * t + 0x10000) % 0x10000,
-    horizon: a.horizon + (b.horizon - a.horizon) * t, rows: b.rows,
+    horizon: a.horizon + (b.horizon - a.horizon) * t, rows: b.rows, top: b.top,
   };
 }

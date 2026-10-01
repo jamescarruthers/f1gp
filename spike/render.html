@@ -17,7 +17,9 @@
     framing=wide|original wide keeps the game's vertical scale and shows more
                           at the sides; original matches the game's framing
     smooth=1|0            ease between game frames (one game frame behind)
-    layout=side|gl        original screen beside the new view, or the new view alone
+    layout=side|gl|overlay  original screen beside the new view, the new view
+                          alone, or the new view (game framing) laid half
+                          transparent over the original screen
     cars=1|0              draw cars (boxes for now)
 -->
 <style>
@@ -38,20 +40,25 @@
   .glpane { flex: 1 1 560px; min-width: 0; }
   #perf { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
   body.gl-only .origpane { display: none; }
+  body.overlay .glpane { display: none; }
+  body.overlay .origpane { position: relative; }
+  body.overlay #screen { width: min(960px, calc(100vw - 50px)); }
+  #overgl { display: none; position: absolute; left: 8px; top: 8px; opacity: 0.5; pointer-events: none; image-rendering: pixelated; }
+  body.overlay #overgl { display: block; }
   @media (max-width: 700px) { #screen { width: 100%; } main { padding: 0 16px 16px; } }
 </style>
 </head>
 <body>
 <header><h1>F1GP track renderer</h1><span id="status">loading...</span></header>
 <main>
-  <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas></div>
+  <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><canvas id="gl"></canvas><pre id="perf"></pre></div>
 </main>
 <script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
 <script type="module">
 import { attach } from './lib/f1gp-mem.mjs';
 import { createReader } from './lib/f1gp-state.mjs';
-import { parseTrack, compileTrack, CIRCUITS } from './lib/track-file.mjs';
+import { parseTrack, compileTrack, compilePitLane, CIRCUITS } from './lib/track-file.mjs';
 import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
@@ -66,6 +73,7 @@ const opts = {
   cars: (q.get('cars') ?? '1') !== '0',
 };
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
+if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
 const events = window.emuEvents = [];
 const log = (type, extra = {}) => events.push({ t: Math.round(performance.now()), type, ...extra });
 
@@ -99,9 +107,14 @@ function blitScreen() {
 }
 
 // ------------------------------------------------------------ new view
-const glCanvas = $('gl');
+const glCanvas = opts.layout === 'overlay' ? $('overgl') : $('gl');
 const renderer = new TrackRenderer(glCanvas);
 function sizeCanvas() {
+  if (opts.layout === 'overlay') {
+    // match the original screen's box exactly
+    const s = screen.getBoundingClientRect();
+    glCanvas.style.width = `${s.width}px`; glCanvas.style.height = `${s.height}px`;
+  }
   const r = glCanvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
   if (glCanvas.width !== w || glCanvas.height !== h) { glCanvas.width = w; glCanvas.height = h; }
@@ -119,8 +132,10 @@ function loadCircuit(st) {
   const bytes = trackFiles[name];
   if (!bytes) { log('no-track-file', { name }); return; }
   const parsed = parseTrack(bytes);
-  const segs = fromCompiled(compileTrack(parsed).segs);
-  const info = renderer.setTrack(segs, { track: parsed, surround: parsed.header.surrounding ? 'grey' : 'green' });
+  const compiled = compileTrack(parsed).segs;
+  const segs = fromCompiled(compiled);
+  const pitSegs = fromCompiled(compilePitLane(parsed, compiled).segs);
+  const info = renderer.setTrack(segs, { track: parsed, pitSegs, surround: parsed.header.surrounding ? 'grey' : 'green' });
   circuit = c;
   log('track', { circuit: c, name: CIRCUITS[c], segments: segs.length, ...info });
   window.renderApp.track = { circuit: c, name: CIRCUITS[c], segments: segs.length };

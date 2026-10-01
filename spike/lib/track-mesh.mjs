@@ -10,7 +10,8 @@
 //          right edge = (x + 8*sx, y - 8*sy), left edge = (x - 8*sx, y + 8*sy)
 //
 // Polygons are lists of [x, y, z] points in fine units, with a kind:
-// 'road', 'kerbLeft', 'kerbRight', 'vergeLeft', 'vergeRight'.
+// 'road', 'kerbLeft', 'kerbRight', 'vergeLeft', 'vergeRight'. The pit lane
+// is built the same way from compilePitLane() segments, with closed = false.
 
 /** Segments from compileTrack(parseTrack(bytes)).segs. */
 export function fromCompiled(segs) {
@@ -44,6 +45,7 @@ function edge(s, side, extraFine = 0) {
  * @param {object} [opt.track]  parseTrack() result, for kerbs and verges
  * @param {number} [opt.kerbWidth=48]  kerb width in fine units (guess until the game's rule is known)
  * @param {number} [opt.vergeScale=16] fine units per verge-width unit (guess)
+ * @param {boolean} [opt.closed=true]  join the last segment to the first (a lap)
  */
 export function buildMesh(segs, opt = {}) {
   const n = segs.length;
@@ -52,7 +54,8 @@ export function buildMesh(segs, opt = {}) {
   const verges = opt.track ? vergeWidths(opt.track, segs) : null;
   const kw = opt.kerbWidth ?? 48;
   const vs = opt.vergeScale ?? 16;
-  for (let i = 0; i < n; i++) {
+  const count = opt.closed === false ? n - 1 : n;
+  for (let i = 0; i < count; i++) {
     const a = segs[i], b = segs[(i + 1) % n];
     const quad = (sideA, sideB, ea0, ea1, eb0, eb1) => [
       edge(a, sideA, ea0), edge(b, sideA, eb0), edge(b, sideB, eb1), edge(a, sideB, ea1),
