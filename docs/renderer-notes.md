@@ -167,9 +167,8 @@ seg+08, seg+06), h the half-width vector, w = (s8 seg+11, s8 seg+13), and
   at Monza).
 - seg+28 / seg+29 are the left / right verge widths: the fence stands at
   (1 + v/32) × (half-width + 1.25 ft) from the centre line.
-- Markings with seg+1F bit 80h / 40h and f between 7Ch and 83h use special
-  shapes from tables R:00B6–00EF (shifts along the track, length, height):
-  lines across the road. SC only, not verified.
+- Markings with seg+1F bit 80h (A) / 40h (B) are wide or special shapes
+  (0F47:2A0F): see "Road markings" below. SC; DT.
 - Fence points with seg+1F bit 20h / 10h at the four pit-lane junction
   segments are taken from the pit-lane array (0F47:2445). SC only.
 - "Bridged" fences: seg+26 bit 20h (left) / 10h (right) is set on sections
@@ -227,9 +226,10 @@ where the record's flag byte has that part's bit; the flag byte is seg+22
   code; R:0248 maps the 16 codes to palette indices. SC; DT (below).
 - **Fences and markings.** The loader stores per-segment colour codes in
   seg+24 (fences: low nibble left, high nibble right; 8EAA:0F23) and seg+25
-  (markings). R:0220 and R:0230 map the codes to palette indices. At Monza the
-  marking A codes give dark asphalt shades (a darker strip on the road) and
-  marking B gives the white dashed centre line.
+  (markings). R:0220 and R:0230 map the codes to palette indices. At Monza
+  marking A is a darker asphalt strip (18h, 19h) on 524 of the 1,189
+  segments; marking B is what the game writes for the best-line aid (see
+  "Road markings").
 - **Haze** (0F47:188A). Lines, markings, fences and kerbs get distance haze;
   grass and road do not. Dry: level = clamp((d − 10) ≫ 3, 0, 4), where d is
   the number of segments ahead (raised to a per-part minimum of 1 to 5); if
@@ -276,6 +276,54 @@ All of these are built once at track load (seg 8EAA, from the track file's
 sections and commands, see 8EAA:0698 for the command dispatch and 8EAA:0ED8
 for the routines that set the marker bits) and stay in memory. A port can read
 them from the segment array instead of rebuilding them from the track file.
+
+### Road markings
+
+Markings A and B are strips: from a segment's two points (a, b) to the next
+segment's, drawn when the first segment's +0B has the marking's bit (80h A,
+40h B). Each segment computes its points from its own +1C (A) or +1D (B),
+f, and +1F (0F47:2A0F; `markingPoints` in scene.mjs):
+
+| seg+1F bit | f | a | b | Colour |
+| --- | --- | --- | --- | --- |
+| clear | any | C + h·f/64 | a + w/2 | R:0230[code in +25] |
+| set | not 7Ch–83h | C + h·f/32 | a + w | the same |
+| set | 7Ch–83h: shape k = f − 7Ch | C + h·lat/32, moved along the track by h⟂·shift/32 and up by slope·pitch/65536 | a + h·width/32 | a strip starting at an odd k: R:0230[R:0240[depth]] |
+
+h⟂ is (hy, hx) in the game's X, Y; pitch is seg+02. The shape tables are
+shift R:00B6 (s8), lat R:00BE (s8), width R:00C6 (s8), slope R:00DE (s16).
+They are filled per circuit: in the 17 practice dumps of the 16 circuits the
+shifts and widths scale with the road's width, the left and right grid shapes
+swap sides at some circuits, and shapes 6 and 7 sit at lat 82–84 or −114;
+the slopes are the same everywhere. At Monza:
+
+| k | shift | lat | width | slope | Monza |
+| --- | --- | --- | --- | --- | --- |
+| 0, 1 | −19, 0 | −32 | 64 | −5228, 0 | start line: segment 0 (k 1) to 1 (k 0), 47 ft across, 2 ft long |
+| 2, 3 | −21, 0 | −25 | 14 | −5630, 0 | grid slots, left: k 3 to the next segment's k 2, 10.2 ft across, 0.7 ft long |
+| 4, 5 | −10, 10 | 11 | 14 | −2815, 2815 | grid slots, right: k 5 to k 4, 10.2 ft across, 1.4 ft long |
+| 6, 7 | 57, 102 | 82 | 32 | 7238, 12868 | not seen |
+
+Two special points on neighbouring segments, moved along the track towards
+each other, make a short strip across the road. 0F47:226B makes such a line
+at least one screen row tall, and gives it a colour by depth: it writes code
+R:0240[min(depth ≫ 7, 7)] (4, 5, 6, 7, Bh, Dh, Eh, Fh: white to grey through
+R:0230) into the segment's +25 nibble each frame, for odd k when the walk
+runs forward and even k when it runs backward. DT (`spike/probes/p4-gl-ram.mjs`:
+our grid slots and start line fall on the game's in grid, chase and TV
+captures; `spike/tests/markings.test.mjs`).
+
+**The best line.** One of the game's driving aids is "Dotted 'Best Line'".
+The aids are the bits of SS:1220 (memory map); DS:297D = SS:1220 & DS:2251
+holds the ones in force. 0:053C rewrites marking B on every segment that has
+it and is not a special shape: with the best-line bit (10h) set, f = racing
+line offset (seg+16) × 64 / half-width ((seg+0C & 3Fh) ≪ 5), in colour code 8
+(R:0230[8] = B7h, near white at Monza), so B's dashes (B is on every other
+segment) follow the racing line; with it clear, f is random within ±62 and
+the code is Ah or Ch (dark asphalt): blemishes. It runs when a session
+starts (0:EB63, EC82) and when the aid's key toggles it (0:E3A0), so a
+renderer must read marking B after that (`markingsKey` in scene.mjs). DT: in
+a Monza capture with the aid on, all 668 such segments follow the rule.
 
 ## 4. Texture (T) and detail (D)
 
@@ -445,9 +493,10 @@ at Monza, bundle `dist/p2-static-25000.jsdos`):
 ## Open questions
 
 - Wet weather: the levels SS:0182/SS:0184 and the rain darkening of 12h/1Ah.
-- The special road markings (seg+1F with marking factors 7Ch–83h), the
-  pit-junction fences (0F47:2445) and the bridged fences (0F47:25D3) were not
-  checked against frames.
+- The pit-junction fences (0F47:2445) and the bridged fences (0F47:25D3) were
+  not checked against frames.
+- Why the start line is missing from some TV views (the near band's
+  cross-section rule for the strip's second segment, probably).
 - Walks with the camera in the pit-lane array, and the order of the behind
   bands in polygon mode.
 - The crest blocks (0F47:279E, 28D1, 4A03) in detail.

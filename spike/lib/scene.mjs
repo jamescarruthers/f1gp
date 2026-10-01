@@ -34,6 +34,7 @@ function decodeSegment(H, p) {
   return {
     nr: r16(0x1a),
     heading: r16(0x00),
+    pitch: s16(0x02),
     x: (s16(0x04) << 3) | (fine & 7),
     y: (s16(0x08) << 3) | (fine >> 4),
     z: s16(0x06),
@@ -43,6 +44,7 @@ function decodeSegment(H, p) {
     parts: H[p + 0x0b],
     fenceIdx: H[p + 0x0e] & 63,                       // bits 0-2 left, 3-5 right
     markA: s8(H[p + 0x1c]), markB: s8(H[p + 0x1d]),
+    flags1F: H[p + 0x1f],                             // bit 80h / 40h: marking A / B is wide or a special shape
     stripe: H[p + 0x23],
     fenceColours: H[p + 0x24], markColours: H[p + 0x25],
     flags26: H[p + 0x26],                             // bit 5/4 bridged left/right fence, 3 no horizon, 2 low kerb
@@ -50,11 +52,10 @@ function decodeSegment(H, p) {
   };
 }
 
-/**
- * Read the scene from the running game (mem from f1gp-mem.mjs attach() or fromRam()).
- * @returns {object} { lap: seg[] by segment index, pit: seg[] in order, tables, palette (RGB), horizon, grass, road }
- */
-export function readScene(mem) {
+// The linear addresses of the segment entries: the track array up to the lap's
+// end (pit-lane entries in it count as pit), and the pit array while the
+// numbers run on.
+function segmentEntries(mem) {
   const H = mem.heap(), B = mem.memBase;
   const ds = B + (mem.DS << 4), ss = B + (mem.SS << 4);
   const r16 = (p) => H[p] | (H[p + 1] << 8);
@@ -64,15 +65,32 @@ export function readScene(mem) {
   const n = lapEnd > tOff ? (lapEnd - tOff) / SEG_SIZE : 0;
   const lap = [], pit = [];
   for (let i = 0; i < n; i++) {
-    const s = decodeSegment(H, B + (tSeg << 4) + tOff + i * SEG_SIZE);
-    if (s.nr & 0x2000) pit.push(s); else if (!lap[s.nr & 0x0fff]) lap[s.nr & 0x0fff] = s;
+    const p = B + (tSeg << 4) + tOff + i * SEG_SIZE;
+    (r16(p + 0x1a) & 0x2000 ? pit : lap).push(p);
   }
-  // the pit array: entries while the numbers run on
   let prev = -1;
   for (let i = 0; i < 600; i++) {
-    const s = decodeSegment(H, B + (pSeg << 4) + pOff + i * SEG_SIZE), cur = s.nr & 0x2fff;
+    const p = B + (pSeg << 4) + pOff + i * SEG_SIZE, cur = r16(p + 0x1a) & 0x2fff;
     if (i > 0 && cur !== prev + 1 && !(cur === 0 && prev > 0 && !(prev & 0x2000))) break;
     prev = cur;
+    pit.push(p);
+  }
+  return { lap, pit };
+}
+
+/**
+ * Read the scene from the running game (mem from f1gp-mem.mjs attach() or fromRam()).
+ * @returns {object} { lap: seg[] by segment index, pit: seg[] in order, tables, palette (RGB), horizon, grass, road }
+ */
+export function readScene(mem) {
+  const H = mem.heap(), B = mem.memBase;
+  const ss = B + (mem.SS << 4);
+  const r16 = (p) => H[p] | (H[p + 1] << 8);
+  const at = segmentEntries(mem);
+  const lap = [], pit = [];
+  for (const p of at.lap) { const s = decodeSegment(H, p); if (!lap[s.nr & 0x0fff]) lap[s.nr & 0x0fff] = s; }
+  for (const p of at.pit) {
+    const s = decodeSegment(H, p);
     if (s.nr & 0x2000) { if (!pit.some((q) => q.nr === s.nr)) pit.push(s); } else if (!lap[s.nr & 0x0fff]) lap[s.nr & 0x0fff] = s;
   }
   pit.sort((a, b) => (a.nr & 0x0fff) - (b.nr & 0x0fff));
@@ -94,6 +112,13 @@ export function readScene(mem) {
       kerbStripe: bytes(R + 0x208, 24),   // row 0 far, 8 near, 10h nearest; index + stripe number
       fence: bytes(R + 0x220, 16),
       marking: bytes(R + 0x230, 16),
+      // special marking shapes 0-7 (f = 7Ch-83h with seg+1F's bit): shift along the track and
+      // lateral position and width across, in 1/32 half-widths; height per unit of pitch
+      special: {
+        shift: Array.from(bytes(R + 0xb6, 8), s8), lateral: Array.from(bytes(R + 0xbe, 8), s8),
+        width: Array.from(bytes(R + 0xc6, 8), s8), slope: Array.from({ length: 8 }, (_, k) => (r16(R + 0xde + 2 * k) << 16) >> 16),
+      },
+      markingNear: H[R + 0x240],          // a special line's colour code near the camera (R:0240, by depth)
       kerbColour: bytes(R + 0x248, 16),
       lines: bytes(R + 0x258, 12),        // three groups of (far, near, nearest, 0); low nibble left line
       sky,
@@ -104,11 +129,61 @@ export function readScene(mem) {
   };
 }
 
+/**
+ * A key that changes when the game rewrites the road markings: marking A/B's
+ * positions (+1C, +1D) and colour codes (+25) over the lap and pit arrays.
+ * The game rewrites marking B when a session starts and when the player turns
+ * the "Dotted 'Best Line'" aid on or off (0:053C: B goes to the racing line,
+ * +16 x 64 / half-width, in colour code 8; with the aid off to random places
+ * in the dark asphalt shades), so a renderer rebuilds its mesh when this changes.
+ */
+export function markingsKey(mem) {
+  const H = mem.heap(), at = segmentEntries(mem);
+  let h = 0x811c9dc5;
+  const mix = (v) => { h = Math.imul(h ^ v, 0x01000193); };
+  for (const p of [...at.lap, ...at.pit]) {
+    mix(H[p + 0x1c]); mix(H[p + 0x1d]);
+    // special markings take a colour by depth each frame (0F47:226B): leave those out
+    if (!(H[p + 0x1f] & 0xc0)) mix(H[p + 0x25]);
+  }
+  return h >>> 0;
+}
+
 /** The camera's segment +26 bit 3: no horizon image here. */
 export function horizonOff(mem) {
   const H = mem.heap(), B = mem.memBase, ds = B + (mem.DS << 4);
   const off = H[ds + 0x096f] | (H[ds + 0x0970] << 8), seg = H[ds + 0x0971] | (H[ds + 0x0972] << 8);
   return (H[B + (seg << 4) + off + 0x26] & 0x08) !== 0;
+}
+
+/**
+ * A road marking's two points across segment s, as the game's near-band
+ * cross-section builder computes them (0F47:2A0F; renderer-notes, "Road
+ * markings"): at f/64 half-widths from the centre line and w/2 wide. With
+ * seg+1F's bit for the marking (80h A, 40h B) it is at f/32 and w wide, or, for
+ * f = 7Ch-83h, special shape k = f - 7Ch from the tables at R:00B6: moved along
+ * the track by shift/32 half-widths (and raised by slope x pitch / 65536), at
+ * lateral/32 half-widths, width/32 across. A marking is drawn as a strip from
+ * one segment's points to the next segment's, so two special points on
+ * neighbouring segments make a short strip across the road (grid slots, the
+ * start line).
+ * @param {object} s       a segment from readScene()
+ * @param {'A'|'B'} which
+ * @param {object} tables  readScene().tables
+ * @param {number} [lift]  height added (Z units)
+ * @returns {{ a: number[], b: number[], special: number }} points x, y (fine units), z; special: k, or -1
+ */
+export function markingPoints(s, which, tables, lift = 0) {
+  const P = (k, m, z) => [s.x + 8 * (k * s.hx + m * s.wx), s.y - 8 * (k * s.hy + m * s.wy), z];
+  const low = which === 'A', f = low ? s.markA : s.markB;
+  if (!(s.flags1F & (low ? 0x80 : 0x40))) return { a: P(f / 64, 0, s.z + lift), b: P(f / 64, 0.5, s.z + lift), special: -1 };
+  const k = ((f & 0xff) - 0x7c) & 0xff;
+  if (k >= 8) return { a: P(f / 32, 0, s.z + lift), b: P(f / 32, 1, s.z + lift), special: -1 };
+  const S = tables.special, sh = S.shift[k];
+  const z = s.z + lift + (sh ? Math.floor((S.slope[k] * s.pitch) / 65536) : 0);
+  const dx = (8 * s.hy * sh) / 32, dy = (8 * s.hx * sh) / 32;
+  const pa = P(S.lateral[k] / 32, 0, z), pb = P((S.lateral[k] + S.width[k]) / 32, 0, z);
+  return { a: [pa[0] + dx, pa[1] + dy, z], b: [pb[0] + dx, pb[1] + dy, z], special: k };
 }
 
 /**
@@ -159,6 +234,11 @@ export function buildSceneMesh(scene, opt = {}) {
     counts[kind] = (counts[kind] || 0) + 1;
   };
 
+  const markEnds = (seg, low, lift) => {
+    const m = markingPoints(seg, low ? 'A' : 'B', T, lift);
+    return { a: [m.a[0] - origin[0], m.a[1] - origin[1], m.a[2]], b: [m.b[0] - origin[0], m.b[1] - origin[1], m.b[2]], special: m.special };
+  };
+
   const strip = (segs, closed) => {
     const n = segs.length;
     // bridged fences: the fence runs straight between the run's two end points
@@ -185,15 +265,17 @@ export function buildSceneMesh(scene, opt = {}) {
       quad(P(a, -1, -1, a.z), P(b, -1, -1, b.z), P(b, 1, 1, b.z), P(a, 1, 1, a.z), colours.road, 'road', uv);
       if (a.parts & PART.roadLeft) quad(P(a, -1, -1, a.z + lift), P(b, -1, -1, b.z + lift), P(b, -1, 0, b.z + lift), P(a, -1, 0, a.z + lift), colours.lineLeft, 'line');
       if (a.parts & PART.roadRight) quad(P(a, 1, 0, a.z + lift), P(b, 1, 0, b.z + lift), P(b, 1, 1, b.z + lift), P(a, 1, 1, a.z + lift), colours.lineRight, 'line');
-      // road markings: a = C + f/64 half-widths, b = a + w/2
-      // colour index 0 in the marking and fence tables means "not drawn"
-      if (a.parts & PART.markA && T.marking[a.markColours & 15]) {
-        const c = rgb(T.marking[a.markColours & 15]);
-        quad(P(a, a.markA / 64, 0, a.z + lift), P(b, b.markA / 64, 0, b.z + lift), P(b, b.markA / 64, 0.5, b.z + lift), P(a, a.markA / 64, 0.5, a.z + lift), c, 'marking');
-      }
-      if (a.parts & PART.markB && T.marking[a.markColours >> 4]) {
-        const c = rgb(T.marking[a.markColours >> 4]);
-        quad(P(a, a.markB / 64, 0, a.z + lift), P(b, b.markB / 64, 0, b.z + lift), P(b, b.markB / 64, 0.5, b.z + lift), P(a, a.markB / 64, 0.5, a.z + lift), c, 'marking');
+      // road markings A (the darker best line at most circuits) and B (the dashed centre
+      // line), and the special shapes (grid slots, start line): a strip from this segment's
+      // two points to the next segment's (markEnds). A special shape with an odd number
+      // starts a strip and takes the near colour of R:0240 (the game shades it by depth).
+      // Colour index 0 in the marking and fence tables means "not drawn".
+      for (const [part, low] of [[PART.markA, true], [PART.markB, false]]) {
+        if (!(a.parts & part)) continue;
+        const ea = markEnds(a, low, lift), eb = markEnds(b, low, lift);
+        const code = ea.special >= 0 && ea.special & 1 ? T.markingNear : low ? a.markColours & 15 : a.markColours >> 4;
+        if (!T.marking[code]) continue;
+        quad(ea.a, eb.a, eb.b, ea.b, rgb(T.marking[code]), 'marking');
       }
       // kerbs: top from the inner edge (2w, or 3w on low kerbs, outside the
       // road edge) to the outer edge (h*1.28125 + w), raised; inner face from

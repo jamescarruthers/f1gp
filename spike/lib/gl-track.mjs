@@ -395,6 +395,8 @@ export class TrackRenderer {
   setScene(scene, opt = {}) {
     const gl = this.gl;
     const mesh = buildSceneMesh(scene, { indexed: true, uv: true });
+    // a rebuild (the game rewrote its markings) replaces the track's buffers
+    if (this.track && this.track.buf) { gl.deleteBuffer(this.track.buf); gl.deleteVertexArray(this.track.vao); }
     this.scene = scene;
     this.origin = [mesh.origin[0], mesh.origin[1], 0];
     this.groundIndex = opt.surroundRoad ? scene.road : scene.grass;
@@ -411,7 +413,8 @@ export class TrackRenderer {
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, bytes, 12);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribPointer(2, 2, gl.FLOAT, false, bytes, 24);
-    this.track = { vao, count: mesh.data.length / mesh.stride, parts: mesh.counts, ranges: mesh.ranges };
+    this.track = { vao, buf, count: mesh.data.length / mesh.stride, parts: mesh.counts, ranges: mesh.ranges };
+    this.lastPalette = null; // the sky and horizon textures belong to the scene
     this.setPalette(scene.palette);
     return this.track;
   }

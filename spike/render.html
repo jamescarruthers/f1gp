@@ -116,7 +116,7 @@ import { createReader } from './lib/f1gp-state.mjs';
 import { parseTrack, compileTrack, compilePitLane, CIRCUITS } from './lib/track-file.mjs';
 import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
-import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
+import { readScene, readPalette, horizonOff, markingsKey } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
@@ -265,6 +265,7 @@ const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws 
 let governor = null;          // the emulated CPU speed (cycles=auto)
 let carData = null;           // readCars(mem) for the circuit (source=memory)
 let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
+let sceneOpts = null, markKey = null; // the scene's options, and its markings when built (scene.mjs markingsKey)
 let swapped = false;          // single layout: our view is showing
 let mirrorCars = [];          // frameCars().mirrors of the last drawn frame (cockpit)
 const routineSeen = { calls: -1, at: -1e9 }; // when the routine's call counter last moved
@@ -281,7 +282,9 @@ function loadCircuit(st) {
   if (opts.source === 'memory') {
     // everything the game built at track load, read from its memory
     const scene = readScene(mem);
-    info = renderer.setScene(scene, { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 });
+    sceneOpts = { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 };
+    info = renderer.setScene(scene, sceneOpts);
+    markKey = markingsKey(mem);
     carData = null;
     if (opts.cars) {
       try { carData = readCars(mem); }
@@ -404,7 +407,14 @@ function frame(now) {
     // cam.rows rows of a 4:3 screen), so nothing is stretched
     const shape = opts.framing === 'original' && opts.layout !== 'overlay' && opts.layout !== 'single' ? `320 / ${(cam.rows * 1.2).toFixed(1)}` : '';
     if (glCanvas.style.aspectRatio !== shape) glCanvas.style.aspectRatio = shape;
-    if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
+    if (opts.source === 'memory' && now - lastPaletteAt > 500) {
+      lastPaletteAt = now;
+      renderer.setPalette(readPalette(mem));
+      // the game rewrites its road markings at the start of a session and when the best-line aid
+      // is turned on or off: build the track again
+      const k = markingsKey(mem);
+      if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
+    }
     if (opts.layout !== 'single' || swapped) {
       renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: opts.texture, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     }
