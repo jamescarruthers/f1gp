@@ -34,14 +34,28 @@ void main() {
 }`;
 
 // Colours are RGB, or (palette index, -1, 0) looked up in the live palette.
+// In races the game fills colour 1Bh (the stands) with a crowd: pixels copied
+// from a strip, each screen row starting at its own offset (0F47:142A). We do
+// the same per game pixel, so the crowd has the original's grain.
 const FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 vColour;
 uniform sampler2D uPalette;
+uniform sampler2D uCrowd;      // R8, 512 x 1: the crowd strip (palette indices)
+uniform sampler2D uCrowdRows;  // R8, 64 x 1: each row's start offset
+uniform vec2 uCell;            // canvas pixels per game pixel
+uniform int uCrowdOn;
 out vec4 outColour;
 void main() {
-  if (vColour.y < 0.0) outColour = vec4(texture(uPalette, vec2((vColour.x + 0.5) / 256.0, 0.5)).rgb, 1.0);
-  else outColour = vec4(vColour, 1.0);
+  if (vColour.y < 0.0) {
+    int idx = int(vColour.x + 0.5);
+    if (uCrowdOn == 1 && idx == 27) {
+      ivec2 c = ivec2(floor(gl_FragCoord.xy / uCell));
+      int r = int(texelFetch(uCrowdRows, ivec2(c.y & 63, 0), 0).r * 255.0 + 0.5);
+      idx = int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
+    }
+    outColour = vec4(texelFetch(uPalette, ivec2(idx, 0), 0).rgb, 1.0);
+  } else outColour = vec4(vColour, 1.0);
 }`;
 
 // Bitmaps (trees, boards, marshals): camera-facing quads; each atlas texel is
@@ -162,7 +176,8 @@ export class TrackRenderer {
     this.canvas = canvas;
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
-    this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette'].map((n) => [n, gl.getUniformLocation(this.prog, n)]));
+    this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn']
+      .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
     this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
@@ -341,7 +356,12 @@ export class TrackRenderer {
     gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 20);
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
     gl.bindVertexArray(null);
-    this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, spriteVao, spriteVbo };
+    let crowdTex = null, crowdRowsTex = null;
+    if (crowd.active && crowd.strips && crowd.rows) {
+      crowdTex = r8(512, 1, crowd.strips[0].subarray(0, 512));
+      crowdRowsTex = r8(64, 1, crowd.rows.subarray(0, 64));
+    }
+    this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, spriteVao, spriteVbo, crowdTex, crowdRowsTex };
     return { track: track.mesh.counts, pit: pit.mesh.counts, atlas: [atlas.width, atlas.height] };
   }
 
@@ -431,6 +451,18 @@ export class TrackRenderer {
     gl.clear(gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.prog);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex); gl.uniform1i(this.u.uPalette, 0);
+    const O = this.objects;
+    if (O && O.crowdTex) {
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, O.crowdTex); gl.uniform1i(this.u.uCrowd, 3);
+      gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, O.crowdRowsTex); gl.uniform1i(this.u.uCrowdRows, 4);
+      gl.uniform1i(this.u.uCrowdOn, 1);
+    } else {
+      // the samplers still need valid units
+      gl.uniform1i(this.u.uCrowd, 0); gl.uniform1i(this.u.uCrowdRows, 0);
+      gl.uniform1i(this.u.uCrowdOn, 0);
+    }
+    gl.uniform2f(this.u.uCell, (w * xScale) / 320, h / rows);
+    gl.activeTexture(gl.TEXTURE0);
     gl.uniform3f(this.u.uCam, cam.x - o[0], cam.y - o[1], cam.z);
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
     gl.uniform4f(this.u.uProj, sx, sy, cy, 0);
