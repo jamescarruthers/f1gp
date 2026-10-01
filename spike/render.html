@@ -18,7 +18,9 @@
     bundle=...            the js-dos bundle (built with build-bundle.mjs; default
                           dist/f1gp.jsdos, the one build-site.mjs puts on the site)
     framing=wide|original wide keeps the game's vertical scale and shows more
-                          at the sides; original matches the game's framing
+                          at the sides; original matches the game's framing (4:3, where
+                          the game's cockpit sides are). Default from the style; also
+                          the Shape menu
     smooth=1|0            ease between game frames (one game frame behind)
     layout=single|side|gl|overlay  single (default): one screen, the game's screen
                           in menus and our 3D view when you are in the car, with
@@ -43,11 +45,12 @@
                           the word typed) and the joystick question (Use Keys)
     audio=own|off         the game's sound through our AudioWorklet (starts on the first
                           key or click), or none
-    sound=adlib|amiga|amiga-clean  the PC version's AdLib sound (the game's own), or the
-                          Amiga version's: its title tune in the menus, its sampled engine
-                          and race effects in a session, played from the game's events
-                          (lib/amiga-sound.mjs; needs dist/amiga-sound.bin), through the
-                          A500's filters or without them (clean). Also a menu.
+    sound=amiga|amiga-clean|adlib  the Amiga version's sound (default): its title tune in the
+                          menus, its sampled engine and race effects in a session, played
+                          from the game's events (lib/amiga-sound.mjs; needs
+                          dist/amiga-sound.bin, else the AdLib plays), through the A500's
+                          filters or without them (clean); or the PC version's AdLib sound,
+                          the game's own. Also a menu.
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
                           in the game's steps, or none (default from the style)
     texture=smooth|classic|off  the ground texture (the game's T option): the road and
@@ -56,6 +59,8 @@
     crowd=stands|sharp|screen  the crowd in the stands: on the stands, in coarser texels far
                           away (modern), on the stands texel by texel (classic), or fixed
                           to the screen as the game draws it
+    poles=solid|pixel     flag poles and posts six inches wide, at least one game pixel
+                          (modern), or one game pixel wide as the game draws them (classic)
     fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
                           (30, the default, is the most the game's physics allows; game
                           keeps the game's own setting, 15 in the Quick Race)
@@ -79,7 +84,15 @@
   #status { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
   #notice { color: var(--muted); font-size: 13px; }
   header label { color: var(--muted); font-size: 13px; }
-  header select { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
+  header select, header button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+  header button { font-size: 13px; cursor: pointer; }
+  #keys { margin: 0 16px 12px; padding: 4px 16px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; columns: 2 300px; column-gap: 32px; font-size: 13px; }
+  #keys h3 { font-size: 13px; margin: 10px 0 4px; break-after: avoid; }
+  #keys p { margin: 0 0 4px; color: var(--muted); }
+  #keys table { border-collapse: collapse; break-inside: avoid; width: 100%; }
+  #keys td { padding: 2px 8px 2px 0; vertical-align: top; }
+  #keys td:first-child { white-space: nowrap; width: 7.5em; }
+  #keys kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   #screen { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
@@ -102,7 +115,7 @@
   #stage canvas { position: absolute; top: 0; height: 100%; display: block; image-rendering: pixelated; }
   #stage #screen, #stage #hud { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
   #stage #gl { left: 0; width: 100%; aspect-ratio: auto; image-rendering: auto; }
-  body.classic #stage #gl { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
+  body.narrow #stage #gl { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
   #stage #hud { pointer-events: none; }
   #stage [hidden] { display: none; }
   body.single #perf { margin: 6px 0 0; }
@@ -111,9 +124,12 @@
 <body>
 <header><h1>F1GP track renderer</h1>
   <label>Screen <select id="screenmode"><option value="new">New view</option><option value="original">Original game</option></select></label>
-  <label>Sound <select id="sound"><option value="adlib">PC: AdLib</option><option value="amiga">Amiga</option><option value="amiga-clean">Amiga, no filter</option></select></label>
+  <label>Sound <select id="sound"><option value="amiga">Amiga</option><option value="amiga-clean">Amiga, no filter</option><option value="adlib">PC: AdLib</option></select></label>
+  <label>Shape <select id="shape"><option value="wide">Wide</option><option value="original">4:3, as the game</option></select></label>
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
+  <button id="keysbtn" type="button" aria-expanded="false" aria-controls="keys">Keys</button>
   <span id="status">loading...</span><span id="notice"></span></header>
+<div id="keys" hidden></div>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
@@ -125,11 +141,12 @@ import { createReader } from './lib/f1gp-state.mjs';
 import { parseTrack, compileTrack, compilePitLane, CIRCUITS } from './lib/track-file.mjs';
 import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
-import { readScene, readPalette, horizonOff, markingsKey } from './lib/scene.mjs';
+import { readScene, readPalette, horizonOff, textureOn, markingsKey } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
 import { makeAmigaSound } from './lib/amiga-sound.mjs';
+import { keysHtml } from './lib/keys.mjs';
 import { manualHelper } from './lib/manual.mjs';
 import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
@@ -151,8 +168,10 @@ const opts = {
   hazeParam: q.get('haze'),
   textureParam: q.get('texture'),
   crowdParam: q.get('crowd'),
+  polesParam: q.get('poles'),
   audio: q.get('audio') ?? 'own',
-  sound: ['amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'adlib',
+  // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
+  sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
   manual: q.get('manual') ?? 'auto',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
@@ -166,10 +185,29 @@ function applyStyle(style) {
   opts.haze = opts.hazeParam ?? (style === 'classic' ? 'classic' : 'smooth');
   opts.texture = opts.textureParam ?? (style === 'classic' ? 'classic' : 'smooth');
   opts.crowd = opts.crowdParam ?? (style === 'classic' ? 'sharp' : 'stands');
+  opts.poles = opts.polesParam ?? (style === 'classic' ? 'pixel' : 'solid');
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
   document.body.classList.toggle('classic', style === 'classic');
+  showShape();
+}
+// the new view's shape: wide, or the game's 4:3 (with the game's cockpit sides, which are drawn in the 4:3)
+function showShape() {
+  document.body.classList.toggle('narrow', opts.framing === 'original');
+  const sel = document.getElementById('shape');
+  if (sel) { sel.value = opts.framing === 'original' ? 'original' : 'wide'; sel.disabled = opts.layout === 'overlay'; }
 }
 applyStyle(opts.style);
+{
+  const sel = $('shape');
+  sel.addEventListener('change', () => {
+    opts.framing = opts.framingParam = sel.value;
+    showShape();
+    const u = new URL(location.href);
+    u.searchParams.set('framing', sel.value);
+    history.replaceState(null, '', u);
+    sel.blur();
+  });
+}
 {
   const sel = $('style');
   sel.value = opts.style;
@@ -206,6 +244,16 @@ if (opts.layout === 'single') {
     u.searchParams.set('screen', sel.value);
     history.replaceState(null, '', u);
     sel.blur();
+  });
+}
+// the game's keys, under the header
+{
+  const panel = $('keys'), btn = $('keysbtn');
+  panel.innerHTML = keysHtml();
+  btn.addEventListener('click', () => {
+    panel.hidden = !panel.hidden;
+    btn.setAttribute('aria-expanded', String(!panel.hidden));
+    btn.blur(); // keys go back to the game
   });
 }
 // the sound: the game's AdLib, or the Amiga version's (made when first chosen)
@@ -458,7 +506,7 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: opts.texture, crowd: opts.crowd, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     }
     perf.frames++;
   }

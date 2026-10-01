@@ -7,7 +7,7 @@
   Draws our WebGL view from a RAM capture (no emulator), in the game's
   framing ('screen'), beside the game's own frame of that moment.
   Driven by probes/p4-gl-ram.mjs:
-    probes/gl-ram.html?ram=<path>&png=<path>&style=modern|classic&texture=smooth|classic|off&crowd=stands|sharp|screen&size=960
+    probes/gl-ram.html?ram=<path>&png=<path>&style=modern|classic&texture=smooth|classic|off&crowd=stands|sharp|screen&poles=solid|pixel&size=960
   The page sets window.glRam = { ok, error } when it has drawn.
 -->
 <style>
@@ -49,7 +49,7 @@ try {
   const fc = frameCars(cars, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
     { origin: [r.origin[0], r.origin[1]], indexed: true, states, drawn: modern ? undefined : selectCars(cars, states).drawn, all: modern, modern, paletteRgb: r.lastPalette });
   r.setCarFrame(fc, cars);
-  r.draw(cam, { framing: 'screen', haze: modern ? 'smooth' : 'classic', texture: q.get('texture') ?? 'off', crowd: q.get('crowd') ?? (modern ? 'stands' : 'sharp') });
+  r.draw(cam, { framing: 'screen', haze: modern ? 'smooth' : 'classic', texture: q.get('texture') ?? 'off', crowd: q.get('crowd') ?? (modern ? 'stands' : 'sharp'), poles: q.get('poles') ?? (modern ? 'solid' : 'pixel') });
   window.glRam = { ok: true, view: st.view.mode, frame: st.frame };
 } catch (e) {
   window.glRam = { ok: false, error: String(e?.stack ?? e) };

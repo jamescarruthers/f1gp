@@ -24,6 +24,7 @@
   .mode.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
   .mode.primary span { color: var(--accent-fg); opacity: 0.85; }
   h2 { font-size: 18px; margin: 28px 0 8px; }
+  h3 { font-size: 15px; margin: 18px 0 4px; }
   table { border-collapse: collapse; width: 100%; font-size: 15px; }
   td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
   td:first-child { width: 9em; white-space: nowrap; }
@@ -37,32 +38,60 @@
 <body>
 <main>
   <h1>Formula One Grand Prix in the browser</h1>
-  <p class="lede">MicroProse's 1991 game, unchanged, running in an emulator. A new renderer reads the game's state as it runs and draws the 3D view at your screen's full resolution and width. The handling, the other drivers, the timing and the sound are the original game's.</p>
+  <p class="lede">MicroProse's 1991 game, unchanged, running in an emulator. A new renderer reads the game's state as it runs and draws the 3D view at your screen's full resolution and width. The handling, the other drivers and the timing are the original game's; the sound is the Amiga version's.</p>
 
   <div class="modes">
     <a class="mode primary" href="render.html?style=modern"><strong>Play: modern</strong><span>Widescreen, every car in 3D with 3D wheels and helmets, smooth haze.</span></a>
     <a class="mode" href="render.html?style=classic"><strong>Play: classic</strong><span>Drawn as the original: its framing, its picture cars, its haze.</span></a>
-    <a class="mode" href="render.html?style=modern&amp;sound=amiga"><strong>Play: Amiga sound</strong><span>Modern, with the Amiga version's title tune, sampled engine and race sounds.</span></a>
     <a class="mode" href="map.html"><strong>Live map</strong><span>The game beside a top-down map of every car.</span></a>
   </div>
 
   <h2>Playing</h2>
   <ul>
     <li>The game loads in a few seconds (about 4 MB). The menus are the game's own screens. When you are in the car the new view takes over the screen, with the game's cockpit, dash, mirrors and messages over it.</li>
-    <li>Sound starts on your first key press or click. The Sound menu at the top of the page switches from the PC version's AdLib sound to the Amiga version's: Dave Lowe's original title tune in the menus, and in the car its recorded engine and its sampled tyres, kerbs, contact, start lights and passing cars, played when the game plays its own. "Amiga, no filter" leaves out the A500's muffling filter.</li>
+    <li>Sound starts on your first key press or click. It is the Amiga version's: Dave Lowe's original title tune in the menus, and in the car its recorded engine and its sampled tyres, kerbs, contact, start lights and passing cars, played when the game plays its own. The Sound menu at the top of the page leaves out the A500's muffling filter ("Amiga, no filter") or switches to the PC version's AdLib sound.</li>
     <li>Before the menus the game asks which language your manual is in, then for a word from it: page 85, paragraph 4, line 1, word 11, which is <strong>require</strong>. The page answers both for you, and picks keyboard control.</li>
-    <li>You can switch between modern and classic with the Style menu at the top of the page. The Screen menu switches back to the game's own drawing.</li>
+    <li>You can switch between modern and classic with the Style menu at the top of the page. The Shape menu makes the new view 4:3, as the game's screen, so the cockpit's sides show; the modern style is wide. The Screen menu switches back to the game's own drawing.</li>
   </ul>
 
-  <h2>Keys</h2>
+  <h2 id="keys">Keys</h2>
+  <h3>Driving</h3>
   <table>
     <tr><td><kbd>A</kbd> <kbd>Z</kbd></td><td>Accelerate, brake</td></tr>
     <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>Steer left, right</td></tr>
-    <tr><td><kbd>Space</kbd></td><td>Drop the car off its jacks in the pits</td></tr>
+    <tr><td><kbd>Space</kbd></td><td>Change gear when Auto Gears is off: up with A held, down without it</td></tr>
+    <tr><td><kbd>Space</kbd></td><td>In the pits: drop the car off its jacks</td></tr>
+    <tr><td><kbd>Enter</kbd></td><td>Ask for a pit stop (the lamp at the bottom right of the cockpit)</td></tr>
+  </table>
+  <h3>Driving aids</h3>
+  <p class="small">Each key turns one on or off, as far as the skill level allows. The game has no traction control.</p>
+  <table>
+    <tr><td><kbd>F1</kbd></td><td>Auto brakes</td></tr>
+    <tr><td><kbd>F2</kbd></td><td>Auto gears</td></tr>
+    <tr><td><kbd>F3</kbd></td><td>Self-righting spins</td></tr>
+    <tr><td><kbd>F4</kbd></td><td>Indestructible car</td></tr>
+    <tr><td><kbd>F5</kbd></td><td>Best line, dotted on the track</td></tr>
+    <tr><td><kbd>F6</kbd></td><td>Suggested gear</td></tr>
+  </table>
+  <h3>Views</h3>
+  <table>
+    <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>TV view, back to the cockpit</td></tr>
     <tr><td><kbd>Page Down</kbd></td><td>Chase view</td></tr>
     <tr><td><kbd>Delete</kbd></td><td>Reverse view</td></tr>
-    <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>TV view, back to the cockpit</td></tr>
-    <tr><td><kbd>P</kbd> <kbd>Esc</kbd></td><td>Pause, menu</td></tr>
+    <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>Watch the car ahead, behind</td></tr>
+    <tr><td><kbd>Home</kbd></td><td>Back to your own car</td></tr>
+    <tr><td><kbd>N</kbd></td><td>Show the name of the driver you are watching</td></tr>
+    <tr><td><kbd>G</kbd></td><td>The dash shows the drivers ahead and behind</td></tr>
+    <tr><td><kbd>R</kbd></td><td>Instant replay</td></tr>
+  </table>
+  <h3>Game</h3>
+  <table>
+    <tr><td><kbd>P</kbd></td><td>Pause</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Leave the session, back to the menus</td></tr>
+    <tr><td><kbd>T</kbd></td><td>Ground texture on or off</td></tr>
+    <tr><td><kbd>D</kbd></td><td>Detail of the game's own drawing (Screen: Original game): fewer trackside objects, in four steps</td></tr>
+    <tr><td><kbd>=</kbd> <kbd>-</kbd></td><td>Sound up, down: everything, no tyre squeal, off</td></tr>
+    <tr><td><kbd>O</kbd></td><td>Processor occupancy: how busy the game is</td></tr>
   </table>
 
   <h2>How it works</h2>

@@ -150,6 +150,11 @@ export function markingsKey(mem) {
 }
 
 /** The camera's segment +26 bit 3: no horizon image here. */
+/** The game's ground texture option (T): SS:11A6 bit 80h. */
+export function textureOn(mem) {
+  return (mem.heap()[mem.memBase + (mem.SS << 4) + 0x11a6] & 0x80) !== 0;
+}
+
 export function horizonOff(mem) {
   const H = mem.heap(), B = mem.memBase, ds = B + (mem.DS << 4);
   const off = H[ds + 0x096f] | (H[ds + 0x0970] << 8), seg = H[ds + 0x0971] | (H[ds + 0x0972] << 8);

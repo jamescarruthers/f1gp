@@ -189,6 +189,32 @@ events").
 | DS:0950 / DS:0952 word | Winding down (state 20h): the step and the revs where the engine stops | rpm | SC | medium |
 | DS:0954 / DS:0956 word | The passing sound's variant (0–3 in turn, effects 6–9) and the passing car (0 after a change of view) | – / near pointer | SC 19ED:2E87–2EBD, 2EDD | high |
 
+## Keys
+
+In a session the game reads 36 keys into a bitfield each frame (0:0005): a
+table of key codes at DS:2FA5 (byte = scancode >> 3 in the high nibble,
+scancode & 7 in the low bits, as the keyboard interrupt 8B6E:0535 keeps them
+in SS:04CC) and of bit numbers at DS:2FC9 (0–2Fh, a key down clears its bit)
+fill DS:2349–234E. The keys and the bits the code tests:
+
+| Key | Bit | What the code does | Evidence |
+| --- | --- | --- | --- |
+| F1–F6 | DS:234A 80h–04h | Toggle SS:1220 bits 0–5, the driving aids (0:E2BC; 0:053C after F5 rewrites the best line) | SC; DT: each key toggled its bit (probes/p5-keys.mjs) |
+| A, Z | DS:234B 01h, 02h | Accelerate, brake (19ED:2BA2, 2C01) | SC |
+| Space (Alt with another control setting, SS:1117/1118) | DS:234B 10h (234A 02h) | The gear button (19ED:2C8C): with Auto Gears off, up with A held, down without | SC; DT (gears 0→1→2, then down to R) |
+| , . | DS:234B 04h, 08h | Steer | SC |
+| Enter | DS:234B 20h | Toggles DS:2969; 19ED:1C0D sets the player's car+23 bit 80h (pitting) and +B3 bit 4: a pit request, shown by a cockpit lamp | SC; DT (the lamp) |
+| Q | DS:234B 40h | Toggles DS:296F (0:D598); not decoded | SC |
+| PgDn, Home, Del, ←, → | DS:234C 04h, 02h, 01h; DS:234D 20h, 10h | View requests: DS:0983 bits (0:E60A–E6AC) | SC; DT |
+| ↑ ↓ | DS:234D 80h, 40h | The viewed car (0:E5C0, E5E5) | SC; DT |
+| D | DS:234D 08h | Detail level DS:0068, 3 down to 0 (0:DC94) | SC; DT |
+| N | DS:234D 04h | DS:0016 = game time + 2 s: the name banner | SC; DT |
+| P | DS:234D 02h | Pause | DT |
+| T | DS:234E 02h | Ground texture, SS:11A6 bit 80h (80h by default) | SC; DT |
+| G | DS:234E 04h | Toggles DS:0073: the dash shows the drivers ahead and behind | SC; DT |
+| = − | DS:234E 20h, 10h | DS:006A up, down: 2 everything, 1 no tyre squeal (19ED:2DA9), 0 off (SS:018E = 80h) | SC |
+| F7–F10, Esc, R, V, Ctrl | DS:234C 80h–08h, DS:234E 80h, 40h, 08h | Not tested in this bitfield; Esc leaves the session, R starts the replay, the others are not decoded | SC; DT (Esc, R) |
+
 ## View and camera
 
 | Address | Meaning | Values / units | Evidence | Conf. |

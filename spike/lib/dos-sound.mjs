@@ -104,12 +104,14 @@ export function driverHook(mem) {
 
 /**
  * The game's sound flags: on (SS:018E = 0: a session runs with the game's
- * sounds on; 80h in the menus, and set again when the session ends) and
- * left (SS:124E bit 10h: the player left the session with Esc).
+ * sounds on; 80h in the menus, and set again when the session ends), left
+ * (SS:124E bit 10h: the player left the session with Esc) and level (DS:006A,
+ * the sound setting the = and - keys step: 2 everything, 1 no tyre squeal,
+ * 0 off, which also sets SS:018E).
  */
 export function soundFlags(mem) {
-  const H = mem.heap(), ss = mem.memBase + (mem.SS << 4);
-  return { on: H[ss + 0x18e] === 0, left: (H[ss + 0x124e] & 0x10) !== 0 };
+  const H = mem.heap(), ss = mem.memBase + (mem.SS << 4), ds = mem.memBase + (mem.DS << 4);
+  return { on: H[ss + 0x18e] === 0, left: (H[ss + 0x124e] & 0x10) !== 0, level: H[ds + 0x6a] };
 }
 
 /** The engine sound: { state (DS:0948), revs (DS:0054) }, and the view (DS:0981; C0h: the TV view, no engine sound). */
