@@ -59,8 +59,8 @@ const HAZE_SEG_REL = 0x7bce, HAZE_OFF = 0x7bc0;
 // The car's attached effect shapes (DS:351B, index = A07D's "di"):
 //   0: car+97 bit 80h  shape 8   behind the car, a running mechanic (bitmaps 9Bh-9Fh)
 //   1: car+9A 10h+04h  shape 0Eh behind the car, a burst of debris (bitmaps 91h-9Ah)
-//   2: car+9A 80h+20h  shape 0Fh behind the car, raised: a broken part
-//   3: car+9A 80h+40h  shape 10h in front, turned round: a broken part
+//   2: car+9A 80h+20h  shape 0Fh at the rear wing: the broken rear wing (team colours)
+//   3: car+9A 80h+40h  shape 10h at the nose, turned round: the broken front wing (team colours)
 //   4: car+9A 10h      shape 0Eh in front, debris
 // The +9A bits are set for the two cars of a contact (0:B9B0, B9D9).
 export const ATTACHMENT_NAMES = ['mechanic', 'debris-rear', 'part-rear', 'part-front', 'debris-front'];
@@ -274,8 +274,10 @@ export function selectCars(cars, states, opt = {}) {
     if (--cx === 0) break;
     if (--left < 0) break;
   }
-  // drawing order: the "later" object list sorted by key, far first; ties keep A533's order
-  drawn.sort((a, b) => b.key - a.key);
+  // drawing order: the walk lists objects far to near (by the segment a car is
+  // filed on), then 0F47:53BF bubble-sorts the list by key, far first, keeping
+  // the order of equal keys
+  drawn.sort((a, b) => b.key - a.key || b.ahead - a.ahead);
   return { drawn, skipped, walk };
 }
 
@@ -400,9 +402,108 @@ export function posePoints(cars, shape, lod, pose, pts = shapePoints(shape, lod)
   const { cos, sin } = cars.trig;
   const c = cos(pose.yaw) / 16384, s = sin(pose.yaw) / 16384, st = sin(pose.pitch);
   return pts.map((pt) => {
-    const tz = Math.floor((pt.y * st) / 16384);
+    // the tilt table holds hi16(v * sin << 2) for the scale value; a negative word negates it
+    const tz = pt.y >= 0 ? Math.floor((pt.y * st) / 16384) : -Math.floor((-pt.y * st) / 16384);
     return [pose.x + pt.x * c + pt.y * s, pose.y - pt.x * s + pt.y * c, pose.z + shape.z12 + pt.z + tz];
   });
+}
+
+/**
+ * The renderer's camera as the shape drawer uses it (for exact pixel work):
+ * X/Y fine (SS:0142/014A, 32-bit), Z (SS:013E), cos/sin of the yaw (SS:0154/0156,
+ * table values), horizon row (SS:0130), SS:017C.
+ */
+export function gameCamera(cars) {
+  const { rd, mem } = cars;
+  const ss = mem.SS << 4, ds = mem.DS << 4;
+  const s32 = (a) => (rd.u16(a) | (rd.u16(a + 2) << 16)) | 0;
+  return {
+    X: s32(ss + 0x142), Y: s32(ss + 0x14a), Z: rd.s16(ss + 0x13e), cos: rd.s16(ss + 0x154), sin: rd.s16(ss + 0x156),
+    heading: rd.u16(ds + DS.camYaw), horizon: rd.s16(ss + 0x130), vscale: rd.u16(ss + SS.vscale),
+    mode: { 0x00: 'cockpit', 0x80: 'tv', 0xa0: 'chase', 0xb0: 'reverse-chase' }[rd.u8(ds + DS.view) & 0xb0] ?? 'tv',
+  };
+}
+
+/**
+ * The game's projection of a camera-space point (0F47:9110): x = 160 +
+ * trunc(lat * 256 / dep); y = horizon - q, q = (hi16(dz * SS:017C * 2) * 32
+ * [* 8 near]) / dep, rounded away from zero only when negative (the quirk of
+ * renderer-notes "Projection quirk"). lat/dep in 1/8 ft, or 1/64 ft when near.
+ * @returns {[number, number]} column, viewport row
+ */
+export function gameProject(gc, p, near) {
+  const D = Math.max(1, p.dep | 0);
+  const x = 160 + Math.trunc(((p.lat32 ?? p.lat * 256)) / D);
+  const dzs = Math.floor((p.dz * gc.vscale * 2) / 65536);
+  const n = dzs * 32 * (near ? 8 : 1);
+  let q = Math.trunc(n / D);
+  const r = n - q * D;
+  if (r >= 0) { if ((q & 0xffff) >= D) q += 1; } else if (-2 * r >= D) q -= 1;
+  return [x, gc.horizon - q];
+}
+
+// camera space, float (any camera): lat/dep in 1/8 ft (x8 when near), dz in Z units
+function floatSpace(cars, cam, shape, pose) {
+  const near = Math.abs(pose.x - cam.x) + shape.size < 0x3e80 && Math.abs(pose.y - cam.y) + shape.size < 0x3e80;
+  const k = near ? 8 : 1;
+  const conv = (w) => { const v = toCamera(cam, w); return { lat: v[0] * k, dep: v[1] * k, dz: v[2] }; };
+  const ref = conv([pose.x, pose.y, pose.z + shape.z14]);
+  return {
+    near, k, ref,
+    points: (sh, lod, P, W) => W.map(conv),
+    col: (p) => (p.dep < 8 ? (p.lat < 0 ? 0 : 320) : 160 + Math.trunc((Math.floor(p.lat) * 256) / Math.max(1, Math.floor(p.dep)))),
+  };
+}
+
+// camera space, the game's integer arithmetic (0F47:88A5, 20AB, 8C75, 90C3)
+function gameSpace(cars, gc, shape, pose) {
+  const { cos, sin } = cars.trig;
+  let dX = pose.x - gc.X, dY = pose.y - gc.Y;
+  const near = Math.abs(dX) + shape.size < 0x3e80 && Math.abs(dY) + shape.size < 0x3e80;
+  if (!near) { dX >>= 3; dY >>= 3; }
+  dX = s16(dX & 0xffff); dY = s16(dY & 0xffff);
+  const c = gc.cos, s = gc.sin;
+  const lat32 = ((dX * c - dY * s) | 0) >> 6;
+  const ref = { lat: s16((lat32 >> 8) & 0xffff), lat32, dep: s16((((dY * c + dX * s) | 0) >> 14) & 0xffff), dz: s16((pose.z + shape.z14 - gc.Z) & 0xffff) };
+  const arel = (pose.yaw - gc.heading) & 0xffff;
+  const ca = cos(arel), sa = sin(arel), st = sin(pose.pitch);
+  return {
+    near, k: near ? 8 : 1, ref,
+    points: (sh, lod) => {
+      // the rotated scale values: table entries for the packed values; a negative
+      // point word takes the negated entry
+      const packed = [];
+      for (let bit = 14, i = 0; bit >= 0; bit--, i++) if (lod.mask & (1 << bit)) packed.push(sh.scaleAt(i));
+      const rot = (v, f) => (near ? Math.floor((v * f) / 16384) : Math.floor((v * f) / 131072));
+      const T = (w, f, tilt) => {
+        if (w === 0) return 0;
+        const neg = w >= 34, j = ((neg ? w - 34 : w - 2) >> 1);
+        const v = packed[j] ?? 0;
+        const e = tilt ? (f ? Math.floor((v * f) / 16384) : 0) : rot(v, f);
+        return neg ? -e : e;
+      };
+      const dz0 = ref.dz + sh.z12 - sh.z14;
+      const raw = [];
+      const count = shapePoints(sh, lod).length;
+      for (let i = 0; i < count; i++) raw.push(sh.rawPoint(i));
+      const out = new Array(count);
+      const calc = (i) => {
+        if (out[i]) return out[i];
+        const r = raw[i];
+        if (r.wx & 0x8000) {
+          const j = r.wx & 0x7fff, q = calc(j);
+          out[i] = { lat: q.lat, dep: q.dep, dz: s16((r.z + T(raw[j].wy, st, true) + dz0) & 0xffff), ref: j };
+        } else {
+          const X = T(r.wx, ca) + T(r.wy, sa), Y = T(r.wy, ca) - T(r.wx, sa);
+          out[i] = { lat: s16((ref.lat + X) & 0xffff), dep: s16((ref.dep + Y) & 0xffff), dz: s16((r.z + T(r.wy, st, true) + dz0) & 0xffff) };
+        }
+        return out[i];
+      };
+      for (let i = 0; i < count; i++) calc(i);
+      return out;
+    },
+    col: (p) => (p.dep < 8 ? (p.lat < 0 ? 0 : 320) : 160 + Math.trunc((p.lat32 ?? p.lat * 256) / p.dep)),
+  };
 }
 
 /**
@@ -410,49 +511,50 @@ export function posePoints(cars, shape, lod, pose, pts = shapePoints(shape, lod)
  * pose, in the game's order, for camera cam = { x, y, z, heading, mode }.
  * pose = { x, y, z, yaw, pitch, steer, palette, helmet, driver, alt, shapeId }.
  * opt.wide: use the true ray angle instead of the game's capped table.
- * @returns {{ kind: 'polygons'|'bitmap'|'mirror'|'none', reason?, depth8, lod, sector, a, ref,
- *   haze, elements: ({kind:'poly', pts, colour, code, facing}|{kind:'bitmap', at, id, mirrored, palette, what, depth8})[] }}
+ * opt.game: gameCamera(cars): decide everything with the game's integer
+ *   arithmetic (exact columns, partner nudges and face tests) and return each
+ *   element's camera-space points (g) for a pixel-exact software renderer.
+ * @returns {{ kind: 'polygons'|'bitmap'|'mirror'|'none', reason?, depth8, lod, sector, a, ref, near,
+ *   haze, elements: ({kind:'poly', pts, g, cols, colour, code}|{kind:'bitmap', at, g, col, id, mirrored, palette, what, depth8})[] }}
  */
 export function shapeParts(cars, shape, pose, cam, opt = {}) {
   const out = { kind: 'none', elements: [] };
   if (!shape) return out;
   const ref = [pose.x, pose.y, pose.z + shape.z14];
   out.ref = ref;
-  const v = toCamera(cam, ref);
-  const near = Math.abs(pose.x - cam.x) + shape.size < 0x3e80 && Math.abs(pose.y - cam.y) + shape.size < 0x3e80;
+  const sp = opt.game ? gameSpace(cars, opt.game, shape, pose) : floatSpace(cars, cam, shape, pose);
+  const near = sp.near;
   out.near = near;
-  const depth8 = Math.floor(v[1]);
+  const depth8 = Math.floor(sp.ref.dep / sp.k);
   out.depth8 = depth8;
-  const r42 = (pose.yaw - cam.heading) & 0xffff;
-  const corrOf = (vv, hi) => {
-    if (opt.wide) {
-      const ang = Math.round((Math.atan2(vv[0], vv[1]) / (2 * Math.PI)) * 65536);
-      return (-Math.max(-0x2000, Math.min(0x2000, ang))) & 0xffff;
-    }
-    const col = vv[1] < 8 ? (vv[0] < 0 ? 0 : 320) : column(vv, hi);
-    return columnCorrection(cars, col);
+  const heading = opt.game ? opt.game.heading : cam.heading;
+  const r42 = (pose.yaw - heading) & 0xffff;
+  const corrOfCol = (col) => columnCorrection(cars, col);
+  const rayCorr = (p) => {
+    const ang = Math.round((Math.atan2(p.lat, p.dep) / (2 * Math.PI)) * 65536);
+    return (-Math.max(-0x2000, Math.min(0x2000, ang))) & 0xffff;
   };
   if (pose.shapeId === CAR_SHAPE && depth8 < cars.consts.nearDepth) {
     // 0F47:89F5: nearer than R:58 (26 = 3.25 ft) or behind: in the cockpit view
     // the car goes to a mirror (8A1D), in other views it is not drawn
-    out.kind = cam.mode === 'cockpit' ? 'mirror' : 'none';
+    out.kind = (opt.game ? opt.game.mode : cam.mode) === 'cockpit' ? 'mirror' : 'none';
     out.reason = 'nearer than R:58';
     return out;
   }
   let lod = shape.lods.find((l) => Math.max(depth8, 0) <= l.max) ?? shape.lods[shape.lods.length - 1];
   out.lod = lod;
-  const r44 = corrOf(v, near);
+  const r44 = opt.wide ? rayCorr(sp.ref) : corrOfCol(sp.col(sp.ref));
   const a = (r42 + r44) & 0xffff;
   out.a = a;
   if (lod.sprite) {
     // bitmap LOD (9A75): one frame at the reference point, by view angle
-    if (v[1] < 8) { out.reason = 'behind'; return out; }
+    if (sp.ref.dep < 8) { out.reason = 'behind'; return out; }
     const f = spriteLodFrame(lod, a);
     if (!f) { out.reason = 'no frame'; return out; }
     if (!f.polygons) {
       out.kind = 'bitmap';
       out.haze = hazeLevel(depth8);
-      out.elements.push({ kind: 'bitmap', at: ref, id: f.id, mirrored: f.mirrored, palette: pose.palette, what: 'far', depth8 });
+      out.elements.push({ kind: 'bitmap', at: ref, g: sp.ref, id: f.id, mirrored: f.mirrored, palette: pose.palette, what: 'far', depth8 });
       return out;
     }
     lod = shape.lods.find((l) => !l.sprite);
@@ -460,18 +562,18 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
   const sh = pose.alt ? cars.carAlt : shape;
   const P = shapePoints(sh, lod);
   const W = posePoints(cars, sh, lod, pose, P);
-  const C = W.map((p) => toCamera(cam, p));
+  const C = sp.points(sh, lod, P, W);
   // visibility list: all behind, all left or all right of the screen -> nothing
   if (sh.vis && sh.vis.length) {
     let allBehind = true, allLeft = true, allRight = true;
     for (const i of sh.vis) {
       const c = C[i];
-      if (c[1] >= 8) {
+      if (c.dep >= 8) {
         allBehind = false;
-        const x = column(c, near);
+        const x = sp.col(c);
         if (x >= 0) allLeft = false;
         if (x < 320) allRight = false;
-      } else { allLeft = allLeft && c[0] < 0; allRight = allRight && c[0] >= 0; }
+      } else { allLeft = allLeft && c.lat < 0; allRight = allRight && c.lat >= 0; }
     }
     if (allBehind || allLeft || allRight) { out.reason = 'outside the view'; return out; }
   }
@@ -480,24 +582,42 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
   const nd = lod.dirs.length;
   const sector = (a >> ((lod.shift & 15) + 1)) % nd;
   out.sector = sector;
+  // the game projects a point when an element first uses it (vector by vector,
+  // first point then second); a point whose partner (point word +6) is already
+  // on the same column moves one column right (0F47:9224)
+  const proj = new Map();
+  const projectPoint = (i) => {
+    let r = proj.get(i);
+    if (r) return r;
+    const c = C[i];
+    r = c.dep < 8 ? { behind: true, x: c.lat < 0 ? 0 : 320 } : { behind: false, x: sp.col(c) };
+    const q = P[i].partner;
+    const rq = q ? proj.get(q) : null;
+    if (!r.behind && C[i].ref === undefined && rq && !rq.behind && rq.x === r.x) r.x += 1;
+    proj.set(i, r);
+    return r;
+  };
   for (const o of lod.dirs[sector]) {
     const el = sh.elements.get(o);
     if (!el) continue;
     if (el.kind === 'poly') {
+      for (const e of el.edges) { const [va, vb] = sh.vector(Math.abs(e)); projectPoint(va); projectPoint(vb); }
       if (el.facePoint !== undefined) {
-        // drawn only when the point is not farther than its partner (0F47:99F8)
+        // drawn only when the point is not right of its partner on the screen (0F47:99F8:
+        // the slot word +6 compared is the projected column)
         const p = el.facePoint, q = P[p]?.partner ?? 0;
-        const cp = C[p], cq = C[q];
-        if (cp && cq && cp[1] >= 8 && cq[1] >= 8 && Math.floor(cp[1] * (near ? 8 : 1)) > Math.floor(cq[1] * (near ? 8 : 1))) continue;
+        const rp = projectPoint(p), rq = projectPoint(q);
+        if (!rp.behind && !rq.behind && rp.x > rq.x) continue;
       }
       const loop = polygonLoop(sh, el);
       if (loop.length < 3) continue;
-      out.elements.push({ kind: 'poly', pts: loop.map((i) => W[i]), cam: loop.map((i) => C[i]), code: el.colour, colour: cars.palettes[(pose.palette + el.colour) & 0xffff] ?? 0, order: o });
+      out.elements.push({ kind: 'poly', pts: loop.map((i) => W[i]), g: loop.map((i) => C[i]), cols: loop.map((i) => proj.get(i)?.x ?? null), code: el.colour, colour: cars.palettes[(pose.palette + el.colour) & 0xffff] ?? 0, order: o, face: el.facePoint });
     } else if (el.kind === 'bitmap') {
       if (el.type & 0x10 && !pose.driver) continue; // the driver's parts (helmet)
       const pc = C[el.point];
-      if (!pc || pc[1] < 8) continue;
-      const d8 = Math.floor(pc[1]);
+      if (!pc || pc.dep < 8) continue;
+      const pcol = projectPoint(el.point).x;
+      const d8 = Math.floor(pc.dep / sp.k);
       if ((el.maxDepth) < d8) continue;
       let id = el.id, mirrored, palette = el.type & 2 ? el.palette : pose.palette, what = 'bitmap';
       if (id >= 0x4b) {
@@ -508,11 +628,11 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
         const f = helmetFrame(id, (r42 + r44) & 0xffff, pose.steer);
         id = f.id; mirrored = f.mirrored; palette = pose.helmet ?? pose.palette; what = 'helmet';
       } else {
-        const f = wheelFrame(id, (r42 + corrOf(pc, near)) & 0xffff, pose.steer);
+        const f = wheelFrame(id, (r42 + (opt.wide ? rayCorr(pc) : corrOfCol(pcol))) & 0xffff, pose.steer);
         what = id >= 0x21 ? 'front wheel' : 'rear wheel';
         id = f.id; mirrored = f.mirrored;
       }
-      out.elements.push({ kind: 'bitmap', at: W[el.point], id, mirrored, palette, what, depth8: d8, order: o });
+      out.elements.push({ kind: 'bitmap', at: W[el.point], g: pc, col: pcol, id, mirrored, palette, what, depth8: d8, order: o });
     } else if (el.kind === 'line') {
       const [ia, ib] = sh.vector(el.vector);
       out.elements.push({ kind: 'line', a: W[ia], b: W[ib], colour: cars.palettes[pose.palette & 0xffff] ?? 0, order: o });
@@ -524,6 +644,9 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
 /** Pose of attached effect shape k (0F47:A406): offsets rotated by the car's yaw, Z raised by the car's pitch; yaw/pitch added. */
 export function attachmentPose(cars, c, k) {
   const e = cars.attach[k];
+  // A2CC loads the entry's palette (+0A); A30A draws the broken parts 2 and 3
+  // through A2D3, which skips that load: they keep the team palette
+  const palette = k === 2 || k === 3 ? c.palette : e.palette;
   const { cos, sin } = cars.trig;
   const co = cos(c.yaw), si = sin(c.yaw);
   const dx = ((e.dx * co + e.dy * si) << 2) >> 16;
@@ -531,7 +654,7 @@ export function attachmentPose(cars, c, k) {
   const dz = e.dz + ((((sin(c.pitch) * e.dy) << 2)) >> 16);
   return {
     x: c.x + dx, y: c.y + dy, z: c.z + dz, yaw: (c.yaw + e.dyaw) & 0xffff, pitch: (c.pitch + e.dpitch) & 0xffff,
-    steer: c.steer, palette: e.palette, helmet: c.helmet, driver: c.driver, alt: false, shapeId: e.shape, attachment: k,
+    steer: c.steer, palette, helmet: c.helmet, driver: c.driver, alt: false, shapeId: e.shape, attachment: k,
   };
 }
 
@@ -591,26 +714,51 @@ export function carParts(cars, c, cam, opt = {}) {
  * outline (table SS:63DE). Only cars, no scenery.
  * @returns {{ x, row, id, mirrored, depth8, side }|null} x = anchor column, row = anchor screen row in the cockpit frame
  */
-export function mirrorImage(cars, c, cam) {
+export function mirrorImage(cars, c, cam, gc = null) {
   const shape = cars.car;
-  const v = toCamera(cam, [c.x, c.y, c.z + shape.z14]);
-  const lat = Math.trunc(v[0]), dep = Math.trunc(v[1]);
+  let lat, dep;
+  if (gc) {
+    const g = gameSpace(cars, gc, shape, { ...c });
+    lat = g.ref.lat; dep = g.ref.dep;
+    if (g.near) { lat >>= 3; dep >>= 3; }
+  } else {
+    const v = toCamera(cam, [c.x, c.y, c.z + shape.z14]);
+    lat = Math.trunc(v[0]); dep = Math.trunc(v[1]);
+  }
   const left = lat < 0;
   const off = left ? -140 : 140, ang = left ? cars.consts.mirrorLeft : cars.consts.mirrorRight;
   const { cos, sin } = cars.trig;
   const co = cos(ang), si = sin(ang);
-  const dep2 = ((dep * co + lat * si) * 16) / 65536;      // hi16(<< 4): 4x depth
-  const lat2 = -(lat * co - dep * si) / 16384;
+  const A = (lat * co - dep * si) | 0, B = (dep * co + lat * si) | 0;
+  const dep2 = s16((B >> 12) & 0xffff);                 // hi16(B << 4): 4x the depth
+  const lat32 = (-A | 0) >> 6;                           // the mirrored lateral, x 256
   if (dep2 < 8) return null;
-  const x = 160 + Math.trunc((lat2 * 256) / dep2) + off;
+  const x = 160 + Math.trunc(lat32 / dep2) + off;
   if (((x - 160) ^ off) < 0) return null;
   const lod = shape.lods[shape.lods.length - 1];
   if (!lod.sprite) return null;
-  let r42 = (-(((c.yaw - cam.heading) & 0xffff) - ang)) & 0xffff;
+  const heading = gc ? gc.heading : cam.heading;
+  const r42 = (-(((c.yaw - heading) & 0xffff) - ang)) & 0xffff;
   const r44 = columnCorrection(cars, x - off);
   const f = spriteLodFrame(lod, (r42 + r44) & 0xffff);
   if (!f || f.polygons) return null;
-  return { x, row: 123, id: f.id, mirrored: f.mirrored, depth8: Math.floor(dep2), side: left ? 'left' : 'right', palette: c.palette };
+  return { x, row: 123, id: f.id, mirrored: f.mirrored, depth8: dep2, side: left ? 'left' : 'right', palette: c.palette };
+}
+
+/**
+ * The mirror outlines (0F47:1C01, 1D6A): screen rows 116-137, each with a span
+ * [left, right) and a gap [gapLeft, gapRight) between the two mirrors, read from
+ * the tables at SS:63DE (+1F2h left, +298h right, +A6h / +14Ch the gap).
+ * @returns {{ row, active, left, right, gapLeft, gapRight }[]}
+ */
+export function mirrorClip(cars) {
+  const { rd, mem } = cars;
+  const ss = mem.SS << 4, out = [];
+  for (let r = 116; r < 138; r++) {
+    const b = ss + 0x63de + 2 * (r - 116);
+    out.push({ row: r, active: rd.u16(b) !== 0, left: rd.s16(b + 0x1f2), right: rd.s16(b + 0x298), gapLeft: rd.s16(b + 0xa6), gapRight: rd.s16(b + 0x14c) });
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ frame
@@ -654,7 +802,7 @@ export function frameCars(cars, st, cam, opt = {}) {
     const cp = carParts(cars, c, cam, { wide: opt.wide, cameraObject: c.slot === camObjSlot });
     list.push({ slot: c.slot, key: e.key, parts: cp.parts });
     for (const part of cp.parts) {
-      if (part.kind === 'mirror') { const m = mirrorImage(cars, c, cam); if (m) mirrors.push({ slot: c.slot, ...m }); continue; }
+      if (part.kind === 'mirror') { const m = mirrorImage(cars, c, cam, opt.game); if (m) mirrors.push({ slot: c.slot, ...m }); continue; }
       if (part.kind === 'none') continue;
       const oi = objects.length;
       const ref = part.ref;
