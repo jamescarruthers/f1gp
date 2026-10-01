@@ -13,6 +13,7 @@
 
 import { buildMesh } from './track-mesh.mjs';
 import { buildSceneMesh } from './scene.mjs';
+import { buildSectorMesh, frameObjects, buildSpriteAtlas, spriteIdsUsed, spriteQuads } from './objects.mjs';
 
 const VS = `#version 300 es
 precision highp float;
@@ -41,6 +42,47 @@ out vec4 outColour;
 void main() {
   if (vColour.y < 0.0) outColour = vec4(texture(uPalette, vec2((vColour.x + 0.5) / 256.0, 0.5)).rgb, 1.0);
   else outColour = vec4(vColour, 1.0);
+}`;
+
+// Bitmaps (trees, boards, marshals): camera-facing quads; each atlas texel is
+// a colour code 0-15 into the sprite's 16-colour object palette (255 = clear).
+const SPRITE_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUv;
+layout(location = 2) in float aPal;
+layout(location = 3) in float aBias;
+uniform vec3 uCam;
+uniform vec2 uSinCos;
+uniform vec4 uProj;
+uniform vec2 uDepth;
+out vec2 vUv;
+flat out int vPal;
+void main() {
+  vec3 d = aPos - uCam;
+  float lat = d.x * uSinCos.y - d.y * uSinCos.x;
+  float depth = d.x * uSinCos.x + d.y * uSinCos.y;
+  float n = uDepth.x, f = uDepth.y;
+  float dz = max(depth - aBias, n);   // drawn as if nearer by aBias
+  gl_Position = vec4(uProj.x * lat, uProj.y * d.z + uProj.z * depth, ((dz * (f + n) - 2.0 * f * n) / ((f - n) * dz)) * depth, depth);
+  vUv = aUv;
+  vPal = int(aPal + 0.5);
+}`;
+const SPRITE_FS = `#version 300 es
+precision highp float;
+precision highp usampler2D;
+in vec2 vUv;
+flat in int vPal;
+uniform sampler2D uAtlas;   // R8: colour codes
+uniform sampler2D uPalMap;  // R8, 256 x 9: object palettes (palette indices)
+uniform sampler2D uPalette; // RGBA, 256 x 1: the live palette
+out vec4 outColour;
+void main() {
+  int code = int(texelFetch(uAtlas, ivec2(floor(vUv)), 0).r * 255.0 + 0.5);
+  if (code >= 255) discard;
+  int n = vPal + code;
+  int idx = int(texelFetch(uPalMap, ivec2(n % 256, n / 256), 0).r * 255.0 + 0.5);
+  outColour = vec4(texelFetch(uPalette, ivec2(idx, 0), 0).rgb, 1.0);
 }`;
 
 // Background: sky above the horizon row, ground below.
@@ -122,6 +164,9 @@ export class TrackRenderer {
     this.bgProg = program(gl, BG_VS, BG_FS);
     this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette'].map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
+    this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
+    this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
+    this.objects = null;
     this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon']
       .map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
     this.sceneTex = null;
@@ -239,6 +284,68 @@ export class TrackRenderer {
   }
 
   /**
+   * Trackside objects read from the game's memory (objects.mjs readObjects):
+   * stands, buildings, bridges, boards, trees. Built once per circuit as the
+   * game's per-sector display lists; each frame picks what the game would
+   * draw from the camera's angle to each object.
+   * @param {object} objs   readObjects(mem)
+   * @param {object} crowd  readCrowd(mem) (crowd.active: race crowds in the stands)
+   */
+  setObjects(objs, crowd = { active: true }) {
+    const gl = this.gl, origin = [this.origin[0], this.origin[1]];
+    const meshFor = (set) => {
+      const mesh = buildSectorMesh(objs, { indexed: true, origin, crowd: crowd.active, set });
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.data, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const ebo = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+      const lineVao = gl.createVertexArray();
+      gl.bindVertexArray(lineVao);
+      const lvbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, lvbo);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.lines.length ? mesh.lines : new Float32Array(6), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const lebo = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
+      gl.bindVertexArray(null);
+      return { mesh, vao, ebo, lineVao, lebo };
+    };
+    const track = meshFor('track'), pit = meshFor('pit');
+    const atlas = buildSpriteAtlas(objs, spriteIdsUsed(objs));
+    const r8 = (w, h, data) => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+      for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+      for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      return t;
+    };
+    const atlasTex = r8(atlas.width, Math.max(atlas.height, 1), atlas.data);
+    const palMap = new Uint8Array(256 * 9);
+    palMap.set(objs.palettes.subarray(0, palMap.length));
+    const palMapTex = r8(256, 9, palMap);
+    const spriteVao = gl.createVertexArray();
+    gl.bindVertexArray(spriteVao);
+    const spriteVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, spriteVbo);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 20);
+    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
+    gl.bindVertexArray(null);
+    this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, spriteVao, spriteVbo };
+    return { track: track.mesh.counts, pit: pit.mesh.counts, atlas: [atlas.width, atlas.height] };
+  }
+
+  /**
    * Cars as simple boxes for now (Phase 3 brings the real shapes).
    * @param {{x:number, y:number, z:number, heading:number, colour:number[]}[]} cars  x/y fine units
    */
@@ -328,6 +435,7 @@ export class TrackRenderer {
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
     gl.uniform4f(this.u.uProj, sx, sy, cy, 0);
     gl.uniform2f(this.u.uDepth, 64, 64 * 16 * 1200); // 1 ft to about 6 km
+    this.lastUniforms = { cam: [cam.x - o[0], cam.y - o[1], cam.z], sinCos: [Math.sin(a), Math.cos(a)], proj: [sx, sy, cy, 0], depth: [64, 64 * 16 * 1200] };
     gl.bindVertexArray(this.track.vao);
     const R = this.track.ranges;
     if (R) {
@@ -344,12 +452,60 @@ export class TrackRenderer {
       gl.depthFunc(gl.LESS);
       gl.drawArrays(gl.TRIANGLES, R.raised.first, R.raised.count);
     } else gl.drawArrays(gl.TRIANGLES, 0, this.track.count);
+    if (this.objects) this.drawObjects(cam, opt);
     if (this.cars.count) {
       gl.bindVertexArray(this.cars.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.cars.count);
     }
   }
 }
+
+TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
+  const gl = this.gl, O = this.objects;
+  const set = opt.pitLane ? O.pit : O.track;
+  const fr = frameObjects(set.mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: true });
+  // one-sided polygons, layer by layer (later layers are coplanar details on top)
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
+  gl.frontFace(this.objectFrontFace ?? gl.CCW);
+  gl.bindVertexArray(set.vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, set.ebo);
+  fr.layers.forEach((idx, k) => {
+    if (!idx.length) return;
+    if (k > 0) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4 * k); gl.depthFunc(gl.LEQUAL); }
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW);
+    gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+  });
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.depthFunc(gl.LESS);
+  gl.disable(gl.CULL_FACE);
+  // poles: one-pixel vertical lines in the game
+  if (fr.lines.length) {
+    gl.bindVertexArray(set.lineVao);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, set.lebo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, fr.lines, gl.DYNAMIC_DRAW);
+    gl.drawElements(gl.LINES, fr.lines.length, gl.UNSIGNED_INT, 0);
+  }
+  // bitmaps
+  const quads = spriteQuads(set.mesh.sprites, O.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, O.objs, set.mesh.origin, fr.sprites, set.mesh.placements);
+  if (quads.length) {
+    gl.useProgram(this.spriteProg);
+    const u = this.spU, k = this.lastUniforms;
+    gl.uniform3f(u.uCam, ...k.cam);
+    gl.uniform2f(u.uSinCos, ...k.sinCos);
+    gl.uniform4f(u.uProj, ...k.proj);
+    gl.uniform2f(u.uDepth, ...k.depth);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, O.atlasTex); gl.uniform1i(u.uAtlas, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, O.palMapTex); gl.uniform1i(u.uPalMap, 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex); gl.uniform1i(u.uPalette, 2);
+    gl.bindVertexArray(O.spriteVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, O.spriteVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, quads.length / 7);
+    gl.useProgram(this.prog);
+  }
+  this.lastObjects = { layers: fr.layers.map((l) => l.length / 3), lines: fr.lines.length / 2, sprites: fr.sprites.length };
+};
 
 /** The camera for draw() from a readState() result (fine units). */
 export function cameraFromState(st) {

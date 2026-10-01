@@ -21,6 +21,7 @@
                           alone, or the new view (game framing) laid half
                           transparent over the original screen
     cars=1|0              draw cars (boxes for now)
+    objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -65,6 +66,7 @@ import { parseTrack, compileTrack, compilePitLane, CIRCUITS } from './lib/track-
 import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
+import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -76,6 +78,7 @@ const opts = {
   layout: q.get('layout') ?? 'side',
   cars: (q.get('cars') ?? '1') !== '0',
   source: q.get('source') ?? 'memory',
+  objects: (q.get('objects') ?? '1') !== '0',
 };
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
 if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
@@ -142,6 +145,10 @@ function loadCircuit(st) {
     // everything the game built at track load, read from its memory
     const scene = readScene(mem);
     info = renderer.setScene(scene, { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 });
+    if (opts.objects) {
+      try { info.objects = renderer.setObjects(readObjects(mem), readCrowd(mem)); }
+      catch (e) { log('objects-failed', { error: String(e?.stack ?? e) }); }
+    }
   } else {
     const compiled = compileTrack(parsed).segs;
     const segs = fromCompiled(compiled);
@@ -150,7 +157,7 @@ function loadCircuit(st) {
   }
   circuit = c;
   log("track", { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts });
-  window.renderApp.track = { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts };
+  window.renderApp.track = { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts, objects: info.objects };
 }
 
 let loopErrors = 0, lastPaletteAt = 0;
@@ -205,7 +212,7 @@ function frame(now) {
     }
     cam.noHorizonImage = horizonOff(mem);
     if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
-    renderer.draw(cam, { framing: opts.framing });
+    renderer.draw(cam, { framing: opts.framing, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     perf.frames++;
   }
   perf.draw.push(performance.now() - t0);
