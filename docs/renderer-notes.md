@@ -438,3 +438,268 @@ at Monza, bundle `dist/p2-static-25000.jsdos`):
   bitmap ids; and the purpose of setting fields +02, +0A, +0E.
 - What 0F47:8261 changes on the viewed car, and 0F47:A737.
 - Where the per-circuit shade ramps 10h–1Fh are computed.
+
+## Objects: shapes and placement (decoded)
+
+This section completes section 6. It describes the trackside objects
+(stands, pit buildings, bridges, gantries, boards, trees) as 0F47:9E2A
+places them, 0F47:88A5 draws their shapes and 0F47:19E8 draws their bitmaps.
+The code that reads them from memory and builds a WebGL mesh is
+`spike/lib/objects.mjs`; the checks are `spike/probes/p2-objects-*.mjs` and
+`spike/tests/objects.test.mjs`. Working files (listing extracts, captures,
+comparison sheets) are in `spike/out/research-phase2/objects/`. It answers the
+open question on the shape format and the setting fields +02, +0A and +0E.
+
+Units: shape coordinates are fine units (1/64 ft), X to the object's right,
+Y forward; Z is in Z units. "Depth" is camera depth in 1/8 ft unless stated.
+
+### Which segments carry an object
+
+- The track command 80h (8EAA:0857) writes the setting index to seg+1E and sets
+  seg+26 bit 7. It also sets the "object" bit 7 of the band marker bytes +2A,
+  +0A and +2B unless setting byte +1 has bit 3, 4 or 5: the object is then drawn
+  only up to 9, 25 or 58 segments ahead. Setting +1 bit 7 sets seg+26 bit 6
+  (drawing order, below); bit 0 sets seg+1F bit 2 (ordering against fences,
+  0F47:518A). SC.
+- One object per segment. Setting 0 and 1 are not shapes: where the walk meets
+  them, 0F47:9C05 runs a second scene pass over the pit lane (junction tables at
+  DS:01A8). Setting 2 is a flag marshal whose side comes from a run-time table
+  (DS:0B9C, by segment number / 32). SC.
+- seg+1E values of 80h and up are put there for one frame by 0F47:A533 and
+  cleared by A737: each car near the camera takes the first segment at or after
+  its own that has no object, so cars are sorted with the objects. Values from
+  B4h are pit crews (settings 4 and 5, coloured by team, DS:356B). A RAM dump
+  taken between frames shows no car marks. SC.
+- Objects on pit-lane segments form a second set. The game draws them when its
+  walk runs along the pit lane (camera in the pit lane; in practice the lane is
+  spliced into the track array). The pit pass of 9C05 sets SS:0172, and 9E2A
+  draws nothing while it is set, so from the track the pit-lane set is not
+  drawn. SC; DT (pit-lane captures at Monza: the pit-side copy of the pit
+  building, with its slightly different yaw, is the one on screen).
+- Detail level DS:0068 drops objects by setting +1 bits 1, 6 and 2 (section 4).
+
+### The object setting (16 bytes, far pointer DS:023A)
+
+| Offset | Meaning | Evidence |
+| --- | --- | --- |
+| +00 | Shape id (DS:358D table index) | SC, DT |
+| +01 | Flags: bits 3/4/5 distance limit, 1/6/2 detail levels, 7 draw later, 0 fence order | SC |
+| +02 | Palette offset: the object's 16 colours are SS:2964 + this (+0 .. +15) | SC, DT |
+| +04 | Lateral position, 1/256 half-width to the right | SC, DT |
+| +06 | Yaw relative to the segment heading | SC, DT |
+| +08 | Shapes 1, 0Dh, 5: a bitmap id written into the shape (DS:8042, 83E5, 8288). Shapes 4 and up: scale override. Shapes 0, 2, 3: offset along the track, 1/256 half-width | SC, DT |
+| +0A | Drawing order: low byte (at least 2) − 2 plus (high byte & 3Fh) segments; high byte bit 7 also clamps against the camera (not decoded) | SC; DT (decal objects) |
+| +0C | Height added to the segment's Z | SC, DT |
+| +0E | Tilt angle: Z of each point += Y × sin(tilt) | SC |
+
+**Placement**, integer arithmetic as in 0F47:9E2A (DT: object outlines match
+the game's frames to within a pixel): X = s16(seg+04) × 8 + floor(hx × s+04 / 32),
+Y = s16(seg+08) × 8 − floor(hy × s+04 / 32), with (hx, hy) = (seg+0C, seg+0E) ≫ 6
+and no fine bits (seg+21); Z = seg+06 + s+0C; yaw = seg+00 + s+06.
+
+**Scale override** (0F47:8C52), v = s+08: low nibble k = 0 moves the scale-value
+pointer by v ≫ 3 bytes (another set of sizes); k > 0 stores (v & FFF0h) ≫ 1 as
+scale value k − 1, in the shape itself. That store persists, so an object of the
+same shape without an override takes whatever size was drawn last; five
+circuits have such pairs. A port should apply each placement's override to its
+own copy. SC.
+
+### The shape
+
+The table DS:358D holds far pointers into the game DS: ids 0–16 are built into
+the game (0 is the car), 17 onwards are the track file's shapes. Header:
+
+| Offset | Meaning |
+| --- | --- |
+| +00 | Size (fine units): culling, near-precision test, haze |
+| +02, +06, +0A, +0E | Far pointers: scale values, element block, points, vectors |
+| +12 | Z offset of the points |
+| +14 | Z offset of the reference point used for culling, LOD and bitmap-only objects |
+| +16 | LOD entries of 10 bytes until a maximum of 7FFFh: {maximum depth, mask, shift, far pointer to the display list} |
+
+- **LOD.** The first entry whose maximum depth ≥ the object's depth is used.
+  Mask bit 15 set: a polygon LOD; bits 14 … 0 select scale values, which are
+  packed in order into a table (track shapes always use a prefix). Mask bit 15
+  clear: a bitmap LOD (below). Track shapes have one polygon LOD; rows of trees
+  (shapes with four tree bitmaps) switch to a bitmap LOD beyond 1500h (672 ft).
+  SC, DT.
+- **Points**, 8 bytes {X word, Y word, Z, partner}. A word 0 is 0; 2 + 2j is
+  +v[j]; 34 + 2j is −v[j], where v is the packed table. If bit 15 of the X word
+  is set, the point takes X and Y of point (word & 7FFFh) and keeps its own Z.
+  World position: X_world = X + x·cos(yaw) + y·sin(yaw),
+  Y_world = Y − x·sin(yaw) + y·cos(yaw), Z_world = Z + shape+12 + z +
+  hi16(y·sin(tilt) ≪ 2); sines from the cosine table at SS:3264 without
+  interpolation. The partner index nudges a point one pixel right when both
+  project to the same column (thin poles), and serves the car's back-face test.
+  SC; DT.
+- **Vectors**: byte pairs (from, to); index 0 is unused so that a negative index
+  can mean "reversed".
+- **Element block**: first a visibility list (point indices, ended by a byte with
+  bit 7); if all of them are behind, or all left, or all right of the screen,
+  nothing is drawn. Then the elements:
+  - *Polygon*: colour byte (bit 7 clear; bit 6 means one more byte follows the
+    list: a point whose depth must not exceed its partner's, used on cars), then
+    signed vector indices, then 0. The outline is the chain of vectors; a few
+    polygons leave out an edge, which closes the outline. SC, DT.
+  - *Pole* (first byte with bits 7 and 5): a colour byte the game ignores and a
+    vector. Drawn as a one-pixel vertical line at the first point's column, from
+    its row up to the second point, in palette colour 0 of the object. SC, DT.
+  - *Bitmap* (bit 7, not 5): {type, point, maximum depth / 128, bitmap id}, plus a
+    palette offset word when type bit 1 is set. Type bit 4: drawn only on cars
+    with a driver. Type bit 2: never mirrored (with bit 3: always); otherwise
+    mirrored when (object yaw − camera yaw + 4000h) has bit 15 (bit 3 inverts
+    this). SC, DT.
+- **Display list**: one sub-list per view sector, selected by
+  word index a ≫ (shift + 1), where a = object yaw − camera yaw −
+  atan((column − 160)/256) of the object's reference point (table SS:5268; the
+  column offset is capped at 255; a point behind the camera counts as column 0
+  or 320). A sub-list is a list of element offsets from the end of the
+  visibility list, in drawing order, ended by a word with bit 15. Shapes use 1
+  to 32 sectors (track shapes mostly 4). The lists leave out faces that cannot be seen from that
+  direction, and some faces give way to a bitmap: a distance board shows only
+  its painted bitmap from the front and its box from the sides. SC; DT.
+
+### Drawing a shape (0F47:88A5)
+
+```
+a_rel = yaw - camera yaw;  project the reference point (Z + shape+14)
+near = |dX| + size < 3E80h and |dY| + size < 3E80h  ->  work in 1/64 ft
+LOD by the reference point's depth; bitmap LOD -> draw one bitmap, done
+haze level from max(depth, size / 8); SS:2EE4[0..15] = haze(SS:2964[s+02 + k])
+apply the scale override; rotate the packed scale values by a_rel (and tilt)
+visibility list; sector from a_rel and the reference point's column
+for each element of the sector's list, in order: polygon / pole / bitmap
+```
+
+- **Polygons are one-sided.** The span filler (0F47:0999) pairs left and right
+  edges by their direction, so an outline that runs anticlockwise on the screen
+  fills nothing. Every polygon is visible only from the side where its vector
+  chain runs clockwise (screen y down). DT: with this rule the
+  agreement at Phoenix rose from 79.6 % to 89.6 % (a building seen at its
+  corner showed its far wall otherwise), and the end wall of the Monza pit
+  building disappeared as in the game.
+- **Colour**: element colour c (bit 6 cleared) → SS:2EE4[c], i.e. palette index
+  SS:2964[s+02 + c], hazed for the object. Track shapes use c = 0–15. DT.
+- **Crowd**: if the final colour is 1Bh (the haze tables leave it unchanged),
+  the span filler fills the polygon, span by span from the bottom row, with
+  pixels copied from a strip (far pointer R:0000, hazed copies at R:0004 +
+  (level − 1) × 400h): span k starts at strip[(R:02B4[k & 63] + end of previous
+  span) & 1FFh]. In practice sessions (SS:124A = 0) the stands are empty: colour
+  0Ah. SC; DT (the pattern is visible in race frames; it depends on exact span
+  lengths, so it is compared separately).
+- **Projection quirk**: points project as for the track, but the row quotient
+  q = (hi16(dz × SS:017C × 2) ≪ 5) / depth is rounded to nearest only when
+  negative; when positive it is truncated (the game compares the quotient, not
+  the remainder, with the depth). The column is truncated. DT: emulating this
+  moved bitmap rows by one pixel in about half the cases and raised agreement
+  in object areas on the Monza captures from about 93 % to 98 %. The track's points (0F47:20D9, same code
+  at 2168) should follow the same rule.
+- **Haze** (0F47:8801), dry: level = clamp(((clamp(d + 80h, 0, 3C00h) ≫ 8) −
+  5) ≫ 3, 0, 4) with d = max(depth, size ≫ 3); colour c → table[level − 1][c]
+  (7BCE:7BC0). So objects haze from 400 ft (25 segments), later than the
+  track. Bitmaps use their own anchor depth (0F47:1931). SC; DT.
+
+### Bitmaps (0F47:19E8)
+
+- Store: segment SS:00F8, far pointers at +0238 (ids 0–E5h used). Header: +0
+  size (bit 15: an alias to id low byte; bit 15 and 14: not drawn), +2 row
+  table bytes (rows × 2), +4 column bound, +6 rows below the anchor, +8 row
+  offsets. Row 0 is the bottom row. A row is a run list: a byte c (0 ends the
+  row; bit 7: a start column follows, otherwise the run starts where the last
+  ended), the start and end columns as signed bytes relative to the anchor
+  column; colour (c & 7Eh)/2 − 2 indexes the object's 16 colours (palette
+  offset s+02, or the element's word). SC; DT (all bitmaps decode: wheels,
+  helmets, boards, flags and marshals, trees and rows of trees, palms, boats).
+- Scale: s = min(size × 8192 / depth, 8000h) (so at most 4 pixels per bitmap
+  pixel); column k starts at x0 + k·s/8192 (16.16 steps), mirrored bitmaps step
+  the other way; rows are s × SS:017E / 65536 / 8192 pixels tall (ids AAh, ABh,
+  AFh without the SS:017E factor), with row 0 ending `bottom` rows below the
+  anchor's row. With the game's SS:017E = 2 × SS:017C, a bitmap pixel is size/32
+  fine units wide and size/32 Z units tall. Drawn flat at the anchor's depth.
+  SC; DT.
+- Bitmap LOD (mask bit 15 clear): the shift word with bit 15 is a fixed bitmap
+  id (shape 5's id comes from s+08), mirrored by (a + 4000h) bit 15, with a
+  including the column correction. Otherwise the mask holds flags (mode byte;
+  1000h mirror negative angles; 400h, 800h, 200h fold or clamp angles beyond 90
+  degrees) and the display-list pointer leads to frame entries {angle add, base
+  id, shift}: id = ((a + add) ≫ shift) + base, or "use the polygon LOD" when the
+  base has bit 15. Rows of trees seen from afar use frames DDh–E5h. SC; DT
+  (the frames chosen match the game's frames).
+
+### Drawing order between objects
+
+Objects are drawn far to near with the walk's object lists (sorted by
+0F47:53BF), interleaved with the fences and kerbs of each segment (section 7).
+The sort key is the segment counter moved by the setting's +0A
+(0F47:5233): farther by (high & 3Fh) + max(low, 2) − 2 segments, or nearer by
+the same amount when seg+26 bit 6 is set. Long buildings carry a large value,
+so that what stands near their far end is painted after them; window bands and
+stripes are often separate objects painted over a building face in this way.
+SC; DT (letting a later object win where two objects are at about the same
+depth raised the 16-circuit agreement from 94.6 % to 95.4 %, most at Phoenix,
+whose buildings carry their window bands this way).
+
+### Cars (for Phase 3)
+
+Shape 0 is the car: one polygon LOD up to depth 1A0h (52 ft), then a bitmap
+LOD whose frames (ids B0h–DCh, the car seen from many angles) follow the view
+angle, so distant cars are bitmaps. Its polygons use colour bit 6 (the
+partner-depth test above).
+Bitmaps: ids below 42h are the wheels, framed by the view angle and the
+steering angle (car +48 via SS:016A); ids 42h–4Ah are the helmet, framed by the
+view angle, in the driver's palette SS:2AA4 + (car number − 1) × 16; elements
+with type bit 4 (the driver) are drawn only when the car is occupied. The car's
+colours are the team palette SS:2964 + (team − 1) × 16 (car +25). 0F47:A07D
+sets these up, takes the car's pose from 0:14A2 and draws it through the same
+88A5 (call at A306). The camera's own car in the cockpit view takes a separate
+path in 88A5 (8A09–8B9E). SC only.
+
+### What a WebGL renderer can take from this
+
+`spike/lib/objects.mjs` reads all of the above from the game's memory:
+`readObjects` (placements, settings, shapes with their overrides and patches,
+the 16-colour palettes, bitmaps, haze tables), `buildSectorMesh` (one-sided
+triangles in the format of `scene.mjs`, wound counter-clockwise from the
+visible side) with `frameObjects` (the per-frame choice of sector, bitmap frame
+and LOD, and decal layers), `buildObjectMesh` (a static alternative without
+sectors), `buildSpriteAtlas` and `spriteQuads` (camera-facing quads that a
+fragment shader colours through the object palette), `readCrowd`,
+`hazeLevel`, `spriteIdsUsed` and `cameraInPitLane`.
+
+Approximations a depth-buffered renderer makes: polygons are depth-tested
+instead of painted in the game's order (the game's order is used only to put
+coplanar details, "decals", on top); a bitmap that belongs to a polygon shape
+is pulled toward the camera by half its width so that the shape's own faces do
+not hide it; the crowd pattern is screen-space noise; edges are not rasterised
+with the game's rounding.
+
+### Evidence (DT)
+
+Comparison of our drawing with the game's own frames, inside the pixels our
+objects cover, with the PAUSED sign, the banners and boxes around every car
+left out (`probes/p2-objects-check.mjs`, `p2-objects-ref.mjs`):
+
+| Frames | Game rules | Mesh data, game rounding | WebGL-style mesh |
+| --- | --- | --- | --- |
+| Monza race, 19 paused captures (cockpit, chase, TV) | 97.5 % | 97.0 % | 91.0 % |
+| 16 circuits, 576 stopped practice frames (p2-ref cameras, practice RAM of the same circuit) | 95.6 % (per-frame median 97.1 %) | 94.0 % | 88.0 % |
+| Monza practice, 9 frames down the pit lane | 76 % | 76 % | 74 % |
+
+"Game rules" draws as the game does (walk range, LOD, sector lists, painting
+order inside an object, per-object haze, crowd, integer projection, bitmap
+scaling). "Mesh data" draws `buildSectorMesh`/`frameObjects` with a depth
+buffer but the game's integer projection; "WebGL-style" also uses float
+projection, as a GPU would. Per circuit (game rules) 92.0–97.5 %. The remaining
+differences: polygon edges one pixel off, objects drawn between the fences of
+a segment, the cockpit's start lights, the pit pass's pit-lane walls (the pit
+lane frames lose most there, on the track side, not on the objects), and the
+estimated camera segment of the reference frames.
+
+### Open questions (objects)
+
+- The game's edge rasteriser (0F47:0000–0999) in detail.
+- How objects interleave with the fences of their segment (0F47:518A, R:006A–0070)
+  and the +0A high-byte clamp (bit 7).
+- The pit-lane pass 0F47:9C05 (which part of the pit lane, its fences).
+- The polygon LODs of the car and the cockpit path of the own car; 0F47:8261.
+- Wet-weather haze for objects (SS:0182).

@@ -35,9 +35,16 @@ const SPECIAL_SETTINGS = new Set([0, 1, 2]);
 const s8 = (v) => (v << 24) >> 24;
 const s16 = (v) => (v << 16) >> 16;
 
-/** Reader over guest memory with an optional overlay of patched bytes (linear address -> byte). */
+/**
+ * Reader over guest memory with an optional overlay of patched bytes (linear
+ * address -> byte). H is the bytes, or a function returning them (the
+ * emulator's heap can be replaced when it grows).
+ */
+export function makeReader(H, B = 0, overlay = null) { return reader(H, B, overlay); }
 function reader(H, B, overlay) {
-  const u8 = overlay && overlay.size ? (a) => (overlay.has(a) ? overlay.get(a) : H[B + a]) : (a) => H[B + a];
+  const get = typeof H === 'function' ? H : () => H;
+  const raw = (a) => get()[B + a];
+  const u8 = overlay && overlay.size ? (a) => (overlay.has(a) ? overlay.get(a) : raw(a)) : raw;
   const u16 = (a) => u8(a) | (u8(a + 1) << 8);
   return { u8, u16, s16: (a) => s16(u16(a)), s8: (a) => s8(u8(a)), far: (a) => (u16(a + 2) << 4) + u16(a) };
 }
@@ -165,7 +172,6 @@ export function shapePoints(shape, lod = shape.lods.find((l) => !l.sprite)) {
   for (const v of shape.vis) use(v);
   const raw = [];
   for (let i = 0; i < n; i++) raw.push(shape.rawPoint(i));
-  for (const r of raw) if (r.wx & 0x8000 && (r.wx & 0x7fff) + 1 > raw.length) { /* bad ref: leave */ }
   return raw.map((r) => {
     const ref = r.wx & 0x8000 ? raw[r.wx & 0x7fff] : null;
     const src = ref || r;
@@ -274,7 +280,7 @@ function readSegments(H, B, ds, ss) {
 export function readObjects(mem) {
   const H = mem.heap(), B = mem.memBase;
   const ds = mem.DS << 4, ss = mem.SS << 4;
-  const rd = reader(H, B);
+  const rd = reader(() => mem.heap(), B);
   const cos = new Int16Array(4097);
   for (let i = 0; i < 4097; i++) cos[i] = rd.s16(ss + SS_COS + 2 * i);
   const trig = makeTrig(cos);
@@ -323,7 +329,7 @@ export function readObjects(mem) {
   const spriteSeg = rd.u16(ss + SS_SPRITE_SEG);
   const hazeLin = ((mem.imageSeg + HAZE_SEG_REL) << 4) + HAZE_OFF;
   const haze = mem.imageSeg ? H.slice(B + hazeLin, B + hazeLin + 1024) : null;
-  const spriteCache = new Map();
+  const spriteCache = new Map(), shapeCache = new Map();
   return {
     placements, settings, shapes,
     palettes: H.slice(B + ss + SS_PALETTES, B + ss + SS_PALETTES + PALETTE_BYTES),
@@ -334,8 +340,11 @@ export function readObjects(mem) {
       // the shape as drawn for this placement (patches and scale override applied)
       const st = settings[p.setting];
       if (!p.patch && !p.override) return shapes.get(st.shape);
-      const ov = p.patch ? new Map([[p.patch[0], p.patch[1]]]) : null;
-      return decodeShape(reader(H, B, ov), shapePtr(st.shape), p.override);
+      if (!shapeCache.has(p)) {
+        const ov = p.patch ? new Map([[p.patch[0], p.patch[1]]]) : null;
+        shapeCache.set(p, decodeShape(reader(() => mem.heap(), B, ov), shapePtr(st.shape), p.override));
+      }
+      return shapeCache.get(p);
     },
     sprite: (id) => {
       if (!spriteCache.has(id)) spriteCache.set(id, decodeSprite(rd, spriteSeg, id));
@@ -417,18 +426,6 @@ export function worldPoint(objs, p, shape, pt) {
   return [p.x + pt.x * c + pt.y * s, p.y - pt.x * s + pt.y * c, p.z + shape.z12 + pt.z + tz];
 }
 
-// Sector centres for a LOD's display list: sector d covers a = yaw - ray heading
-// in [d, d+1) * 2^(shift+1); the view direction in shape space is (-sin a, cos a).
-function sectorViews(lod) {
-  const n = lod.dirs.length, w = 65536 / n;
-  const out = [];
-  for (let d = 0; d < n; d++) {
-    const a = ((d + 0.5) * w) / 65536 * 2 * Math.PI;
-    out.push([-Math.sin(a), Math.cos(a)]);
-  }
-  return out;
-}
-
 function polyNormal(P) {
   // Newell's method
   let nx = 0, ny = 0, nz = 0;
@@ -479,8 +476,9 @@ function triangulate(P, n) {
 /**
  * The polygons, lines and bitmaps of one placement, in world coordinates,
  * in the game's drawing order for the most detailed LOD.
- * Each polygon: { pts (world), colour (palette index), facing: 'both' | normal [x,y,z] of
- * the visible side, layer (0, or 1+ for a decal drawn over a coplanar polygon) }.
+ * Each polygon: { pts (world, in the game's outline order: clockwise on the screen when
+ * seen from the visible side), colour (palette index), facing (normal [x,y,z] of the
+ * visible side), layer (0, or 1+ for a decal drawn over a coplanar polygon) }.
  */
 export function placementParts(objs, p, opt = {}) {
   const shape = objs.shapeAt(p);
@@ -492,15 +490,13 @@ export function placementParts(objs, p, opt = {}) {
     // a pure bitmap object: the sprite at the object's centre (Z + shape +14)
     const l = shape.lods[0];
     const sp = spriteForLod(shape, l);
-    if (sp) out.sprites.push({ at: [p.x, p.y, p.z + shape.z14], id: sp.id, mirror: sp.mirror, palette: p.palette, yaw: p.yaw });
+    if (sp) out.sprites.push({ at: [p.x, p.y, p.z + shape.z14], id: sp.id, mirror: sp.mirror, palette: p.palette, yaw: p.yaw, frames: !!sp.frames, lod: l });
     return out;
   }
   const lod = shape.lods[lodIndex];
+  out.lod = lod;
   const pts = shapePoints(shape, lod);
   const W = pts.map((pt) => worldPoint(objs, p, shape, pt));
-  const views = sectorViews(lod);
-  const c = objs.trig.cos(p.yaw) / 16384, s = objs.trig.sin(p.yaw) / 16384;
-  const toWorldDir = (v) => [v[0] * c + v[1] * s, -v[0] * s + v[1] * c];
   // the drawing order: elements in the order of the sector lists (all sectors merged)
   const order = [];
   const seen = new Set();
@@ -517,49 +513,73 @@ export function placementParts(objs, p, opt = {}) {
       const n = polyNormal(P);
       const len = Math.hypot(n[0], n[1], n[2]);
       if (len < 1e-6) continue;
-      let facing = 'both';
+      // one-sided: the game's span filler draws an outline only when it runs
+      // clockwise on the screen; in world coordinates (right-handed, Z up) the
+      // visible side is the one the Newell normal of the loop points away from
+      const facing = n.map((v) => -v);
       const secs = inSectors.get(o);
-      if (el.facePoint !== undefined) {
-        // drawn only where depth(point) <= depth(its partner): the visible
-        // side faces from the partner towards the point
-        const a = W[el.facePoint], b = W[pts[el.facePoint].partner] || a;
-        const d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-        facing = d[0] * n[0] + d[1] * n[1] + d[2] * n[2] >= 0 ? n : n.map((v) => -v);
-      } else if (secs.size < lod.dirs.length) {
-        // one-sided: listed only for view sectors that look at its front
-        let score = 0;
-        views.forEach((v, d) => {
-          const w = toWorldDir(v);
-          const dot = (w[0] * n[0] + w[1] * n[1]) / len;
-          score += (secs.has(d) ? -1 : 1) * dot;
-        });
-        if (Math.abs(n[2]) / len < 0.999) facing = score >= 0 ? n : n.map((v) => -v);
-      }
+      if (el.facePoint !== undefined) out.facePoint = true; // cars: an extra depth test (point vs its partner)
       out.polys.push({ pts: P, colour: pal(el.colour), colourCode: el.colour, facing, order: o, sectors: secs });
     } else if (el.kind === 'line') {
       // a vertical pole, one pixel wide, in palette colour 0 (0F47:878D)
       const [a, b] = shape.vector(el.vector);
-      out.lines.push({ a: W[a], b: W[b], colour: pal(0) });
+      out.lines.push({ a: W[a], b: W[b], colour: pal(0), order: o });
     } else if (el.kind === 'bitmap') {
       if (el.type & 0x10) continue; // only on cars (SS:0178 bit 4)
       let mirror = 'angle';
       if (el.type & 4) mirror = el.type & 8 ? 'always' : 'never';
       else if (el.type & 8) mirror = 'angleInverted';
-      out.bitmaps.push({ at: W[el.point], id: el.id, palette: el.palette ?? p.palette, maxDepth: el.maxDepth * 8, mirror, yaw: p.yaw, type: el.type });
+      out.bitmaps.push({ at: W[el.point], id: el.id, palette: el.palette ?? p.palette, maxDepth: el.maxDepth * 8, mirror, yaw: p.yaw, type: el.type, order: o });
     }
   }
-  // decals: a polygon drawn after a coplanar polygon it overlaps
-  for (let i = 0; i < out.polys.length; i++) {
-    const A = out.polys[i];
+  // bitmaps drawn over the shape's own polygons (not rows of trees made of bitmaps only)
+  for (const b of out.bitmaps) b.onPolygons = out.polys.length > 0;
+  // decals inside the object: a polygon drawn after a coplanar polygon it overlaps
+  assignLayers(out.polys);
+  return out;
+}
+
+/**
+ * Decal layers: polygons in drawing order; a polygon that overlaps an earlier,
+ * coplanar polygon seen from the same side gets that polygon's layer + 1.
+ */
+export function assignLayers(polys) {
+  const planes = polys.map((A) => {
+    const l = Math.hypot(...A.facing);
+    const u = A.facing.map((v) => v / l);
+    return { u, d: dot3(u, A.pts[0]) };
+  });
+  for (let i = 0; i < polys.length; i++) {
+    const A = polys[i], pa = planes[i];
     A.layer = 0;
     for (let j = 0; j < i; j++) {
-      const Bp = out.polys[j];
-      // a polygon only covers another seen from the same side
-      if (A.facing !== 'both' && Bp.facing !== 'both' && dot3(A.facing, Bp.facing) <= 0) continue;
-      if (coplanarOverlap(A.pts, Bp.pts)) A.layer = Math.max(A.layer, Bp.layer + 1);
+      const pb = planes[j];
+      if (dot3(pa.u, pb.u) < 0.9995 || Math.abs(pa.d - pb.d) > 2) continue;
+      if (coplanarOverlap(A.pts, polys[j].pts)) A.layer = Math.max(A.layer, polys[j].layer + 1);
     }
   }
-  return out;
+}
+
+/**
+ * The game's drawing order key of a placement for a camera driving forward
+ * (0F47:5233): its segment, moved by (setting +0A high byte & 3Fh) + (low byte,
+ * at least 2) - 2 segments: farther, or nearer when setting +1 has bit 7 (segment
+ * +26 bit 6). Objects are drawn far to near, so a larger key is drawn first.
+ */
+export function orderKey(objs, p) {
+  const st = objs.settings[p.setting];
+  const shift = ((st.range >> 8) & 0x3f) + Math.max(st.range & 0xff, 2) - 2;
+  return p.segment + (st.flags & 0x80 ? -shift : shift);
+}
+
+// placementParts for every placement, with decal layers across objects: window
+// bands, stripes and signs are often separate objects painted over a building
+// (the game orders them with setting +0A)
+function partsWithLayers(objs, placements) {
+  const list = placements.map((p, i) => ({ p, i, key: orderKey(objs, p), parts: placementParts(objs, p) }));
+  const byOrder = [...list].sort((a, b) => b.key - a.key || a.i - b.i);
+  assignLayers(byOrder.flatMap((e) => e.parts.polys));
+  return list;
 }
 
 /**
@@ -598,8 +618,12 @@ export function spriteLodFrame(l, a) {
 
 function spriteForLod(shape, l) {
   // +1A bit 15: a fixed bitmap (id = low bits), mirrored by view angle;
-  // otherwise frames by view angle (not decoded for the mesh: use the first)
+  // otherwise frames by view angle: take the one seen from straight ahead
   if (l.shift & 0x8000) return { id: l.shift & 0x7fff, mirror: 'angle' };
+  for (const a of [0, 0x4000, 0xc000, 0x8000]) {
+    const f = spriteLodFrame(l, a);
+    if (f && !f.polygons) return { id: f.id, mirror: 'never', frames: true };
+  }
   return null;
 }
 
@@ -634,62 +658,372 @@ function coplanarOverlap(P, Q) {
 /**
  * Coloured triangles for every placed object, for the WebGL renderer, in the
  * format of scene.mjs buildSceneMesh: x, y, z, r, g, b per vertex, x/y fine
- * units relative to `origin`.
+ * units relative to `origin`, z in Z units. Uses each shape's most detailed
+ * LOD and every element of every view sector.
+ *
+ * Every polygon is one-sided, as in the game (whose span filler draws an
+ * outline only when it runs clockwise on the screen): triangles are wound
+ * counter-clockwise as seen from the visible side (x right, y up on screen),
+ * so draw with gl.CULL_FACE (back faces). This static mesh draws every
+ * element of every view sector; buildSectorMesh + frameObjects follow the
+ * game's per-sector display lists exactly.
+ *
  * @param {object} objs  from readObjects()
  * @param {object} [opt] { origin: [x, y], indexed: true for (palette index, -1, 0) colours,
- *                         palette: RGB 768 bytes (needed unless indexed), detail: 0-3 (default 3) }
- * @returns {{ data: Float32Array, origin: number[], ranges: { both, front, decal }, lines: Float32Array,
- *             sprites: object[], counts: object }}
- *   ranges.both:  polygons the game draws from every side (draw without face culling)
- *   ranges.front: one-sided polygons, wound counter-clockwise seen from their visible
- *                 side (x right, y up on screen): draw with gl.CULL_FACE (back)
- *   ranges.decal: polygons painted over a coplanar one (signs, windows): draw after the
- *                 others with depthFunc LEQUAL and a polygon offset (one-sided, like front)
- *   lines: x, y, z, r, g, b per vertex, pairs for gl.LINES (one-pixel poles)
- *   sprites: { at: [x, y, z] (relative to origin), id, palette, mirror, yaw, maxDepth? }
+ *   palette: RGB 768 bytes (needed unless indexed), detail: 0-3 (default 3),
+ *   set: 'track' (default: objects on the lap's segments) | 'pit' (on pit-lane
+ *   segments: the game shows these instead when the camera is in the pit lane) | 'all',
+ *   crowd: true (default) to colour crowd polygons with CROWD_COLOUR, false for the
+ *   practice-session colour 0Ah }
+ * @returns {{ data: Float32Array, origin: number[], ranges: { solid, decals: {first,count,layer}[], crowd },
+ *             lines: Float32Array, sprites: object[], counts: object, objects: {x,y,z,size}[],
+ *             vertexObject: Uint32Array, lineObject: Uint32Array }}
+ *   ranges.solid:  everything that is not drawn over a coplanar polygon
+ *   ranges.decals: polygons painted over a coplanar one (signs, windows, stripes), by
+ *                  layer (1, 2, ...): draw after solid, layer by layer, with depthFunc
+ *                  LEQUAL and polygonOffset(-1, -4 * layer) or similar
+ *   ranges.crowd:  polygons the game fills with its crowd pattern in races (part of solid
+ *                  and decals too, listed here so a renderer can texture them)
+ *   lines: x, y, z, r, g, b per vertex, pairs for gl.LINES (poles, one pixel wide in the game)
+ *   sprites: { at: [x, y, z] relative to origin, id, palette (offset into objs.palettes),
+ *              mirror: 'angle' | 'angleInverted' | 'never' | 'always', yaw, ray (true: the
+ *              mirror angle uses the ray to the sprite, else the camera yaw), maxDepth (fine units) }
+ *   objects, vertexObject, lineObject: the placement each vertex belongs to, with its
+ *              centre and size, for the game's per-object haze (hazeLevel)
  */
 export function buildObjectMesh(objs, opt = {}) {
   const origin = opt.origin ?? (objs.placements[0] ? [objs.placements[0].x, objs.placements[0].y] : [0, 0]);
   const pal = opt.palette;
   const rgb = opt.indexed ? (i) => [i, -1, 0] : (i) => [pal[i * 3] / 255, pal[i * 3 + 1] / 255, pal[i * 3 + 2] / 255];
   const detail = opt.detail ?? 3;
-  const groups = { both: [], front: [], decal: [] };
-  const lines = [], sprites = [];
-  const counts = { placements: 0, polys: 0, decals: 0, lines: 0, sprites: 0 };
+  const set = opt.set ?? 'track';
+  const crowdOn = opt.crowd ?? true;
+  const layers = [[]], layerObj = [[]];
+  const crowdTris = [];
+  const lines = [], lineObj = [], sprites = [], objects = [];
+  const counts = { placements: 0, polys: 0, decals: 0, crowd: 0, lines: 0, sprites: 0, triangles: 0 };
   const vtx = (out, p, c) => out.push(p[0] - origin[0], p[1] - origin[1], p[2], c[0], c[1], c[2]);
-  for (const p of objs.placements) {
-    if (!shownAtDetail(p, detail)) continue;
+  const chosen = objs.placements.filter((p) => !(set === 'track' && p.pit) && !(set === 'pit' && !p.pit) && shownAtDetail(p, detail));
+  for (const { p, parts } of partsWithLayers(objs, chosen)) {
     counts.placements++;
-    const parts = placementParts(objs, p);
+    const shape = objs.shapeAt(p);
+    const oi = objects.length;
+    // for haze: the game hazes a whole object by max(depth of its centre, size / 8) (1/8 ft)
+    objects.push({ x: p.x - origin[0], y: p.y - origin[1], z: p.z + (shape ? shape.z14 : 0), size: shape ? shape.size : 0, segment: p.segment, setting: p.setting, shape: p.shape });
     for (const poly of parts.polys) {
-      const n = polyNormal(poly.pts);
-      let P = poly.pts;
-      const group = poly.layer > 0 ? 'decal' : poly.facing === 'both' ? 'both' : 'front';
-      if (poly.facing !== 'both') {
-        // wind so the visible side is counter-clockwise on screen: normal along `facing`
-        const f = poly.facing;
-        if (n[0] * f[0] + n[1] * f[1] + n[2] * f[2] < 0) P = [...P].reverse();
+      // the game shows a polygon when its outline runs clockwise on the screen;
+      // reversed, it is counter-clockwise (the GL front face)
+      const windings = [[...poly.pts].reverse()];
+      const isCrowd = poly.colour === CROWD_COLOUR;
+      const c = rgb(isCrowd && !crowdOn ? 0x0a : poly.colour);
+      while (layers.length <= poly.layer) { layers.push([]); layerObj.push([]); }
+      const out = layers[poly.layer], outObj = layerObj[poly.layer];
+      for (const P of windings) {
+        const tris = triangulate(P, polyNormal(P));
+        for (const t of tris) {
+          for (const k of t) { vtx(out, P[k], c); outObj.push(oi); }
+          if (isCrowd) crowdTris.push([poly.layer, out.length / 6 - 3]);
+          counts.triangles++;
+        }
       }
-      // (X east, Y north, Z up is right-handed, and the projection keeps screen
-      // x = right, y = up: a loop whose normal points at the viewer is
-      // counter-clockwise on screen); triangles keep the loop's orientation
-      const tris = triangulate(P, polyNormal(P));
-      const c = rgb(poly.colour);
-      for (const t of tris) for (const k of t) vtx(groups[group], P[k], c);
       counts.polys++;
-      if (group === 'decal') counts.decals++;
+      if (poly.layer) counts.decals++;
+      if (isCrowd) counts.crowd++;
     }
-    for (const l of parts.lines) { const c = rgb(l.colour); vtx(lines, l.a, c); vtx(lines, l.b, c); counts.lines++; }
-    for (const b of [...parts.bitmaps, ...parts.sprites]) {
-      sprites.push({ ...b, at: [b.at[0] - origin[0], b.at[1] - origin[1], b.at[2]] });
+    for (const l of parts.lines) { const c = rgb(l.colour); vtx(lines, l.a, c); vtx(lines, l.b, c); lineObj.push(oi, oi); counts.lines++; }
+    for (const b of parts.bitmaps) { sprites.push({ ...b, at: [b.at[0] - origin[0], b.at[1] - origin[1], b.at[2]], ray: false }); counts.sprites++; }
+    for (const b of parts.sprites) { sprites.push({ ...b, at: [b.at[0] - origin[0], b.at[1] - origin[1], b.at[2]], ray: true }); counts.sprites++; }
+  }
+  const starts = [];
+  let total = 0;
+  for (const l of layers) { starts.push(total); total += l.length / 6; }
+  const data = new Float32Array(total * 6);
+  layers.forEach((l, k) => data.set(l, starts[k] * 6));
+  const vertexObject = new Uint32Array(total);
+  layerObj.forEach((l, k) => vertexObject.set(l, starts[k]));
+  const ranges = {
+    solid: { first: 0, count: layers[0].length / 6 },
+    decals: layers.slice(1).map((l, k) => ({ first: starts[k + 1], count: l.length / 6, layer: k + 1 })),
+    crowd: crowdTris.map(([layer, v]) => starts[layer] + v), // first vertex of each crowd triangle
+  };
+  return { data, origin, ranges, lines: new Float32Array(lines), sprites, counts, objects, vertexObject, lineObject: Uint32Array.from(lineObj) };
+}
+
+/**
+ * The game's haze level (0-4) for an object (0F47:8801) or a bitmap
+ * (0F47:1931) at depth d (1/8 ft; for an object max(centre depth, size / 8)):
+ * clamp(((clamp(d + 80h, 0, 3C00h) >> 8) - 5) >> 3, 0, 4), dry weather. Level k > 0
+ * maps colour c to objs.haze[(k - 1) * 256 + c].
+ */
+export function hazeLevel(d) {
+  let v = Math.min(Math.max(Math.floor(d) + 0x80, 0), 0x3c00) >> 8;
+  v -= 5;
+  if (v < 0) v = 0;
+  return Math.min(v >> 3, 4);
+}
+
+/**
+ * The objects as the game selects their parts: for every placement, its most
+ * detailed LOD's elements once each, plus the game's display list for every
+ * view sector (which elements, in which order). Each frame, frameObjects()
+ * picks every object's sector from the camera and returns what to draw, so
+ * one-sided faces, faces that give way to a bitmap (distance boards) and the
+ * painting order of coplanar details all follow the game.
+ * Same options and vertex format as buildObjectMesh (one-sided triangles: draw with gl.CULL_FACE).
+ * @returns {{ data, origin, lines, sprites, objects, vertexObject, lineObject,
+ *   placements: { centre: [x,y,z], yaw, shift, sectors: {tris: [first, count, layer][], lines: number[], sprites: number[]}[] }[] }}
+ */
+export function buildSectorMesh(objs, opt = {}) {
+  const origin = opt.origin ?? (objs.placements[0] ? [objs.placements[0].x, objs.placements[0].y] : [0, 0]);
+  const pal = opt.palette;
+  const rgb = opt.indexed ? (i) => [i, -1, 0] : (i) => [pal[i * 3] / 255, pal[i * 3 + 1] / 255, pal[i * 3 + 2] / 255];
+  const detail = opt.detail ?? 3, set = opt.set ?? 'track', crowdOn = opt.crowd ?? true;
+  const data = [], vobj = [], lines = [], lineObj = [], sprites = [], objects = [], placements = [];
+  const counts = { placements: 0, polys: 0, triangles: 0, lines: 0, sprites: 0, crowd: 0 };
+  const vtx = (out, p, c) => out.push(p[0] - origin[0], p[1] - origin[1], p[2], c[0], c[1], c[2]);
+  const chosen = objs.placements.filter((p) => !(set === 'track' && p.pit) && !(set === 'pit' && !p.pit) && shownAtDetail(p, detail) && objs.shapeAt(p));
+  for (const { p, parts } of partsWithLayers(objs, chosen)) {
+    const shape = objs.shapeAt(p);
+    counts.placements++;
+    const oi = objects.length;
+    const centre = [p.x - origin[0], p.y - origin[1], p.z + shape.z14];
+    objects.push({ x: centre[0], y: centre[1], z: centre[2], size: shape.size, segment: p.segment, setting: p.setting, shape: p.shape });
+    const ref = new Map();
+    for (const poly of parts.polys) {
+      const isCrowd = poly.colour === CROWD_COLOUR;
+      const c = rgb(isCrowd && !crowdOn ? 0x0a : poly.colour);
+      const first = data.length / 6;
+      const P = [...poly.pts].reverse(); // counter-clockwise on screen from the visible side
+      for (const t of triangulate(P, polyNormal(P))) for (const k of t) { vtx(data, P[k], c); vobj.push(oi); }
+      const count = data.length / 6 - first;
+      counts.triangles += count / 3; counts.polys++;
+      if (isCrowd) counts.crowd++;
+      ref.set(poly.order, { tris: [first, count, poly.layer, isCrowd ? 1 : 0] });
+    }
+    for (const l of parts.lines) {
+      const c = rgb(l.colour);
+      ref.set(l.order, { line: lines.length / 12 });
+      vtx(lines, l.a, c); vtx(lines, l.b, c); lineObj.push(oi, oi); counts.lines++;
+    }
+    for (const b of parts.bitmaps) {
+      ref.set(b.order, { sprite: sprites.length });
+      sprites.push({ ...b, at: [b.at[0] - origin[0], b.at[1] - origin[1], b.at[2]], ray: false, object: oi });
       counts.sprites++;
     }
+    const entry = { centre, yaw: p.yaw, object: oi, shift: 15, sectors: [{ tris: [], lines: [], sprites: [] }], palette: p.palette };
+    // LODs beyond the first (the game switches by the centre's depth, 1/8 ft):
+    // for track shapes these are bitmap LODs (rows of trees seen from afar)
+    const first = shape.lods.findIndex((l) => !l.sprite);
+    if (first >= 0) entry.lods = shape.lods.slice(first).map((l, k) => ({ max: l.max, sprite: l.sprite ? l : null, same: k === 0 || !l.sprite }));
+    if (parts.lod) {
+      entry.shift = parts.lod.shift & 15;
+      entry.sectors = parts.lod.dirs.map((list) => {
+        const sec = { tris: [], lines: [], sprites: [] };
+        for (const o of list) {
+          const r = ref.get(o);
+          if (!r) continue;
+          if (r.tris) sec.tris.push(r.tris); else if (r.line !== undefined) sec.lines.push(r.line); else sec.sprites.push(r.sprite);
+        }
+        return sec;
+      });
+    }
+    for (const b of parts.sprites) {
+      entry.sectors[0].sprites.push(sprites.length);
+      entry.spriteLod = b.lod;
+      sprites.push({ ...b, at: [b.at[0] - origin[0], b.at[1] - origin[1], b.at[2]], ray: true, object: oi });
+      counts.sprites++;
+    }
+    placements.push(entry);
   }
-  const ranges = {};
-  let total = 0;
-  for (const g of ['both', 'front', 'decal']) { ranges[g] = { first: total, count: groups[g].length / 6 }; total += groups[g].length / 6; }
-  const data = new Float32Array(total * 6);
-  let o = 0;
-  for (const g of ['both', 'front', 'decal']) { data.set(groups[g], o); o += groups[g].length; }
-  return { data, origin, ranges, lines: new Float32Array(lines), sprites, counts };
+  return {
+    data: new Float32Array(data), origin, lines: new Float32Array(lines), sprites, objects, placements, counts,
+    vertexObject: Uint32Array.from(vobj), lineObject: Uint32Array.from(lineObj),
+  };
+}
+
+/**
+ * What to draw this frame (exact element selection of 0F47:88A5): for each
+ * object, a = object yaw - heading of the ray from the camera to the object's
+ * centre (the game uses its screen column: R:0042 + R:0044); sector =
+ * a >> (shift + 1); that sector's display list, in its order. Bitmap-only
+ * objects pick their frame and mirroring from a as the game does.
+ * @param {object} mesh  from buildSectorMesh
+ * @param {object} cam   { x, y (fine, absolute), heading }
+ * @param {object} [opt] { lod: true to switch to far LODs by depth as the game (rows of trees
+ *                         become one bitmap beyond 672 ft), filter(placementIndex) -> bool }
+ * @returns {{ layers: Uint32Array[] (vertex indices of triangles, by decal layer 0, 1, ...),
+ *             crowd: Uint32Array (indices of crowd triangles, also in layers),
+ *             lines: Uint32Array (vertex indices into mesh.lines),
+ *             sprites: {sprite (index into mesh.sprites) | centre (placement index, far LOD), id, mirrored}[] }}
+ */
+export function frameObjects(mesh, cam, opt = {}) {
+  const layers = [[]], crowd = [], lines = [], sprites = [];
+  const ox = mesh.origin[0], oy = mesh.origin[1];
+  const toAngle = 65536 / (2 * Math.PI);
+  const h = (cam.heading / 65536) * 2 * Math.PI, sh = Math.sin(h), ch = Math.cos(h);
+  mesh.placements.forEach((pl, i) => {
+    if (opt.filter && !opt.filter(i)) return;
+    const dx = pl.centre[0] + ox - cam.x, dy = pl.centre[1] + oy - cam.y;
+    // the game's view angle: object yaw - camera yaw - atan((column - 160) / 256) of the
+    // centre's screen column, |column - 160| capped at 255; column 0 or 320 when the
+    // centre is behind the near plane (R:0042 + R:0044)
+    const lat = (dx * ch - dy * sh) / 8, dep = (dx * sh + dy * ch) / 8;
+    const col = dep < 8 ? (lat < 0 ? 0 : 320) : 160 + Math.trunc((256 * lat) / dep);
+    const k = Math.min(Math.abs(col - 160), 255);
+    const corr = Math.round(Math.atan(k / 256) * toAngle) * Math.sign(col - 160);
+    const a = (pl.yaw - cam.heading - corr) & 0xffff;
+    if (opt.lod && pl.lods) {
+      // the game's LOD by depth: a bitmap LOD shows one frame at the centre
+      const d8 = Math.floor((dx * sh + dy * ch) / 8);
+      const l = pl.lods.find((q) => Math.max(d8, 0) <= q.max) ?? pl.lods[pl.lods.length - 1];
+      if (l.sprite) {
+        const f = spriteLodFrame(l.sprite, a);
+        if (!f) return;
+        if (!f.polygons) { sprites.push({ centre: i, id: f.id, mirrored: f.mirrored }); return; }
+      }
+    }
+    const n = pl.sectors.length;
+    const sec = pl.sectors[n > 1 ? (a >> (pl.shift + 1)) % n : 0];
+    for (const [first, count, layer, isCrowd] of sec.tris) {
+      while (layers.length <= layer) layers.push([]);
+      for (let v = first; v < first + count; v++) { layers[layer].push(v); if (isCrowd) crowd.push(v); }
+    }
+    for (const l of sec.lines) lines.push(2 * l, 2 * l + 1);
+    for (const k of sec.sprites) {
+      const s = mesh.sprites[k];
+      if (s.maxDepth) {
+        // bitmaps inside shapes have a maximum depth (element byte 2 x 128, 1/8 ft)
+        const h = (cam.heading / 65536) * 2 * Math.PI;
+        const d = (s.at[0] + ox - cam.x) * Math.sin(h) + (s.at[1] + oy - cam.y) * Math.cos(h);
+        if (d > s.maxDepth) continue;
+      }
+      let id = s.id, mirrored;
+      if (s.ray) {
+        const f = s.lod ? spriteLodFrame(s.lod, a) : null;
+        if (s.lod && !f) continue;
+        if (f && !f.polygons) { id = f.id; mirrored = f.mirrored; } else mirrored = ((a + 0x4000) & 0x8000) !== 0;
+      } else {
+        let m = s.mirror === 'never' || s.mirror === 'always' ? 1 : (s.yaw - cam.heading + 0x4000) & 0xffff;
+        if (s.mirror === 'always' || s.mirror === 'angleInverted') m = -m & 0xffff;
+        mirrored = (m & 0x8000) !== 0;
+      }
+      sprites.push({ sprite: k, id, mirrored });
+    }
+  });
+  return { layers: layers.map((l) => Uint32Array.from(l)), crowd: Uint32Array.from(crowd), lines: Uint32Array.from(lines), sprites };
+}
+
+// ------------------------------------------------------------------ sprites for WebGL
+
+/**
+ * Pack the bitmaps the sprites use into one 8-bit image: each texel is a
+ * colour code 0-15 (an index into the sprite's 16-colour object palette,
+ * objs.palettes[palette + code] = palette index), 255 = transparent.
+ * Row 0 of each rectangle is the bitmap's bottom row (texture v grows upward).
+ * @returns {{ width, height, data: Uint8Array, rects: Map<number, {x, y, w, h, minC, rows, bottom, size, vsize}> }}
+ */
+export function buildSpriteAtlas(objs, ids, opt = {}) {
+  const width = opt.width ?? 1024;
+  const rects = new Map();
+  let x = 0, y = 0, rowH = 0;
+  const list = [];
+  for (const id of [...new Set(ids)].sort((a, b) => a - b)) {
+    const spr = objs.sprite(id);
+    if (!spr) continue;
+    const w = spr.maxC - spr.minC, h = spr.rows;
+    if (w <= 0 || w > width) continue;
+    if (x + w > width) { x = 0; y += rowH + 1; rowH = 0; }
+    list.push([id, spr, x, y]);
+    rects.set(id, { x, y, w, h, minC: spr.minC, rows: spr.rows, bottom: spr.bottom, size: spr.size & 0x3fff, special: [0xaf, 0xaa, 0xab].includes(spr.id) });
+    x += w + 1;
+    if (h > rowH) rowH = h;
+  }
+  const height = y + rowH;
+  const data = new Uint8Array(width * Math.max(height, 1)).fill(255);
+  for (const [, spr, rx, ry] of list) {
+    spr.runs.forEach((row, r) => {
+      for (const [c0, c1, k] of row) for (let c = c0; c < c1; c++) data[(ry + r) * width + rx + c - spr.minC] = k & 15;
+    });
+  }
+  return { width, height, data, rects };
+}
+
+/**
+ * Camera-facing quads for the sprites (the game draws a bitmap flat on the
+ * screen at its anchor point's depth). One bitmap pixel is size/32 fine units
+ * wide and size * SS:017E / (SS:017C * 64) Z units tall (= size/32 with the
+ * game's values); column 0 starts at the anchor, row 0 (the bottom row) lies
+ * `bottom` rows below it. Mirrored bitmaps flip about the anchor column.
+ * @param {object[]} sprites  from buildObjectMesh or buildSectorMesh
+ *   (with `chosen` = frameObjects().sprites: only those, with their frame and mirroring;
+ *   entries with `centre` are far-LOD bitmaps at that placement: pass mesh.placements)
+ * @param {object} atlas      from buildSpriteAtlas
+ * @param {object} cam        { x, y (fine, absolute), heading }
+ * @param {object} objs       from readObjects (for the scale constants)
+ * @param {number[]} origin   the mesh origin
+ * @returns {Float32Array} x, y, z (relative to origin), u, v (atlas texels), palette offset,
+ *   depth bias (fine units: draw the quad's depth this much nearer); 7 floats per vertex, 6 vertices per sprite
+ */
+export function spriteQuads(sprites, atlas, cam, objs, origin, chosen = null, placements = null) {
+  const out = [];
+  const a = (cam.heading / 65536) * 2 * Math.PI;
+  const rx = Math.cos(a), ry = -Math.sin(a); // screen right in world X/Y
+  const vratio = objs.spriteVscale / (objs.vscale * 64);
+  const list = chosen ? chosen.map((c) => (c.centre !== undefined
+    ? { at: placements[c.centre].centre, palette: placements[c.centre].palette, id: c.id, mirrorSet: c.mirrored }
+    : { ...sprites[c.sprite], id: c.id, mirrorSet: c.mirrored })) : sprites;
+  for (const s of list) {
+    const r = atlas.rects.get(s.id);
+    if (!r) continue;
+    const wx = r.size / 32, hz = r.special ? (r.size * 65536) / (objs.vscale * 64) : r.size * vratio;
+    // mirror rule: (yaw - camera yaw [or ray heading]) + 4000h, negative = mirrored
+    let ang = s.yaw - cam.heading;
+    if (s.ray) ang = s.yaw - ((Math.atan2(s.at[0] + origin[0] - cam.x, s.at[1] + origin[1] - cam.y) / (2 * Math.PI)) * 65536);
+    const neg = ((Math.round(ang) + 0x4000) & 0x8000) !== 0;
+    const mirrored = s.mirrorSet ?? (s.mirror === 'always' || (s.mirror === 'angle' && neg) || (s.mirror === 'angleInverted' && !neg));
+    const c0 = r.minC, c1 = r.minC + r.w;
+    const l0 = mirrored ? -c1 * wx : c0 * wx, l1 = mirrored ? -c0 * wx : c1 * wx;
+    const z0 = s.at[2] - r.bottom * hz, z1 = z0 + r.rows * hz;
+    const u0 = mirrored ? r.x + r.w : r.x, u1 = mirrored ? r.x : r.x + r.w;
+    // a bitmap that belongs to a polygon shape is painted after the shape's
+    // polygons (display-list order) though it is flat at its anchor's depth:
+    // pull it forward by its half-width so the shape's own faces beside the
+    // anchor do not hide it
+    const bias = s.onPolygons ? (r.w * wx) / 2 : 0;
+    const P = (l, z, u, v) => out.push(s.at[0] + rx * l, s.at[1] + ry * l, z, u, v, s.palette, bias);
+    const A = [l0, z0, u0, r.y], B = [l1, z0, u1, r.y], C = [l1, z1, u1, r.y + r.rows], D = [l0, z1, u0, r.y + r.rows];
+    for (const q of [A, B, C, A, C, D]) P(...q);
+  }
+  return new Float32Array(out);
+}
+
+/**
+ * Every bitmap id the placements can show: their bitmap elements and sprite
+ * objects, and every frame of the angle-dependent bitmap LODs (rows of trees
+ * seen from afar). Use it for buildSpriteAtlas.
+ */
+export function spriteIdsUsed(objs) {
+  const ids = new Set();
+  const lods = new Set();
+  for (const p of objs.placements) {
+    const shape = objs.shapeAt(p);
+    if (!shape) continue;
+    const parts = placementParts(objs, p);
+    for (const b of [...parts.bitmaps, ...parts.sprites]) ids.add(b.id);
+    for (const l of shape.lods) if (l.sprite) lods.add(l);
+  }
+  for (const l of lods) for (let a = 0; a < 0x10000; a += 0x80) { const f = spriteLodFrame(l, a); if (f && !f.polygons) ids.add(f.id); }
+  return [...ids].filter((id) => objs.sprite(id)).sort((a, b) => a - b);
+}
+
+/**
+ * True when the camera's segment (DS:096F) is a pit-lane entry (+1A bit 2000h):
+ * the game then walks the pit lane and shows the 'pit' object set
+ * (buildSectorMesh(objs, { set: 'pit' })) instead of the lap's.
+ */
+export function cameraInPitLane(mem) {
+  const H = mem.heap(), B = mem.memBase, ds = mem.DS << 4;
+  const r16 = (a) => H[B + a] | (H[B + a + 1] << 8);
+  const lin = (r16(ds + 0x0971) << 4) + r16(ds + 0x096f);
+  return (r16(lin + 0x1a) & 0x2000) !== 0;
 }
