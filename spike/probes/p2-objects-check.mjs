@@ -66,7 +66,7 @@ function projGame(cam, v, hi = false) {
   const n = dz * 32 * k;
   let q = Math.trunc(n / D);
   const r = n - q * D;
-  if (r >= 0) { if (q >= D) q += 1; } else if (-2 * r >= D) q -= 1;
+  if (r >= 0) { if ((q & 0xffff) >= D) q += 1; } else if (-2 * r >= D) q -= 1;
   return [x, cam.horizon - q];
 }
 function clipNear(poly) {
@@ -268,10 +268,12 @@ for (const name of names) {
     const id = objIndex++;
     // the object's centre (Z + shape +14) in camera space
     const vc = toCam(cam, [p.x, p.y, p.z + shape.z14]);
+    // within 3E80h fine units (with the shape's size) the game works in 1/64 ft
+    const hi = Math.abs(p.x - cam.x8 * 8) + shape.size < 0x3e80 && Math.abs(p.y - cam.y8 * 8) + shape.size < 0x3e80;
     const d8 = vc[1];
     let xc;
     if (d8 < NEAR) xc = vc[0] < 0 ? 0 : 0x140;
-    else xc = projGame(cam, vc)[0];
+    else xc = projGame(cam, vc, hi)[0];
     const r44 = ray(xc);
     const r42 = (p.yaw - camYaw) & 0xffff;
     const aRay = (r42 + r44) & 0xffff;
@@ -283,7 +285,7 @@ for (const name of names) {
     let lod = shape.lods[lodIdx];
     const spriteAt = (sid, mirrored, palOff, v, depthTag) => {
       if (v[1] < NEAR) return;
-      const [sx0, sy0] = projGame(cam, v); const sx = sx0 + (+process.env.SDX || 0), sy = sy0 + (+process.env.SDY || 0);
+      const [sx0, sy0] = projGame(cam, v, hi); const sx = sx0 + (+process.env.SDX || 0), sy = sy0 + (+process.env.SDY || 0);
       const spr = objs.sprite(sid);
       if (!spr) return;
       const D8 = Math.floor(v[1]);
@@ -311,7 +313,7 @@ for (const name of names) {
           const loop = polygonLoop(shape, el);
           const c = clipNear(loop.map((i) => cp[i]));
           if (c.length < 3) continue;
-          const scr = c.map((v) => { const s = projGame(cam, v); return [s[0], s[1] + cam.top, 1 / v[1]]; });
+          const scr = c.map((v) => { const s = projGame(cam, v, hi); return [s[0], s[1] + cam.top, 1 / v[1]]; });
           const col = hazed(palOf(el.colour), lvl);
           if (col === CROWD_COLOUR) {
             // the crowd: spans from the bottom row up, pixels from the strip
@@ -336,7 +338,7 @@ for (const name of names) {
           const [a, b] = shape.vector(el.vector);
           const va = cp[a], vb = cp[b];
           if (va[1] < NEAR || vb[1] < NEAR) continue;
-          const pa = projGame(cam, va), pb = projGame(cam, vb);
+          const pa = projGame(cam, va, hi), pb = projGame(cam, vb, hi);
           const col = hazed(palOf(0), lvl);
           if (pa[0] < 0 || pa[0] >= W) continue;
           const ya = Math.max(0, Math.min(pa[1], cam.rows - 1)), yb = Math.max(0, Math.min(pb[1] - 1, cam.rows - 1));
