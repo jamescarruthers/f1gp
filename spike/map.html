@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1GP Live Map</title>
+<!--
+  Phase 1 page: the original game in js-dos (engine API, direct mode, so the
+  emulator runs on this page's main thread and its memory is readable), and
+  beside it a live top-down map of every car, read from emulated memory each
+  animation frame with lib/f1gp-state.mjs and drawn by lib/map-view.mjs.
+
+  Local use only: the bundle holds the game files. Never publish this page
+  together with a bundle.
+
+    cd spike && node serve.mjs --port 8080
+    http://127.0.0.1:8080/map.html?bundle=dist/p1-map-25000.jsdos
+
+  Query options (all optional):
+    bundle=dist/p1-map-25000.jsdos   bundle URL, relative to this page
+    audio=own|off                    own: our AudioWorklet (as raw.html); off: no sound
+    map=1|0                          read the state and draw the map (0 = game only)
+    smooth=1|0                       interpolate cars between game frames
+    trails=0|1, trailSeconds=10      car trails
+    follow=none|player|viewed, zoom=6
+    outline=file|memory              circuit outline from the bundle's F1CTnn.DAT
+                                     (lib/track-file.mjs) or from the game's own
+                                     segment array (readTrack); file falls back to
+                                     memory when the file is missing or does not fit
+    filter=strict|reader             which reads the map keeps (see strictConsistent)
+    busy=0                           extra main-thread work per animation frame, in
+                                     ms (to measure how much the emulator tolerates)
+
+  Exposes window.emuReady, window.ci / window.emuCi, window.emuFrames,
+  window.emuEvents, window.emuStatus() (the same hooks as raw.html, so
+  lib/browser-emu.mjs can drive it) and window.mapApp (state, reader, view,
+  outline, trackInfo, set(options), stats(), resetStats()).
+  Keys: every key the page receives goes to the game (KeyboardEvent.code ->
+  js-dos key code), except while a form control has focus. Click the game
+  screen to lock the pointer for the mouse.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f4f2; --panel: #ffffff; --fg: #0b0b0b; --fg2: #52514e; --rule: #dddcd6;
+    --accent: #2a78d6;
+    --map-bg: #fcfcfb; --map-track: #b9b8b2; --map-edge: #77766f; --map-pit: #d6d5cf; --map-sf: #0b0b0b;
+    --map-text: #52514e; --map-cam: #0b0b0b;
+    --car-ai: #2a78d6; --car-live: #1baf7a; --car-player: #eb6834; --car-retired: #8a8985; --car-ink: #ffffff;
+    --row-player: #fde7dd; --row-viewed: #e3eefa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #111110; --panel: #1a1a19; --fg: #ffffff; --fg2: #c3c2b7; --rule: #33332f;
+      --accent: #3987e5;
+      --map-bg: #1a1a19; --map-track: #4a4a46; --map-edge: #8a8985; --map-pit: #34342f; --map-sf: #ffffff;
+      --map-text: #c3c2b7; --map-cam: #ffffff;
+      --car-ai: #3987e5; --car-live: #199e70; --car-player: #d95926; --car-retired: #8a8985; --car-ink: #ffffff;
+      --row-player: #4a2a1c; --row-viewed: #1c3150;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #111110; --panel: #1a1a19; --fg: #ffffff; --fg2: #c3c2b7; --rule: #33332f;
+    --accent: #3987e5;
+    --map-bg: #1a1a19; --map-track: #4a4a46; --map-edge: #8a8985; --map-pit: #34342f; --map-sf: #ffffff;
+    --map-text: #c3c2b7; --map-cam: #ffffff;
+    --car-ai: #3987e5; --car-live: #199e70; --car-player: #d95926; --car-retired: #8a8985; --car-ink: #ffffff;
+    --row-player: #4a2a1c; --row-viewed: #1c3150;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  header { display: flex; gap: 16px; align-items: baseline; padding: 8px 16px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #status { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+  main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px; min-width: 0; }
+  #screen { display: block; width: 100%; aspect-ratio: 4 / 3; background: #000; image-rendering: pixelated; outline: none; }
+  #screen:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #map { display: block; width: 100%; height: clamp(280px, 52vh, 640px); border-radius: 4px; background: var(--map-bg); }
+  .hint { color: var(--fg2); margin: 8px 0 0; font-size: 12px; }
+  #perf { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg2); margin-top: 8px; white-space: pre-wrap; }
+  #controls { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 10px 0 6px; }
+  #controls label { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+  #controls select { font: inherit; }
+  #legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--fg2); font-size: 12px; margin-bottom: 8px; }
+  #legend span { display: inline-flex; gap: 5px; align-items: center; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 50%; }
+  .sw.sq { border-radius: 1px; }
+  .sw.ring { background: transparent !important; border: 1.5px solid var(--map-cam); }
+  .sw.hollow { background: transparent !important; border: 1.5px solid var(--car-retired); }
+  #trackinfo { color: var(--fg2); font-size: 12px; margin: 0 0 8px; }
+  .tablewrap { max-height: 40vh; overflow: auto; border-top: 1px solid var(--rule); }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 2px 8px 2px 0; white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--fg2); font-weight: 600; border-bottom: 1px solid var(--rule); }
+  td:nth-child(1), td:nth-child(2), td:nth-child(4), td:nth-child(5) { text-align: right; padding-right: 12px; }
+  th:nth-child(1), th:nth-child(2), th:nth-child(4), th:nth-child(5) { text-align: right; padding-right: 12px; }
+  tr.player { background: var(--row-player); }
+  tr.viewed td:nth-child(3) { text-decoration: underline; text-underline-offset: 2px; }
+  tr.viewed:not(.player) { background: var(--row-viewed); }
+  tr.retired td { color: var(--fg2); }
+</style>
+</head>
+<body>
+<header>
+  <h1>F1GP live map</h1>
+  <div id="status">starting...</div>
+</header>
+<main>
+  <section id="game-pane">
+    <canvas id="screen" width="320" height="200" tabindex="0" aria-label="Game screen"></canvas>
+    <p class="hint">Keys go to the game while this page has focus (not while a control below is focused). Click the screen to use the mouse; Esc releases it.</p>
+    <div id="perf"></div>
+  </section>
+  <section id="map-pane">
+    <canvas id="map" aria-label="Top-down map of the circuit and every car"></canvas>
+    <div id="controls">
+      <label><input type="checkbox" id="opt-map" checked> Map</label>
+      <label><input type="checkbox" id="opt-smooth" checked> Smooth</label>
+      <label><input type="checkbox" id="opt-trails"> Trails</label>
+      <label><select id="opt-trailSeconds" aria-label="Trail length">
+        <option value="5">5 s</option><option value="10" selected>10 s</option><option value="30">30 s</option><option value="60">60 s</option>
+      </select></label>
+      <label><input type="checkbox" id="opt-numbers" checked> Numbers</label>
+      <label><input type="checkbox" id="opt-camera" checked> Camera</label>
+      <label>View <select id="opt-follow">
+        <option value="none">Whole circuit</option><option value="player">Follow my car</option><option value="viewed">Follow viewed car</option>
+      </select></label>
+      <label>Zoom <select id="opt-zoom">
+        <option value="3">3x</option><option value="6" selected>6x</option><option value="12">12x</option><option value="24">24x</option>
+      </select></label>
+    </div>
+    <div id="legend">
+      <span><i class="sw" style="background: var(--car-player)"></i>My car</span>
+      <span><i class="sw" style="background: var(--car-ai)"></i>Computer car (derived position)</span>
+      <span><i class="sw" style="background: var(--car-live)"></i>Computer car (live physics)</span>
+      <span><i class="sw sq" style="background: var(--car-ai)"></i>In the pit lane</span>
+      <span><i class="sw hollow"></i>Retired</span>
+      <span><i class="sw ring"></i>Viewed car; wedge = game camera</span>
+    </div>
+    <p id="trackinfo">No circuit loaded.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Pos</th><th>Car</th><th>Driver</th><th>Lap</th><th>mph</th><th>Position</th><th>Status</th></tr></thead>
+        <tbody id="cars"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
+<script type="module">
+import { attach } from './lib/f1gp-mem.mjs';
+import { createReader, readTrack } from './lib/f1gp-state.mjs';
+import { parseTrack, trackOutline, CIRCUITS } from './lib/track-file.mjs';
+import { MapView, CarTable, outlineFromTrackFile, outlineFromMemory, compareOutlines, snapState, tableRows } from './lib/map-view.mjs';
+import { unzipSync } from './node_modules/fflate/esm/browser.js';
+
+// ------------------------------------------------------------ keys
+// KeyboardEvent.code -> js-dos key code (GLFW numbering). Copy of raw.html's table.
+const CODE_TO_KEY = (() => {
+  const m = {
+    Space: 32, Quote: 39, Comma: 44, Minus: 45, Period: 46, Slash: 47, Semicolon: 59,
+    Equal: 61, BracketLeft: 91, Backslash: 92, BracketRight: 93, Backquote: 96,
+    Escape: 256, Enter: 257, Tab: 258, Backspace: 259, Insert: 260, Delete: 261,
+    ArrowRight: 262, ArrowLeft: 263, ArrowDown: 264, ArrowUp: 265,
+    PageUp: 266, PageDown: 267, Home: 268, End: 269,
+    CapsLock: 280, ScrollLock: 281, NumLock: 282, PrintScreen: 283, Pause: 284,
+    NumpadDecimal: 330, NumpadDivide: 331, NumpadMultiply: 332, NumpadSubtract: 333,
+    NumpadAdd: 334, NumpadEnter: 335,
+    ShiftLeft: 340, ControlLeft: 341, AltLeft: 342, ShiftRight: 344, ControlRight: 345,
+    AltRight: 346, IntlBackslash: 348,
+  };
+  for (let i = 0; i < 26; i++) m["Key" + String.fromCharCode(65 + i)] = 65 + i;
+  for (let i = 0; i < 10; i++) { m["Digit" + i] = 48 + i; m["Numpad" + i] = 320 + i; }
+  for (let i = 1; i <= 12; i++) m["F" + i] = 289 + i;
+  return m;
+})();
+
+// ------------------------------------------------------------ audio (copy of raw.html audio=own)
+const OWN_WORKLET = `
+class RawPlayer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(65536); this.r = 0; this.w = 0; this.n = 0;
+    this.step = 1; this.pos = 0; this.started = false; this.underruns = 0; this.dropped = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d.type === "rate") { this.step = d.source / sampleRate; return; }
+      const s = d;
+      for (let i = 0; i < s.length; i++) {
+        if (this.n === this.buf.length) { this.r = (this.r + 1) & 65535; this.n--; }
+        this.buf[this.w] = s[i]; this.w = (this.w + 1) & 65535; this.n++;
+      }
+      if (this.n > 8192) { const drop = this.n - 2048; this.r = (this.r + drop) & 65535; this.n -= drop; this.dropped += drop; }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    if (!this.started && this.n < 2048) { out.fill(0); return true; }
+    this.started = true;
+    for (let i = 0; i < out.length; i++) {
+      if (this.n < 2) { out[i] = 0; this.underruns++; this.started = this.n > 0; continue; }
+      const a = this.buf[this.r], b = this.buf[(this.r + 1) & 65535];
+      out[i] = a + (b - a) * this.pos;
+      this.pos += this.step;
+      while (this.pos >= 1) { this.pos -= 1; this.r = (this.r + 1) & 65535; this.n--; }
+    }
+    if ((currentFrame & 16383) < out.length) this.port.postMessage({ queued: this.n, underruns: this.underruns, dropped: this.dropped });
+    return true;
+  }
+}
+registerProcessor("raw-player", RawPlayer);
+`;
+async function makeOwnAudio() {
+  const ctx = new AudioContext({ latencyHint: "interactive" });
+  const url = URL.createObjectURL(new Blob([OWN_WORKLET], { type: "text/javascript" }));
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  const node = new AudioWorkletNode(ctx, "raw-player", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+  node.connect(ctx.destination);
+  const state = { ctx, rate: 0, pushed: 0, queued: 0, underruns: 0, dropped: 0 };
+  node.port.onmessage = (e) => Object.assign(state, e.data);
+  const resume = () => { if (ctx.state === "suspended") ctx.resume().catch(() => {}); };
+  document.addEventListener("pointerdown", resume, { capture: true });
+  document.addEventListener("keydown", resume, { capture: true });
+  state.push = (samples, rate) => {
+    if (rate !== state.rate) { state.rate = rate; node.port.postMessage({ type: "rate", source: rate }); }
+    state.pushed += samples.length;
+    node.port.postMessage(samples);
+  };
+  return state;
+}
+
+// ------------------------------------------------------------ small helpers
+const $ = (id) => document.getElementById(id);
+const pad2 = (n) => String(n).padStart(2, "0");
+const quant = (a, q) => { if (!a.length) return null; const s = Float64Array.from(a).sort(); return s[Math.min(s.length - 1, Math.floor(s.length * q))]; };
+const round = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v) ? v : +v.toFixed(d));
+const fmtLap = (ms) => (ms === null ? "" : `${Math.floor(ms / 60000)}:${pad2(Math.floor(ms / 1000) % 60)}.${String(ms % 1000).padStart(3, "0")}`);
+
+const q = new URLSearchParams(location.search);
+const opts = {
+  bundle: q.get("bundle") ?? "dist/p1-map-25000.jsdos",
+  audio: q.get("audio") ?? "own",
+  map: (q.get("map") ?? "1") !== "0",
+  smooth: (q.get("smooth") ?? "1") !== "0",
+  trails: q.get("trails") === "1",
+  trailSeconds: Number(q.get("trailSeconds") ?? 10),
+  numbers: (q.get("numbers") ?? "1") !== "0",
+  camera: (q.get("camera") ?? "1") !== "0",
+  follow: q.get("follow") ?? "none",
+  zoom: Number(q.get("zoom") ?? 6),
+  outline: q.get("outline") ?? "file",
+  filter: q.get("filter") ?? "strict",
+  busy: Number(q.get("busy") ?? 0),
+};
+const events = window.emuEvents = window.emuEvents || [];
+const log = (type, extra = {}) => events.push({ t: Math.round(performance.now()), type, ...extra });
+window.emuFrames = 0;
+log("page-start", { opts });
+
+// ------------------------------------------------------------ controls
+const view = new MapView($("map"), opts);
+const table = new CarTable($("cars"));
+function syncControls() {
+  for (const k of ["map", "smooth", "trails", "numbers", "camera"]) $(`opt-${k}`).checked = !!opts[k];
+  for (const k of ["trailSeconds", "follow", "zoom"]) $(`opt-${k}`).value = String(opts[k]);
+}
+function setOptions(o) {
+  Object.assign(opts, o);
+  view.setOptions({ smooth: opts.smooth, trails: opts.trails, trailSeconds: opts.trailSeconds, numbers: opts.numbers,
+    camera: opts.camera, follow: opts.follow, zoom: opts.zoom });
+  if (!opts.map) { view.message = "Map off"; view.clear(); view.draw(performance.now()); lastFrame = -1; }
+  else if (view.message === "Map off") view.message = "";
+  syncControls();
+}
+syncControls();
+$("controls").addEventListener("change", (e) => {
+  const el = e.target, k = el.id.replace(/^opt-/, "");
+  setOptions({ [k]: el.type === "checkbox" ? el.checked : el.tagName === "SELECT" && k !== "follow" ? Number(el.value) : el.value });
+  // give the keyboard back to the game
+  setTimeout(() => el.blur(), 0);
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => view.readColours());
+
+// ------------------------------------------------------------ perf stats
+// Everything since the last resetStats(): animation-frame intervals, the
+// page's own work per animation frame, game frames seen and kept, the game
+// clock (DS:2955) and the 300 Hz PIT counter (SS:05D2) against the wall clock.
+const perf = {};
+function resetStats() {
+  Object.assign(perf, {
+    t0: performance.now(), lastRaf: null, raf: [], work: [], map: [], screen: [], read: [], table: [],
+    reads: 0, consistent: 0, strictRejected: 0, framesSeen: 0, framesKept: 0, missed: 0, lastSeen: null, lastKept: null,
+    clock0: null, clock1: null, pit0: null, pitAcc: 0, pitLast: null, screenFrames0: window.emuFrames,
+    longTasks: 0, longMs: 0, longMax: 0, busyMs: 0,
+  });
+}
+resetStats();
+try {
+  new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) { perf.longTasks++; perf.longMs += e.duration; perf.longMax = Math.max(perf.longMax, e.duration); }
+  }).observe({ type: "longtask", buffered: false });
+} catch { /* longtask not supported */ }
+
+function stats() {
+  const now = performance.now(), wall = now - perf.t0;
+  const dist = (a, d = 2) => ({ n: a.length, median: round(quant(a, 0.5), d), p95: round(quant(a, 0.95), d), p99: round(quant(a, 0.99), d), max: round(a.length ? Math.max(...a) : null, d) });
+  const r = perf.raf;
+  const clock = perf.clock0 && perf.clock1 && perf.clock1.wall > perf.clock0.wall
+    ? { gameMs: perf.clock1.tick - perf.clock0.tick, wallMs: round(perf.clock1.wall - perf.clock0.wall, 1),
+        rate: round((perf.clock1.tick - perf.clock0.tick) / (perf.clock1.wall - perf.clock0.wall), 4),
+        pitTicks: perf.pitAcc, emuSpeed: round(perf.pitAcc / 300 / ((perf.clock1.wall - perf.clock0.wall) / 1000), 4),
+        gameFps: round((perf.clock1.frame - perf.clock0.frame) / ((perf.clock1.wall - perf.clock0.wall) / 1000), 3) }
+    : null;
+  return {
+    wallMs: round(wall, 1), mapOn: opts.map, options: { ...opts },
+    raf: { ...dist(r), fps: round(r.length / (wall / 1000), 2), over20: r.filter((x) => x > 20).length, over34: r.filter((x) => x > 34).length, over50: r.filter((x) => x > 50).length, over100: r.filter((x) => x > 100).length },
+    workMs: dist(perf.work, 3), mapMs: dist(perf.map, 3), screenMs: dist(perf.screen, 3), readMs: dist(perf.read, 3), tableMs: dist(perf.table, 3),
+    busyMs: round(perf.busyMs, 1),
+    reads: perf.reads, consistentReads: perf.consistent, strictRejected: perf.strictRejected, framesSeen: perf.framesSeen, framesKept: perf.framesKept, missedFrames: perf.missed,
+    clock, screenFramesPerSec: round((window.emuFrames - perf.screenFrames0) / (wall / 1000), 2),
+    longTasks: { n: perf.longTasks, totalMs: round(perf.longMs, 1), maxMs: round(perf.longMax, 1) },
+  };
+}
+
+// ------------------------------------------------------------ track files from the bundle
+const trackFiles = {};
+function indexTrackFiles(bundle) {
+  try {
+    const files = unzipSync(bundle, { filter: (f) => /^F1CT\d\d\.DAT$/i.test(f.name) });
+    for (const [name, bytes] of Object.entries(files)) trackFiles[name.toUpperCase()] = bytes;
+  } catch (e) { log("unzip-failed", { error: String(e) }); }
+  log("track-files", { names: Object.keys(trackFiles).sort() });
+}
+
+let ci = null, mem = null, reader = null, outline = null, trackInfo = null, sessionKey = "";
+let lastState = null, lastKeptState = null, lastFrame = -1, lastTableAt = 0, attachTries = 0;
+
+async function trackBytes(name) {
+  if (trackFiles[name]) return { bytes: trackFiles[name], from: "bundle zip" };
+  // a bundle without the file at its root: ask the emulator's file system
+  for (const p of [name, name.toLowerCase(), `/home/web_user/${name}`]) {
+    try { const b = await ci.fsReadFile(p); if (b && b.length) return { bytes: b, from: `ci.fsReadFile(${p})` }; } catch { /* next */ }
+  }
+  return null;
+}
+
+let loading = null;
+async function loadOutline(st) {
+  const c = st.session.circuit, name = `F1CT${pad2(c + 1)}.DAT`;
+  const info = { circuit: c, circuitName: CIRCUITS[c] ?? `circuit ${c}`, file: name, memLapSegments: st.track.lapSegments };
+  const t0 = performance.now();
+  const memOutline = outlineFromMemory(readTrack(mem), { circuitName: info.circuitName });
+  let fileOutline = null;
+  try {
+    const got = await trackBytes(name);
+    if (got) {
+      const geo = trackOutline(parseTrack(got.bytes));
+      fileOutline = outlineFromTrackFile(geo, { circuitName: info.circuitName, file: name });
+      info.fileFrom = got.from;
+      info.fileLapSegments = fileOutline.lapSegments;
+      info.vsMemory = compareOutlines(fileOutline, memOutline);
+    } else info.fileError = "not found";
+  } catch (e) { info.fileError = String(e.message || e); }
+  const fileFits = fileOutline && fileOutline.lapSegments === st.track.lapSegments;
+  const use = opts.outline === "memory" || !fileFits ? memOutline : fileOutline;
+  info.source = use.source;
+  info.ms = round(performance.now() - t0, 1);
+  info.pitSegments = use.pit ? use.pit.centre.length : 0;
+  outline = use;
+  trackInfo = info;
+  view.setTrack(use);
+  const lenKm = (st.track.lapSegments * 16 * 0.3048) / 1000;
+  $("trackinfo").textContent = `${info.circuitName}: ${st.track.lapSegments} segments (${lenKm.toFixed(2)} km), outline from ${use.source}` +
+    (use.source === "track file" ? ` ${name}` : "") +
+    (info.vsMemory && info.vsMemory.n ? `; file vs game memory: centre within ${info.vsMemory.maxCentreFt.toFixed(2)} ft` : "") +
+    (info.fileError ? ` (track file: ${info.fileError})` : "") + ".";
+  log("outline", info);
+}
+
+function validSession(st) {
+  return st.ok && st.inSession && st.session.circuit < 16 && st.track.lapSegments > 0 && st.cars.some((c) => c.pos !== "none");
+}
+
+function tryAttach() {
+  if (mem || !ci) return;
+  attachTries++;
+  try {
+    const m = attach(ci, { requireGame: true });
+    if (!m.checked) throw new Error("DS/SS check failed (cos table not there yet)");
+    reader = createReader(m);
+    mem = m;
+    log("attached", { memBase: m.memBase, imageSeg: m.imageSeg, DS: m.DS, SS: m.SS, tries: attachTries });
+    window.mapApp.mem = mem; window.mapApp.reader = reader;
+  } catch (e) {
+    if (attachTries % 10 === 1) log("attach-wait", { error: String(e.message || e) });
+  }
+}
+
+// ------------------------------------------------------------ per animation frame
+const screen = $("screen"), g = screen.getContext("2d");
+let image = g.createImageData(320, 200), pending = null;
+function setSize(w, h) {
+  if (!w || !h || (w === screen.width && h === screen.height && image.width === w)) return;
+  screen.width = w; screen.height = h;
+  image = g.createImageData(w, h);
+}
+function blitScreen() {
+  if (!pending) return;
+  const src = pending; pending = null;
+  const w = ci.width(), h = ci.height();
+  if (w !== screen.width || h !== screen.height) setSize(w, h);
+  const dst = image.data;
+  if (src.length === dst.length) dst.set(src);
+  else if (src.length === w * h * 3) {
+    for (let i = 0, j = 0; j < dst.length; ) { dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = 255; }
+  }
+  g.putImageData(image, 0, 0);
+}
+
+function sampleClocks(now, st) {
+  // the 300 Hz PIT counter SS:05D2 runs on emulated time: its rate against the wall clock is the emulator's speed
+  const pit = mem.ss.u16(0x05d2);
+  if (perf.pitLast !== null) perf.pitAcc += (pit - perf.pitLast) & 0xffff;
+  perf.pitLast = pit;
+  let tick, frame;
+  if (st) { tick = st.tick; frame = st.frame; }
+  else {
+    // the same frame number readState computes: round(clock / step)
+    tick = mem.ds.u32(0x2955);
+    const step = mem.ds.u32(0x2241) + mem.ds.u16(0x2245) / 65536;
+    frame = step > 0 ? Math.round((tick + mem.ds.u16(0x2959) / 65536) / step) : 0;
+  }
+  const c = { wall: now, tick, frame };
+  if (!perf.clock0) perf.clock0 = c;
+  perf.clock1 = c;
+}
+
+function frameLoop(now) {
+  const t0 = performance.now();
+  if (perf.lastRaf !== null) perf.raf.push(now - perf.lastRaf);
+  perf.lastRaf = now;
+  if (ci) blitScreen();
+  const t1 = performance.now();
+  let tr = t1;
+  if (mem) {
+    let st = null;
+    if (opts.map) {
+      st = reader.read();
+      tr = performance.now();
+      perf.reads++;
+      if (st.consistent) perf.consistent++;
+      onState(st, now);
+      perf.map.push(view.draw(now));
+    }
+    sampleClocks(now, st);
+  }
+  const t2 = performance.now();
+  if (opts.map && lastKeptState && now - lastTableAt > 200) {
+    lastTableAt = now;
+    table.update(tableRows(lastKeptState));
+    window.mapApp.tableState = lastKeptState;
+    perf.table.push(performance.now() - t2);
+  }
+  if (opts.busy > 0) { const b0 = performance.now(); while (performance.now() - b0 < opts.busy) { /* spin */ } perf.busyMs += performance.now() - b0; }
+  const t3 = performance.now();
+  perf.screen.push(t1 - t0);
+  if (opts.map && mem) perf.read.push(tr - t1);
+  perf.work.push(t3 - t0);
+  if (perf.raf.length > 40000) resetStats();
+  requestAnimationFrame(frameLoop);
+}
+
+// Which reads to keep. readState's `consistent` is `settled && !carsAhead`, but
+// the reader learns its carsAhead reference ((DS:2977 - 2*frame) & FFh) from
+// every settled read, including the read being judged, so a read that is
+// settled by the SS:05C8 >= DS:2C63 test while the game is in the middle of a
+// frame (cars already moved, clock not yet) passes. In races the page
+// therefore also requires that value to equal its most common one among
+// settled reads (between frames it is constant; during a frame's work it is 2
+// more). Outside races DS:2977 does not count and only `settled` is used.
+// ?filter=reader keeps readState's own flag (for comparison).
+const workOff = new Float64Array(256);
+let workMode = -1;
+function strictConsistent(st) {
+  if (!st.settled) return false;
+  if (!(st.session.typeRaw & 0x80)) return true;
+  const off = (st.workCounter - 2 * st.frame) & 0xff;
+  for (let i = 0; i < 256; i++) workOff[i] *= 0.995; // forget over a few hundred reads (uniform decay keeps the order)
+  workOff[off] += 1;
+  if (workMode < 0 || workOff[off] > workOff[workMode]) workMode = off;
+  return off === workMode;
+}
+
+function onState(st, now) {
+  lastState = st;
+  window.mapApp.state = st;
+  if (!validSession(st)) {
+    view.message = st.notInCar ? "Not in a session (menus)" : "Waiting for a session";
+    if (sessionKey) { sessionKey = ""; view.clear(); }
+    return;
+  }
+  const key = `${st.session.typeRaw}/${st.session.circuit}/${st.track.lapSegments}/${st.track.seg}`;
+  if (key !== sessionKey) {
+    sessionKey = key;
+    view.clear(); lastFrame = -1; lastKeptState = null; window.mapApp.history = [];
+    workOff.fill(0); workMode = -1;
+    view.message = "Loading the circuit...";
+    if (!loading) loading = loadOutline(st).catch((e) => log("outline-failed", { error: String(e) })).finally(() => { loading = null; });
+  }
+  if (!outline) return;
+  view.message = st.paused ? "Paused" : st.replay ? "Replay" : "";
+  if (perf.lastSeen !== st.frame) { perf.framesSeen++; perf.lastSeen = st.frame; }
+  const strict = strictConsistent(st);
+  if (st.consistent && !strict) perf.strictRejected++;
+  const keep = opts.filter === "reader" ? st.consistent : strict;
+  if (window.mapApp.onRead) { try { window.mapApp.onRead(st, { reader: st.consistent, strict }); } catch (e) { log("onRead-error", { error: String(e) }); window.mapApp.onRead = null; } }
+  if (keep && st.frame !== lastFrame) {
+    if (lastFrame >= 0 && st.frame > lastFrame + 1) perf.missed += st.frame - lastFrame - 1;
+    lastFrame = st.frame;
+    perf.framesKept++;
+    view.push(snapState(st), now);
+    lastKeptState = st;
+    const app = window.mapApp;
+    app.kept = st;
+    // the last few kept frames' speeds, so a check can allow for the dash's display lag
+    app.history.push({ frame: st.frame, mph: st.cars.map((c) => c.speedMph) });
+    if (app.history.length > 12) app.history.shift();
+    if (app.onKept) { try { app.onKept(st); } catch (e) { log("onKept-error", { error: String(e) }); app.onKept = null; } }
+  }
+}
+
+// ------------------------------------------------------------ status line, once a second
+let lastStatusFrames = 0;
+setInterval(() => {
+  const fps = window.emuFrames - lastStatusFrames; lastStatusFrames = window.emuFrames;
+  const s = stats();
+  const st = lastKeptState;
+  const parts = [];
+  if (st) {
+    const p = st.cars[st.playerSlot];
+    parts.push(`${st.session.type} ${trackInfo ? trackInfo.circuitName : ""}`, (p && st.session.type === "race" && p.lap > st.session.totalLaps ? "finished" : `lap ${p ? p.lap : "?"}/${st.session.totalLaps}`),
+      `${st.view.mode}`, `frame ${st.frame}`, p ? `${p.speedMph} mph` : "", p && p.lastLapMs ? `last ${fmtLap(p.lastLapMs)}` : "");
+  } else parts.push(mem ? (lastState && lastState.notInCar ? "menus" : "waiting for a session") : "gp.exe not attached yet");
+  $("status").textContent = parts.filter(Boolean).join(" · ");
+  const c = s.clock;
+  $("perf").textContent =
+    `page ${s.raf.fps ?? "-"} fps (frame interval median ${s.raf.median ?? "-"} ms, p99 ${s.raf.p99 ?? "-"} ms) · screen updates ${fps}/s\n` +
+    `work per frame median ${s.workMs.median ?? "-"} ms, p95 ${s.workMs.p95 ?? "-"} ms (map ${s.mapMs.median ?? "-"} ms, read ${s.readMs.median ?? "-"} ms)\n` +
+    (c ? `game ${c.gameFps} fps, game clock ×${c.rate}, emulator ×${c.emuSpeed} of real time` : "game clock: -") +
+    (s.missedFrames ? ` · ${s.missedFrames} game frames not drawn` : "");
+  // keep a rolling window of about 10 s for the on-page numbers unless a probe asked to hold the window
+  if (!window.mapApp.holdStats && s.wallMs > 10000) resetStats();
+}, 1000);
+
+// ------------------------------------------------------------ start
+// state: the latest read; kept: the latest consistent new frame (what the map shows); tableState: what the table shows;
+// history: the last 12 kept frames' speeds; onKept(st): optional hook called for every kept frame, and
+// onRead(st, { reader, strict }) for every read in a session (tests)
+window.mapApp = { opts, view, table, perf, stats, resetStats, set: setOptions, holdStats: false,
+  get outline() { return outline; }, get trackInfo() { return trackInfo; },
+  state: null, kept: null, tableState: null, history: [], onKept: null, onRead: null, mem: null, reader: null };
+requestAnimationFrame(frameLoop);
+
+(async () => {
+  emulators.pathPrefix = new URL("node_modules/js-dos/dist/emulators/", location.href).href;
+  const t0 = performance.now();
+  const res = await fetch(opts.bundle, { cache: "no-store" });
+  if (!res.ok) throw new Error(`bundle ${opts.bundle}: HTTP ${res.status} (build one with build-bundle.mjs)`);
+  const bundle = new Uint8Array(await res.arrayBuffer());
+  log("bundle-loaded", { bytes: bundle.length, ms: Math.round(performance.now() - t0) });
+  indexTrackFiles(bundle);
+  const ownAudio = opts.audio === "own" ? await makeOwnAudio().catch((e) => { log("audio-failed", { error: String(e) }); return null; }) : null;
+
+  // Direct mode: the emulator runs on this thread and ci.transport.module.HEAPU8 holds guest RAM.
+  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
+  log("ci-ready", { ms: Math.round(performance.now() - t0) });
+  window.ci = ci; window.emuCi = ci; window.emuReady = true;
+
+  const ev = ci.events();
+  ev.onFrameSize((w, h) => setSize(w, h));
+  setSize(ci.width(), ci.height());
+  ev.onFrame((rgb, rgba) => { window.emuFrames++; pending = rgb ?? rgba; });
+  if (ownAudio) ev.onSoundPush((samples) => ownAudio.push(samples, ci.soundFrequency()));
+  ev.onMessage((type, ...args) => log("message", { level: type, m: args.join(" ") }));
+  ev.onExit(() => log("exit"));
+  setInterval(tryAttach, 1000);
+
+  // keyboard: the whole page, except while a form control has focus
+  const held = new Set();
+  const inControl = (el) => el && el.closest && el.closest("input, select, textarea, button") !== null;
+  const key = (e, down) => {
+    if (e.metaKey || inControl(e.target)) return;
+    const code = CODE_TO_KEY[e.code];
+    if (code === undefined) return;
+    e.preventDefault();
+    if (down && e.repeat) return;
+    if (down) held.add(code); else held.delete(code);
+    ci.sendKeyEvent(code, down);
+  };
+  window.addEventListener("keydown", (e) => key(e, true), true);
+  window.addEventListener("keyup", (e) => key(e, false), true);
+  const releaseAll = () => { for (const c of held) ci.sendKeyEvent(c, false); held.clear(); };
+  window.addEventListener("blur", releaseAll);
+
+  // mouse: click the game screen to lock the pointer, then relative motion
+  screen.addEventListener("pointerdown", (e) => {
+    screen.focus();
+    if (document.pointerLockElement !== screen) { screen.requestPointerLock?.()?.catch?.(() => {}); return; }
+    ci.sendMouseButton(e.button === 0 ? 0 : 1, true);
+  });
+  screen.addEventListener("pointerup", (e) => { if (document.pointerLockElement === screen) ci.sendMouseButton(e.button === 0 ? 0 : 1, false); });
+  screen.addEventListener("pointermove", (e) => { if (document.pointerLockElement === screen) ci.sendMouseRelativeMotion(e.movementX, e.movementY); });
+  screen.addEventListener("contextmenu", (e) => e.preventDefault());
+  screen.focus();
+
+  // the engine API does not pause by itself when the tab is hidden
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { releaseAll(); ci.pause(); } else ci.resume();
+    log("visibility", { hidden: document.hidden });
+  });
+
+  window.emuStatus = () => ({
+    ready: true, frames: window.emuFrames, width: ci.width(), height: ci.height(),
+    attached: !!mem, outline: trackInfo, options: { ...opts },
+    ownAudio: ownAudio ? { rate: ownAudio.rate, pushed: ownAudio.pushed, queued: ownAudio.queued, underruns: ownAudio.underruns, dropped: ownAudio.dropped, state: ownAudio.ctx.state } : null,
+  });
+})().catch((e) => {
+  log("page-error", { error: String(e?.stack ?? e) });
+  $("status").textContent = `error: ${e.message || e}`;
+  console.error(e);
+});
+</script>
+</body>
+</html>

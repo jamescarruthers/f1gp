@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1GP Track Renderer</title>
+<!--
+  Phase 2 test page: the game runs in js-dos direct mode; the page reads its
+  state every animation frame and draws the track with WebGL from the game's
+  camera, at the canvas's full resolution, next to the original screen.
+
+    cd spike && node serve.mjs --port 8080
+    http://127.0.0.1:8080/render.html?bundle=dist/p2-render-25000.jsdos
+
+  Query options:
+    bundle=...            the js-dos bundle (built with build-bundle.mjs)
+    framing=wide|original wide keeps the game's vertical scale and shows more
+                          at the sides; original matches the game's framing
+    smooth=1|0            ease between game frames (one game frame behind)
+    layout=side|gl|overlay  original screen beside the new view, the new view
+                          alone, or the new view (game framing) laid half
+                          transparent over the original screen
+    cars=1|0              draw cars (boxes for now)
+    objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
+    source=memory|file    build the scene from the game's memory (all parts,
+                          the game's colours, sky and horizon image) or from
+                          the track file (road, kerbs and verges only)
+-->
+<style>
+  :root { --bg: #f4f3ef; --fg: #1d1d1b; --muted: #6b6a66; --panel: #ffffff; --line: #d9d7d0; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #161615; --fg: #ecebe6; --muted: #9a9993; --panel: #20201e; --line: #3a3936; }
+  }
+  :root[data-theme="dark"] { --bg: #161615; --fg: #ecebe6; --muted: #9a9993; --panel: #20201e; --line: #3a3936; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  header { padding: 10px 16px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  #status { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+  main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
+  .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  #screen { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
+  #gl { width: min(100%, 960px); aspect-ratio: 16 / 9; display: block; }
+  .glpane { flex: 1 1 560px; min-width: 0; }
+  #perf { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
+  body.gl-only .origpane { display: none; }
+  body.overlay .glpane { display: none; }
+  body.overlay .origpane { position: relative; }
+  body.overlay #screen { width: min(960px, calc(100vw - 50px)); }
+  #overgl { display: none; position: absolute; left: 8px; top: 8px; opacity: 0.5; pointer-events: none; image-rendering: pixelated; }
+  body.overlay #overgl { display: block; }
+  @media (max-width: 700px) { #screen { width: 100%; } main { padding: 0 16px 16px; } }
+</style>
+</head>
+<body>
+<header><h1>F1GP track renderer</h1><span id="status">loading...</span></header>
+<main>
+  <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
+  <div class="pane glpane"><canvas id="gl"></canvas><pre id="perf"></pre></div>
+</main>
+<script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
+<script type="module">
+import { attach } from './lib/f1gp-mem.mjs';
+import { createReader } from './lib/f1gp-state.mjs';
+import { parseTrack, compileTrack, compilePitLane, CIRCUITS } from './lib/track-file.mjs';
+import { fromCompiled } from './lib/track-mesh.mjs';
+import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
+import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
+import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
+import { unzipSync } from './node_modules/fflate/esm/browser.js';
+
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+const opts = {
+  bundle: q.get('bundle') ?? 'dist/p2-render-25000.jsdos',
+  framing: q.get('framing') ?? 'wide',
+  smooth: (q.get('smooth') ?? '1') !== '0',
+  layout: q.get('layout') ?? 'side',
+  cars: (q.get('cars') ?? '1') !== '0',
+  source: q.get('source') ?? 'memory',
+  objects: (q.get('objects') ?? '1') !== '0',
+};
+if (opts.layout === 'gl') document.body.classList.add('gl-only');
+if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
+const events = window.emuEvents = [];
+const log = (type, extra = {}) => events.push({ t: Math.round(performance.now()), type, ...extra });
+
+// KeyboardEvent.code -> js-dos key code (GLFW numbering), as in raw.html
+const CODE_TO_KEY = (() => {
+  const m = {
+    Space: 32, Quote: 39, Comma: 44, Minus: 45, Period: 46, Slash: 47, Semicolon: 59, Equal: 61,
+    BracketLeft: 91, Backslash: 92, BracketRight: 93, Backquote: 96,
+    Escape: 256, Enter: 257, Tab: 258, Backspace: 259, Insert: 260, Delete: 261,
+    ArrowRight: 262, ArrowLeft: 263, ArrowDown: 264, ArrowUp: 265, PageUp: 266, PageDown: 267, Home: 268, End: 269,
+    ShiftLeft: 340, ControlLeft: 341, AltLeft: 342, ShiftRight: 344, ControlRight: 345, AltRight: 346,
+  };
+  for (let i = 0; i < 26; i++) m['Key' + String.fromCharCode(65 + i)] = 65 + i;
+  for (let i = 0; i < 10; i++) m['Digit' + i] = 48 + i;
+  for (let i = 1; i <= 12; i++) m['F' + i] = 289 + i;
+  return m;
+})();
+
+// ------------------------------------------------------------ original screen
+const screen = $('screen'), g = screen.getContext('2d');
+let image = g.createImageData(320, 200), pending = null;
+function blitScreen() {
+  if (!pending) return;
+  const src = pending; pending = null;
+  const w = ci.width(), h = ci.height();
+  if (w !== screen.width || h !== screen.height) { screen.width = w; screen.height = h; image = g.createImageData(w, h); }
+  const dst = image.data;
+  if (src.length === dst.length) dst.set(src);
+  else for (let i = 0, j = 0; j < dst.length;) { dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = 255; }
+  g.putImageData(image, 0, 0);
+}
+
+// ------------------------------------------------------------ new view
+const glCanvas = opts.layout === 'overlay' ? $('overgl') : $('gl');
+const renderer = new TrackRenderer(glCanvas);
+function sizeCanvas() {
+  if (opts.layout === 'overlay') {
+    // match the original screen's box exactly
+    const s = screen.getBoundingClientRect();
+    glCanvas.style.width = `${s.width}px`; glCanvas.style.height = `${s.height}px`;
+  }
+  const r = glCanvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (glCanvas.width !== w || glCanvas.height !== h) { glCanvas.width = w; glCanvas.height = h; }
+}
+
+const trackFiles = {};
+let ci = null, mem = null, reader = null, circuit = -1;
+let prev = null, cur = null; // last two kept frames: { st, cam, at }
+const perf = { raf: [], draw: [], frames: 0, kept: 0, last: null };
+
+const teamColour = (car) => (car.isPlayer ? [255, 120, 20] : [235, 235, 235]);
+
+function loadCircuit(st) {
+  const c = st.session.circuit, name = `F1CT${String(c + 1).padStart(2, '0')}.DAT`;
+  const bytes = trackFiles[name];
+  if (!bytes) { log('no-track-file', { name }); return; }
+  const parsed = parseTrack(bytes);
+  let info;
+  if (opts.source === 'memory') {
+    // everything the game built at track load, read from its memory
+    const scene = readScene(mem);
+    info = renderer.setScene(scene, { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 });
+    if (opts.objects) {
+      try { info.objects = renderer.setObjects(readObjects(mem), readCrowd(mem)); }
+      catch (e) { log('objects-failed', { error: String(e?.stack ?? e) }); }
+    }
+  } else {
+    const compiled = compileTrack(parsed).segs;
+    const segs = fromCompiled(compiled);
+    const pitSegs = fromCompiled(compilePitLane(parsed, compiled).segs);
+    info = renderer.setTrack(segs, { track: parsed, pitSegs, surround: parsed.header.surrounding ? 'grey' : 'green' });
+  }
+  circuit = c;
+  log("track", { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts });
+  window.renderApp.track = { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts, objects: info.objects };
+}
+
+let loopErrors = 0, lastPaletteAt = 0;
+function frameLoop(now) {
+  try { frame(now); } catch (e) {
+    if (loopErrors++ < 5) { log('frame-error', { error: String(e?.stack ?? e) }); console.error(e); }
+  }
+  requestAnimationFrame(frameLoop);
+}
+
+function frame(now) {
+  if (perf.last !== null) perf.raf.push(now - perf.last);
+  perf.last = now;
+  if (ci) blitScreen();
+  sizeCanvas();
+  if (mem) {
+    const st = reader.read();
+    window.renderApp.state = st;
+    if (st.inSession && st.track.lapSegments > 0) {
+      if (st.session.circuit !== circuit) loadCircuit(st);
+      if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
+        prev = cur;
+        cur = { st, cam: cameraFromState(st), at: now };
+        perf.kept++;
+      }
+    } else { prev = cur = null; }
+  }
+  const t0 = performance.now();
+  if (cur) {
+    let cam = cur.cam, alpha = 1;
+    const st = cur.st;
+    if (opts.smooth && prev && !st.paused && cur.st.frame === prev.st.frame + 1 && prev.cam.rows === cur.cam.rows) {
+      alpha = Math.min(1, (now - cur.at) / st.frameMs);
+      cam = lerpCamera(prev.cam, cur.cam, alpha);
+    }
+    if (opts.cars) {
+      const cars = [];
+      for (let i = 0; i < st.cars.length; i++) {
+        const c = st.cars[i];
+        if (c.pos === 'none' || !c.visible) continue;
+        let x = c.x / 256, y = c.y / 256, z = c.z, heading = c.heading;
+        const p = prev && alpha < 1 ? prev.st.cars[i] : null;
+        if (p && p.pos !== 'none') {
+          x = p.x / 256 + (x - p.x / 256) * alpha; y = p.y / 256 + (y - p.y / 256) * alpha; z = p.z + (z - p.z) * alpha;
+          heading = (p.heading + ((((heading - p.heading + 0x18000) % 0x10000) - 0x8000) * alpha) + 0x10000) % 0x10000;
+        }
+        // in the cockpit, skip the viewed car itself
+        if (st.view.mode === 'cockpit' && i === st.view.viewedSlot) continue;
+        cars.push({ x, y, z, heading, colour: teamColour(c) });
+      }
+      renderer.setCars(cars);
+    }
+    cam.noHorizonImage = horizonOff(mem);
+    if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
+    renderer.draw(cam, { framing: opts.framing, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+    perf.frames++;
+  }
+  perf.draw.push(performance.now() - t0);
+}
+
+setInterval(() => {
+  const r = perf.raf.splice(0), d = perf.draw.splice(0);
+  const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
+  const st = cur && cur.st;
+  $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}`;
+  window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, size: [glCanvas.width, glCanvas.height] };
+  perf.kept = 0;
+}, 1000);
+
+window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null };
+// the Phase 1 tools (route driver, autopilot) look for window.mapApp
+window.mapApp = window.renderApp;
+requestAnimationFrame(frameLoop);
+
+(async () => {
+  emulators.pathPrefix = new URL('node_modules/js-dos/dist/emulators/', location.href).href;
+  const res = await fetch(opts.bundle, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`bundle ${opts.bundle}: HTTP ${res.status} (build one with build-bundle.mjs)`);
+  const bundle = new Uint8Array(await res.arrayBuffer());
+  for (const [n, b] of Object.entries(unzipSync(bundle, { filter: (f) => /^F1CT\d\d\.DAT$/i.test(f.name) }))) trackFiles[n.toUpperCase()] = b;
+  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: true });
+  window.ci = ci; window.emuCi = ci; window.emuReady = true;
+  log('ci-ready');
+  const ev = ci.events();
+  ev.onFrame((rgb, rgba) => { pending = rgb ?? rgba; });
+  const tryAttach = setInterval(() => {
+    try {
+      const m = attach(ci, { requireGame: true });
+      if (!m.checked) return;
+      mem = m; reader = createReader(m);
+      window.renderApp.mem = mem; window.renderApp.reader = reader;
+      clearInterval(tryAttach);
+      log('attached', { imageSeg: m.imageSeg });
+    } catch { /* gp.exe not loaded yet */ }
+  }, 500);
+
+  const held = new Set();
+  const key = (e, down) => {
+    if (e.metaKey) return;
+    const code = CODE_TO_KEY[e.code];
+    if (code === undefined) return;
+    e.preventDefault();
+    if (down && e.repeat) return;
+    if (down) held.add(code); else held.delete(code);
+    ci.sendKeyEvent(code, down);
+  };
+  window.addEventListener('keydown', (e) => key(e, true), true);
+  window.addEventListener('keyup', (e) => key(e, false), true);
+  window.addEventListener('blur', () => { for (const c of held) ci.sendKeyEvent(c, false); held.clear(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) ci.pause(); else ci.resume(); });
+})().catch((e) => { $('status').textContent = `error: ${e.message || e}`; log('page-error', { error: String(e?.stack ?? e) }); console.error(e); });
+</script>
+</body>
+</html>

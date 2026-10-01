@@ -1,0 +1,14 @@
+{
+  "name": "f1gp-spike",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 spike: run F1GP in js-dos",
+  "license": "GPL-2.0-only",
+  "dependencies": {
+    "fflate": "0.8.3",
+    "js-dos": "8.5.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

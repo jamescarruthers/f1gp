@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1GP Raw Player</title>
+<!--
+  Phase 0 test page: a bare player on the low-level js-dos engine API
+  (emulators.js + wdosbox), with our own canvas, keyboard, mouse and audio.
+  No Preact/Redux player UI.
+
+  Query options (all optional):
+    bundle=dist/browser-default.jsdos   bundle URL, relative to this page
+    backend=dosbox|dosboxX              engine build (default dosbox)
+    worker=1|0                          Worker or main-thread (Direct) mode
+    audio=own|worklet|off               own: onSoundPush -> our AudioWorklet
+                                        with a GainNode (volume works);
+                                        worklet: the engine's own AudioWorklet
+                                        (samples bypass the main thread);
+                                        off: no audio output (default own)
+    volume=0..1                         gain for audio=own (default 1)
+    smooth=0|1                          CSS smoothing instead of pixelated
+
+  Exposes window.emuReady, window.ci (= window.emuCi), window.emuEvents, window.emuFrames, window.emuStatus(),
+  window.audioProbe.level() and window.rawAudio (for audio=own).
+  Keys: KeyboardEvent.code is mapped to js-dos key codes while the canvas
+  has focus. Click the canvas to lock the pointer (relative mouse).
+-->
+<style>
+  :root { --bg: #111; --fg: #ddd; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f4f4f4; --fg: #222; }
+  }
+  :root[data-theme="dark"] { --bg: #111; --fg: #ddd; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px/1.4 system-ui, sans-serif; }
+  #wrap { height: calc(100vh - 22px); display: flex; align-items: center; justify-content: center; }
+  canvas { background: #000; image-rendering: pixelated; outline: none;
+    /* 4:3 box that fits the window */
+    width: min(100vw, calc((100vh - 22px) * 4 / 3)); aspect-ratio: 4 / 3; }
+  canvas.smooth { image-rendering: auto; }
+  #status { height: 22px; padding: 0 16px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="screen" width="320" height="200" tabindex="0"></canvas></div>
+<div id="status">starting...</div>
+
+<script>
+// Same audio tap as index.html: an AnalyserNode on every destination.
+(() => {
+  const contexts = [];
+  const taps = new Map();
+  const Orig = window.AudioContext;
+  window.AudioContext = function (...args) {
+    const ctx = new Orig(...args);
+    contexts.push(ctx);
+    window.emuEvents?.push({ t: performance.now(), type: "audio-context", state: ctx.state,
+      sampleRate: ctx.sampleRate });
+    ctx.addEventListener?.("statechange", () =>
+      window.emuEvents?.push({ t: performance.now(), type: "audio-state", state: ctx.state }));
+    return ctx;
+  };
+  window.AudioContext.prototype = Orig.prototype;
+  const origConnect = AudioNode.prototype.connect;
+  AudioNode.prototype.connect = function (dest, ...rest) {
+    const r = origConnect.call(this, dest, ...rest);
+    try {
+      if (dest instanceof AudioDestinationNode) {
+        let an = taps.get(this.context);
+        if (!an) { an = this.context.createAnalyser(); an.fftSize = 2048; taps.set(this.context, an); }
+        origConnect.call(this, an);
+        window.emuEvents?.push({ t: performance.now(), type: "audio-connect", node: this.constructor.name });
+      }
+    } catch (e) { console.warn("audio tap failed", e); }
+    return r;
+  };
+  window.audioProbe = {
+    contexts,
+    level() {
+      const out = [];
+      for (const [ctx, an] of taps) {
+        const buf = new Float32Array(an.fftSize);
+        an.getFloatTimeDomainData(buf);
+        let sum = 0, peak = 0;
+        for (const s of buf) { sum += s * s; peak = Math.max(peak, Math.abs(s)); }
+        out.push({ state: ctx.state, sampleRate: ctx.sampleRate, currentTime: ctx.currentTime,
+          rms: Math.sqrt(sum / buf.length), peak });
+      }
+      return out;
+    },
+  };
+})();
+</script>
+<script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
+<script>
+// KeyboardEvent.code -> js-dos key code (GLFW numbering, same as lib/node-emu.cjs).
+const CODE_TO_KEY = (() => {
+  const m = {
+    Space: 32, Quote: 39, Comma: 44, Minus: 45, Period: 46, Slash: 47, Semicolon: 59,
+    Equal: 61, BracketLeft: 91, Backslash: 92, BracketRight: 93, Backquote: 96,
+    Escape: 256, Enter: 257, Tab: 258, Backspace: 259, Insert: 260, Delete: 261,
+    ArrowRight: 262, ArrowLeft: 263, ArrowDown: 264, ArrowUp: 265,
+    PageUp: 266, PageDown: 267, Home: 268, End: 269,
+    CapsLock: 280, ScrollLock: 281, NumLock: 282, PrintScreen: 283, Pause: 284,
+    NumpadDecimal: 330, NumpadDivide: 331, NumpadMultiply: 332, NumpadSubtract: 333,
+    NumpadAdd: 334, NumpadEnter: 335,
+    ShiftLeft: 340, ControlLeft: 341, AltLeft: 342, ShiftRight: 344, ControlRight: 345,
+    AltRight: 346, IntlBackslash: 348,
+  };
+  for (let i = 0; i < 26; i++) m["Key" + String.fromCharCode(65 + i)] = 65 + i;
+  for (let i = 0; i < 10; i++) { m["Digit" + i] = 48 + i; m["Numpad" + i] = 320 + i; }
+  for (let i = 1; i <= 12; i++) m["F" + i] = 289 + i;
+  return m;
+})();
+
+// Our own audio path for audio=own: samples from onSoundPush go to an
+// AudioWorklet ring buffer (linear resampling), then a GainNode.
+const OWN_WORKLET = `
+class RawPlayer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(65536); this.r = 0; this.w = 0; this.n = 0;
+    this.step = 1; this.pos = 0; this.started = false; this.underruns = 0; this.dropped = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d.type === "rate") { this.step = d.source / sampleRate; return; }
+      const s = d; // Float32Array
+      for (let i = 0; i < s.length; i++) {
+        if (this.n === this.buf.length) { this.r = (this.r + 1) & 65535; this.n--; }
+        this.buf[this.w] = s[i]; this.w = (this.w + 1) & 65535; this.n++;
+      }
+      // The engine can produce samples a few per cent faster than the output
+      // consumes them; keep latency bounded by dropping back to the target.
+      if (this.n > 8192) { const drop = this.n - 2048; this.r = (this.r + drop) & 65535; this.n -= drop; this.dropped += drop; }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    if (!this.started && this.n < 2048) { out.fill(0); return true; }
+    this.started = true;
+    for (let i = 0; i < out.length; i++) {
+      if (this.n < 2) { out[i] = 0; this.underruns++; this.started = this.n > 0; continue; }
+      const a = this.buf[this.r], b = this.buf[(this.r + 1) & 65535];
+      out[i] = a + (b - a) * this.pos;
+      this.pos += this.step;
+      while (this.pos >= 1) { this.pos -= 1; this.r = (this.r + 1) & 65535; this.n--; }
+    }
+    if ((currentFrame & 16383) < out.length) this.port.postMessage({ queued: this.n, underruns: this.underruns, dropped: this.dropped, frame: currentFrame });
+    return true;
+  }
+}
+registerProcessor("raw-player", RawPlayer);
+`;
+
+async function makeOwnAudio(volume) {
+  const ctx = new AudioContext({ latencyHint: "interactive" });
+  const url = URL.createObjectURL(new Blob([OWN_WORKLET], { type: "text/javascript" }));
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  const node = new AudioWorkletNode(ctx, "raw-player", { numberOfInputs: 0, numberOfOutputs: 1,
+    outputChannelCount: [1] });
+  const gain = ctx.createGain();
+  gain.gain.value = volume;
+  node.connect(gain);
+  gain.connect(ctx.destination);
+  const state = { ctx, node, gain, rate: 0, pushed: 0, queued: 0, underruns: 0, dropped: 0, played: 0,
+    firstPushAt: 0, lastPushAt: 0 };
+  node.port.onmessage = (e) => { Object.assign(state, { queued: e.data.queued, underruns: e.data.underruns,
+    dropped: e.data.dropped, played: e.data.frame }); };
+  const resume = () => { if (ctx.state === "suspended") ctx.resume().catch(() => {}); };
+  document.addEventListener("pointerdown", resume, { capture: true });
+  document.addEventListener("keydown", resume, { capture: true });
+  state.push = (samples, rate) => {
+    if (rate !== state.rate) { state.rate = rate; node.port.postMessage({ type: "rate", source: rate }); }
+    const now = performance.now();
+    if (!state.firstPushAt) state.firstPushAt = now;
+    state.lastPushAt = now;
+    state.pushed += samples.length;
+    node.port.postMessage(samples);
+  };
+  return state;
+}
+
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const events = window.emuEvents = window.emuEvents || [];
+  const log = (type, extra = {}) => events.push({ t: performance.now(), type, ...extra });
+  const opts = {
+    bundle: q.get("bundle") ?? "dist/browser-default.jsdos",
+    backend: q.get("backend") ?? "dosbox",
+    worker: (q.get("worker") ?? "1") === "1",
+    audio: q.get("audio") ?? "own",
+    volume: Number(q.get("volume") ?? "1"),
+    smooth: q.get("smooth") === "1",
+  };
+  window.emuOptions = opts;
+  window.emuFrames = 0;
+  log("page-start", { opts, crossOriginIsolated: window.crossOriginIsolated,
+    sharedArrayBuffer: typeof SharedArrayBuffer, secure: window.isSecureContext });
+
+  const canvas = document.getElementById("screen");
+  if (opts.smooth) canvas.classList.add("smooth");
+  const g = canvas.getContext("2d");
+  let image = g.createImageData(320, 200);
+
+  emulators.pathPrefix = new URL("node_modules/js-dos/dist/emulators/", location.href).href;
+
+  const t0 = performance.now();
+  const res = await fetch(opts.bundle, { cache: "no-store" });
+  if (!res.ok) throw new Error(`bundle ${opts.bundle}: HTTP ${res.status}`);
+  const bundle = new Uint8Array(await res.arrayBuffer());
+  log("bundle-loaded", { bytes: bundle.length, ms: Math.round(performance.now() - t0) });
+
+  const ownAudio = opts.audio === "own" ? await makeOwnAudio(opts.volume) : null;
+  window.rawAudio = ownAudio;
+
+  const factory = opts.backend + (opts.worker ? "Worker" : "Direct");
+  const ci = await emulators[factory](bundle, { audioWorklet: opts.audio === "worklet" });
+  log("ci-ready", { factory, ms: Math.round(performance.now() - t0) });
+  window.ci = ci;
+  window.emuCi = ci;
+  window.emuReady = true;
+
+  const ev = ci.events();
+  const setSize = (w, h) => {
+    if (!w || !h || (w === canvas.width && h === canvas.height && image.width === w)) return;
+    canvas.width = w; canvas.height = h;
+    image = g.createImageData(w, h);
+  };
+  ev.onFrameSize((w, h) => { log("frame-size", { w, h }); setSize(w, h); });
+  // In Direct mode the first frame size can arrive before we subscribe.
+  setSize(ci.width(), ci.height());
+  // Frames arrive as RGB (3 bytes per pixel) or RGBA; draw on the next animation frame.
+  let pending = null;
+  ev.onFrame((rgb, rgba) => {
+    window.emuFrames++;
+    pending = rgb ?? rgba;
+  });
+  const draw = () => {
+    if (pending) {
+      const src = pending; pending = null;
+      const w = ci.width(), h = ci.height();
+      if (w !== canvas.width || h !== canvas.height) setSize(w, h);
+      const dst = image.data;
+      if (src.length === dst.length) dst.set(src);
+      else if (src.length === w * h * 3) {
+        for (let i = 0, j = 0; j < dst.length; ) { dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = src[i++]; dst[j++] = 255; }
+      }
+      g.putImageData(image, 0, 0);
+    }
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+
+  if (ownAudio) ev.onSoundPush((samples) => ownAudio.push(samples, ci.soundFrequency()));
+  ev.onStdout((m) => log("stdout", { m }));
+  ev.onMessage((type, ...args) => log("message", { level: type, m: args.join(" ") }));
+  ev.onExit(() => log("exit"));
+
+  // Keyboard: only while the canvas has focus, so the rest of the page keeps its keys.
+  canvas.focus();
+  const held = new Set();
+  const key = (e, down) => {
+    const code = CODE_TO_KEY[e.code];
+    if (code === undefined) return;
+    e.preventDefault();
+    if (down) held.add(code); else held.delete(code);
+    ci.sendKeyEvent(code, down);
+  };
+  canvas.addEventListener("keydown", (e) => { if (!e.repeat) key(e, true); else e.preventDefault(); });
+  canvas.addEventListener("keyup", (e) => key(e, false));
+  canvas.addEventListener("blur", () => { for (const c of held) ci.sendKeyEvent(c, false); held.clear(); });
+
+  // Mouse: click to lock the pointer, then send relative motion.
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.focus();
+    if (document.pointerLockElement !== canvas) { canvas.requestPointerLock?.()?.catch?.(() => {}); return; }
+    ci.sendMouseButton(e.button === 0 ? 0 : 1, true);
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    if (document.pointerLockElement === canvas) ci.sendMouseButton(e.button === 0 ? 0 : 1, false);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (document.pointerLockElement === canvas) ci.sendMouseRelativeMotion(e.movementX, e.movementY);
+  });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // The engine API does not pause by itself when the tab is hidden.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) ci.pause(); else ci.resume();
+    log("visibility", { hidden: document.hidden });
+  });
+
+  const statusEl = document.getElementById("status");
+  let lastFrames = 0;
+  setInterval(() => {
+    const fps = window.emuFrames - lastFrames;
+    lastFrames = window.emuFrames;
+    const a = window.audioProbe.level()[0];
+    statusEl.textContent = `raw ${factory}  ${ci.width()}x${ci.height()}  frames/s ${fps}` +
+      `  audio ${opts.audio}${a ? ` ${a.state} rms ${a.rms.toFixed(3)}` : ""}` +
+      (ownAudio ? ` queued ${ownAudio.queued} underruns ${ownAudio.underruns} dropped ${ownAudio.dropped}` : "") +
+      `  isolated ${window.crossOriginIsolated}`;
+  }, 1000);
+
+  window.emuStatus = () => ({
+    ready: true,
+    frames: window.emuFrames,
+    width: ci.width(), height: ci.height(),
+    soundFrequency: ci.soundFrequency(),
+    crossOriginIsolated: window.crossOriginIsolated,
+    sharedArrayBuffer: typeof SharedArrayBuffer,
+    secureContext: window.isSecureContext,
+    audio: window.audioProbe.level(),
+    ownAudio: ownAudio ? { rate: ownAudio.rate, pushed: ownAudio.pushed, queued: ownAudio.queued,
+      underruns: ownAudio.underruns, dropped: ownAudio.dropped, state: ownAudio.ctx.state,
+      contextTime: ownAudio.ctx.currentTime, outputRate: ownAudio.ctx.sampleRate,
+      // samples produced per second of wall clock, since the first push
+      producedPerSec: Math.round(ownAudio.pushed / ((ownAudio.lastPushAt - ownAudio.firstPushAt) / 1000 || 1)) } : null,
+    options: opts,
+  });
+})().catch((e) => {
+  (window.emuEvents = window.emuEvents || []).push({ t: performance.now(), type: "page-error", error: String(e?.stack ?? e) });
+  console.error(e);
+});
+</script>
+</body>
+</html>
