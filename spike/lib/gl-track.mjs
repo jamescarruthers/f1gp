@@ -14,6 +14,7 @@
 import { buildMesh } from './track-mesh.mjs';
 import { buildSceneMesh } from './scene.mjs';
 import { buildSectorMesh, frameObjects, buildSpriteAtlas, spriteIdsUsed, spriteQuads } from './objects.mjs';
+import { carSpriteQuads, carSpriteIds } from './cars.mjs';
 
 const VS = `#version 300 es
 precision highp float;
@@ -247,6 +248,17 @@ export class TrackRenderer {
     this.track = null;
     this.cars = { vao: gl.createVertexArray(), buf: gl.createBuffer(), count: 0 };
     this.ground = COLOURS.ground;
+    // bitmaps (objects and cars): x, y, z, u, v, palette offset, depth bias
+    this.spriteVao = gl.createVertexArray();
+    gl.bindVertexArray(this.spriteVao);
+    this.spriteVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteVbo);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 20);
+    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
+    gl.bindVertexArray(null);
+    this.carFrame = null;
     // placeholders for samplers with nothing to read yet
     this.hazeTex = this.texture(gl.R8, 256, 4, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1024));
     this.noObjectsTex = this.texture(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4));
@@ -384,8 +396,10 @@ export class TrackRenderer {
    * draw from the camera's angle to each object.
    * @param {object} objs   readObjects(mem)
    * @param {object} crowd  readCrowd(mem) (crowd.active: race crowds in the stands)
+   * @param {object} [opt]  { cars: readCars(mem), to add the cars' bitmaps (wheels, helmets,
+   *                          far cars) to the atlas: the game's bitmap store is shared }
    */
-  setObjects(objs, crowd = { active: true }) {
+  setObjects(objs, crowd = { active: true }, opt = {}) {
     const gl = this.gl, origin = [this.origin[0], this.origin[1]];
     const meshFor = (set) => {
       const mesh = buildSectorMesh(objs, { indexed: true, origin, crowd: crowd.active, set });
@@ -418,7 +432,9 @@ export class TrackRenderer {
       return { mesh, vao, ebo, lineVao, lebo, objTex };
     };
     const track = meshFor('track'), pit = meshFor('pit');
-    const atlas = buildSpriteAtlas(objs, spriteIdsUsed(objs));
+    const ids = new Set(spriteIdsUsed(objs));
+    if (opt.cars) for (const id of carSpriteIds(opt.cars)) ids.add(id);
+    const atlas = buildSpriteAtlas(objs, [...ids]);
     const r8 = (w, h, data) => {
       const t = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, t);
@@ -433,21 +449,13 @@ export class TrackRenderer {
     const palMap = new Uint8Array(256 * 9);
     palMap.set(objs.palettes.subarray(0, palMap.length));
     const palMapTex = r8(256, 9, palMap);
-    const spriteVao = gl.createVertexArray();
-    gl.bindVertexArray(spriteVao);
-    const spriteVbo = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, spriteVbo);
-    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
-    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
-    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 20);
-    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
-    gl.bindVertexArray(null);
     let crowdTex = null, crowdRowsTex = null;
     if (crowd.active && crowd.strips && crowd.rows) {
       crowdTex = r8(512, 1, crowd.strips[0].subarray(0, 512));
       crowdRowsTex = r8(64, 1, crowd.rows.subarray(0, 64));
     }
-    this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, spriteVao, spriteVbo, crowdTex, crowdRowsTex };
+    this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, crowdTex, crowdRowsTex };
+    this.sprites = { atlas, atlasTex, palMapTex };
     this.setHaze(objs.haze);
     return { track: track.mesh.counts, pit: pit.mesh.counts, atlas: [atlas.width, atlas.height] };
   }
@@ -482,6 +490,72 @@ export class TrackRenderer {
     gl.enableVertexAttribArray(1);
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
     this.cars.count = v.length / 6;
+  }
+
+  /**
+   * The cars' bitmaps alone, when no objects are loaded (setObjects builds one
+   * atlas for both).
+   * @param {object} cars  readCars(mem)
+   */
+  setCarSprites(cars) {
+    const atlas = buildSpriteAtlas(cars, carSpriteIds(cars));
+    const palMap = new Uint8Array(256 * 9);
+    palMap.set(cars.palettes.subarray(0, palMap.length));
+    const gl = this.gl;
+    this.sprites = {
+      atlas,
+      atlasTex: this.texture(gl.R8, atlas.width, Math.max(atlas.height, 1), gl.RED, gl.UNSIGNED_BYTE, atlas.data),
+      palMapTex: this.texture(gl.R8, 256, 9, gl.RED, gl.UNSIGNED_BYTE, palMap),
+    };
+    this.setHaze(cars.haze);
+  }
+
+  /**
+   * The cars as the game draws them this frame (cars.mjs frameCars, indexed
+   * colours, origin = this.origin): triangles by decal layer, lines, and
+   * bitmaps (wheels, helmets, far cars), with the game's per-object haze.
+   * Replaces the boxes of setCars().
+   * @param {object} fc    frameCars() result
+   * @param {object} cars  readCars(mem)
+   */
+  setCarFrame(fc, cars) {
+    const gl = this.gl;
+    if (!this.carGl) {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const ebo = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+      const lineVao = gl.createVertexArray();
+      gl.bindVertexArray(lineVao);
+      const lvbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, lvbo);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const lebo = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
+      gl.bindVertexArray(null);
+      this.carGl = { vao, vbo, ebo, lineVao, lvbo, lebo, objTex: gl.createTexture() };
+    }
+    const G = this.carGl, m = fc.mesh;
+    // the haze channel: 2 + the car part the vertex belongs to (hazed as a whole, like objects)
+    for (let k = 0; k < m.vertexObject.length; k++) m.data[k * 6 + 5] = 2 + m.vertexObject[k];
+    for (let k = 0; k < m.lineObject.length; k++) m.lines[k * 6 + 5] = 2 + m.lineObject[k];
+    gl.bindBuffer(gl.ARRAY_BUFFER, G.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, m.data.length ? m.data : new Float32Array(6), gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, G.lvbo);
+    gl.bufferData(gl.ARRAY_BUFFER, m.lines.length ? m.lines : new Float32Array(6), gl.DYNAMIC_DRAW);
+    const rows = Math.max(1, Math.ceil(m.objects.length / 256));
+    const centres = new Float32Array(256 * rows * 4);
+    m.objects.forEach((ob, k) => centres.set([ob.x, ob.y, ob.size, 0], k * 4));
+    gl.bindTexture(gl.TEXTURE_2D, G.objTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 256, rows, 0, gl.RGBA, gl.FLOAT, centres);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+    this.carFrame = { fc, cars };
   }
 
   /**
@@ -578,12 +652,64 @@ export class TrackRenderer {
       gl.drawArrays(gl.TRIANGLES, R.raised.first, R.raised.count);
     } else gl.drawArrays(gl.TRIANGLES, 0, this.track.count);
     if (this.objects) this.drawObjects(cam, opt);
-    if (this.cars.count) {
+    if (this.carFrame) this.drawCars(cam);
+    else if (this.cars.count) {
       gl.bindVertexArray(this.cars.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this.cars.count);
     }
   }
 }
+
+/** Bitmap quads (7 floats per vertex) with the sprite program and the shared atlas. */
+TrackRenderer.prototype.drawSprites = function drawSprites(quads) {
+  const gl = this.gl, S = this.sprites;
+  if (!quads.length || !S) return;
+  gl.useProgram(this.spriteProg);
+  const u = this.spU, k = this.lastUniforms;
+  gl.uniform3f(u.uCam, ...k.cam);
+  gl.uniform2f(u.uSinCos, ...k.sinCos);
+  gl.uniform4f(u.uProj, ...k.proj);
+  gl.uniform2f(u.uDepth, ...k.depth);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.atlasTex); gl.uniform1i(u.uAtlas, 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, S.palMapTex); gl.uniform1i(u.uPalMap, 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex); gl.uniform1i(u.uPalette, 2);
+  gl.uniform1i(u.uHazeMode, this.hazeMode); gl.uniform1i(u.uHaze, 5);
+  gl.bindVertexArray(this.spriteVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
+  gl.drawArrays(gl.TRIANGLES, 0, quads.length / 7);
+  gl.useProgram(this.prog);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
+};
+
+/** The cars of setCarFrame(): one-sided polygons by layer, lines, then bitmaps. */
+TrackRenderer.prototype.drawCars = function drawCars(cam) {
+  const gl = this.gl, G = this.carGl, { fc, cars } = this.carFrame;
+  gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, G.objTex);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
+  gl.frontFace(this.objectFrontFace ?? gl.CCW);
+  gl.bindVertexArray(G.vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, G.ebo);
+  fc.frame.layers.forEach((idx, k) => {
+    if (!idx.length) return;
+    if (k > 0) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4 * k); gl.depthFunc(gl.LEQUAL); }
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW);
+    gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+  });
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.depthFunc(gl.LESS);
+  gl.disable(gl.CULL_FACE);
+  if (fc.frame.lines.length) {
+    gl.bindVertexArray(G.lineVao);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, G.lebo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, fc.frame.lines, gl.DYNAMIC_DRAW);
+    gl.drawElements(gl.LINES, fc.frame.lines.length, gl.UNSIGNED_INT, 0);
+  }
+  if (this.sprites) this.drawSprites(carSpriteQuads(fc, this.sprites.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, cars));
+  this.lastCars = { cars: fc.mesh.counts.cars, triangles: fc.mesh.counts.triangles, sprites: fc.frame.sprites.length };
+};
 
 TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   const gl = this.gl, O = this.objects;
@@ -614,25 +740,7 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
     gl.drawElements(gl.LINES, fr.lines.length, gl.UNSIGNED_INT, 0);
   }
   // bitmaps
-  const quads = spriteQuads(set.mesh.sprites, O.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, O.objs, set.mesh.origin, fr.sprites, set.mesh.placements);
-  if (quads.length) {
-    gl.useProgram(this.spriteProg);
-    const u = this.spU, k = this.lastUniforms;
-    gl.uniform3f(u.uCam, ...k.cam);
-    gl.uniform2f(u.uSinCos, ...k.sinCos);
-    gl.uniform4f(u.uProj, ...k.proj);
-    gl.uniform2f(u.uDepth, ...k.depth);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, O.atlasTex); gl.uniform1i(u.uAtlas, 0);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, O.palMapTex); gl.uniform1i(u.uPalMap, 1);
-    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex); gl.uniform1i(u.uPalette, 2);
-    gl.uniform1i(u.uHazeMode, this.hazeMode); gl.uniform1i(u.uHaze, 5);
-    gl.bindVertexArray(O.spriteVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, O.spriteVbo);
-    gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.TRIANGLES, 0, quads.length / 7);
-    gl.useProgram(this.prog);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
-  }
+  this.drawSprites(spriteQuads(set.mesh.sprites, O.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, O.objs, set.mesh.origin, fr.sprites, set.mesh.placements));
   this.lastObjects = { layers: fr.layers.map((l) => l.length / 3), lines: fr.lines.length / 2, sprites: fr.sprites.length };
 };
 

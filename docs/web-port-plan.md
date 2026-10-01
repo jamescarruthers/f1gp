@@ -283,6 +283,25 @@ To do before relying on it:
 4. **Effects the game draws** (sparks, smoke, dust, tyre marks, if any):
    list them and match them.
 
+Progress:
+
+- **Cars: decoded and drawn.** `spike/lib/cars.mjs` builds the cars as the
+  game does (`docs/renderer-notes.md`, "Cars"): which cars it draws, pose
+  with the yaw wobble, team and helmet palettes, polygon and bitmap versions,
+  wheels and helmets framed by angle and steering, effect shapes (mechanic,
+  debris, broken wings), drawing order with the objects, and the mirrors.
+  With the game's rules at 320×200, 98.3–99.1% of polygon-car pixels,
+  99.7–100% of bitmap-car pixels and 99.8% of mirror pixels have the game's
+  colour (87 frames, `spike/tests/cars.test.mjs`).
+- **The WebGL view draws them** (`render.html`, `cars=1`, the default) in
+  place of the boxes, eased between the game's frames with the camera and
+  hazed per car. Laid over the game's own screen, the followed car sits
+  exactly on the game's.
+- **Still to do:** the cockpit image and dash, and mirrors in our own view
+  (the game draws its mirrors into the cockpit image, so they come with it at
+  first); pit-lane cars are unchecked (79% in the one pit capture, where the
+  pit-lane scene is missing); wet races and other frame rates are unchecked.
+
 ## Phase 4: better graphics (3–6 weeks)
 
 1. **Resolution and widescreen:** draw at the window's size. Widen the field

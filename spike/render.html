@@ -20,7 +20,7 @@
     layout=side|gl|overlay  original screen beside the new view, the new view
                           alone, or the new view (game framing) laid half
                           transparent over the original screen
-    cars=1|0              draw cars (boxes for now)
+    cars=1|0              draw the cars as the game does (boxes with source=file)
     objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
                           in the game's steps, or none
@@ -69,6 +69,7 @@ import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
+import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -133,7 +134,8 @@ function sizeCanvas() {
 
 const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
-let prev = null, cur = null; // last two kept frames: { st, cam, at }
+let prev = null, cur = null; // last two kept frames: { st, cam, at, cars }
+let carData = null;           // readCars(mem) for the circuit (source=memory)
 const perf = { raf: [], draw: [], frames: 0, kept: 0, last: null };
 
 const teamColour = (car) => (car.isPlayer ? [255, 120, 20] : [235, 235, 235]);
@@ -148,10 +150,15 @@ function loadCircuit(st) {
     // everything the game built at track load, read from its memory
     const scene = readScene(mem);
     info = renderer.setScene(scene, { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 });
-    if (opts.objects) {
-      try { info.objects = renderer.setObjects(readObjects(mem), readCrowd(mem)); }
-      catch (e) { log('objects-failed', { error: String(e?.stack ?? e) }); }
+    carData = null;
+    if (opts.cars) {
+      try { carData = readCars(mem); }
+      catch (e) { log('cars-failed', { error: String(e?.stack ?? e) }); }
     }
+    if (opts.objects) {
+      try { info.objects = renderer.setObjects(readObjects(mem), readCrowd(mem), { cars: carData }); }
+      catch (e) { log('objects-failed', { error: String(e?.stack ?? e) }); }
+    } else if (carData) renderer.setCarSprites(carData);
   } else {
     const compiled = compileTrack(parsed).segs;
     const segs = fromCompiled(compiled);
@@ -183,7 +190,12 @@ function frame(now) {
       if (st.session.circuit !== circuit) loadCircuit(st);
       if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
         prev = cur;
-        cur = { st, cam: cameraFromState(st), at: now };
+        cur = { st, cam: cameraFromState(st), at: now, cars: null };
+        // the cars' poses and the game's choice of cars, read at the same moment as st
+        if (carData) {
+          const states = carStates(carData, st);
+          cur.cars = { states, drawn: selectCars(carData, states).drawn };
+        }
         perf.kept++;
       }
     } else { prev = cur = null; }
@@ -196,7 +208,13 @@ function frame(now) {
       alpha = Math.min(1, (now - cur.at) / st.frameMs);
       cam = lerpCamera(prev.cam, cur.cam, alpha);
     }
-    if (opts.cars) {
+    if (opts.cars && carData && cur.cars) {
+      const smoothCars = alpha < 1 && prev && prev.cars;
+      const states = smoothCars ? lerpCarStates(prev.cars.states, cur.cars.states, alpha) : cur.cars.states;
+      const fc = frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
+        { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: cur.cars.drawn, wide: opts.framing === 'wide' });
+      renderer.setCarFrame(fc, carData);
+    } else if (opts.cars) {
       const cars = [];
       for (let i = 0; i < st.cars.length; i++) {
         const c = st.cars[i];
