@@ -257,15 +257,30 @@ saving comes from lowering the cycles setting as well, which js-dos can do
 while the game runs. At 3,000–4,000 cycles the host CPU falls to about a
 quarter, with a wide margin before the game slows.
 
-To do before relying on it:
+**One screen (done).** The page (`render.html`, the default `layout=single`)
+now replaces the routine itself rather than its calls
+(`spike/lib/overlay.mjs`). The replacement fills the 3D view in the game's
+back buffer with one marker colour, a grass or road shade that only the 3D
+view uses, and keeps the routine's 2D parts: the mirror backdrop, the start
+lights, the cockpit patches and pit-stop images, and the sound driver's
+service calls. The game then draws its cockpit, dash and messages as usual.
+The page keys the game's frame (marker colour see-through, and in the
+outside views the black bars) and lays it over our view, which is drawn for
+the whole 200-row screen. It paints the cars in the mirrors itself, from
+the mirror rules in `cars.mjs`, because the game draws them in the car step
+that the fill replaces. In menus the game's own screen shows. A Screen menu
+on the page puts the game's renderer back. Checked in Monza Quick Races in
+every view (`spike/probes/p3-overlay.mjs`, `spike/tests/overlay.test.mjs`).
+Details: `docs/renderer-notes.md`, "Replacing the renderer".
 
-- Patch only while in the car, and raise the cycles again for menus and 2D
-  screens, which still need the original drawing and speed.
+To do:
+
+- Lower the cycles while the fill runs, and raise them again for menus and
+  2D screens, which need the game's speed.
 - Check that no game logic depends on the drawing: run whole races with and
-  without the patch and compare lap times, positions and incidents.
+  without the fill and compare lap times, positions and incidents.
 - Measure the game's load at its busiest (pit stops, crashes, all 26 cars
   close together, 25 fps) to choose the cycles setting.
-- Keep a way to switch the original drawing back on, for the overlay check.
 
 ## Phase 3: cars and cockpit (2–6 weeks)
 
@@ -297,9 +312,12 @@ Progress:
   place of the boxes, eased between the game's frames with the camera and
   hazed per car. Laid over the game's own screen, the followed car sits
   exactly on the game's.
-- **Still to do:** the cockpit image and dash, and mirrors in our own view
-  (the game draws its mirrors into the cockpit image, so they come with it at
-  first); pit-lane cars are unchecked (79% in the one pit capture, where the
+- **Cockpit and dash from the game's frame:** in the one-screen page the
+  game's cockpit, dash, mirrors and start lights are laid over our view at
+  the game's resolution (Phase 2, "One screen").
+- **Still to do:** the cockpit and dash in high resolution, and real rear
+  views in the mirrors (they now show the game's backdrop and its bitmap
+  cars); pit-lane cars are unchecked (79% in the one pit capture, where the
   pit-lane scene is missing); wet races and other frame rates are unchecked.
 
 ## Phase 4: better graphics (3–6 weeks)

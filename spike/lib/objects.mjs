@@ -763,6 +763,53 @@ export function hazeLevel(d) {
 }
 
 /**
+ * The game's scaled bitmap (0F47:19E8) with its integer arithmetic, for
+ * drawing at the game's resolution: sprite `spr` (decodeSprite) anchored at
+ * column x0, row y0, at depth D8 (1/8 ft), colours through colourOf(k);
+ * plot(x, row, colour) gets each pixel, rows from `rows` down are skipped.
+ * @param {object} objs  anything with spriteVscale (readObjects, readCars)
+ */
+export function drawSprite(objs, spr, id, x0, y0, D8, mirrored, colourOf, plot, rows) {
+  if (!spr || D8 <= 0) return;
+  let s = Math.floor((spr.size * 8192) / D8);
+  if (s === 0) s = 1;
+  if (s > 0x8000) s = 0x8000;
+  const hs = s * 8, hint = Math.floor(hs / 65536), hfrac = hs % 65536;
+  const X = new Map([[0, x0]]);
+  let cx = x0, dx = x0, frac = 0;
+  const dir = mirrored ? -1 : 1;
+  for (let k = 1; k <= 128; k++) {
+    frac += hfrac;
+    if (frac >= 65536) { frac -= 65536; cx += dir; dx -= dir; }
+    cx += dir * hint; dx -= dir * hint;
+    X.set(k, cx); X.set(-k, dx);
+  }
+  const clampX = (v) => Math.max(0, Math.min(320, v));
+  const sv = [0xaf, 0xaa, 0xab].includes(id) ? s : Math.floor((s * objs.spriteVscale) / 65536);
+  if (!sv) return;
+  const dy = Math.floor((spr.bottom * sv) / 8192);
+  let cy = y0 + dy;
+  let q = Math.floor(0x1000000 / sv);
+  if (q > 0xffff) q = 0xffff;
+  if (!q) return;
+  const step = q * 32;
+  let acc = spr.bottom * 65536 - ((q * dy * 32) | 0);
+  while (acc < 0) acc += step;
+  if (cy < 0) return;
+  for (; cy >= 0; cy--) {
+    const r = Math.floor(acc / 65536);
+    acc += step;
+    if (r >= spr.rows) break;
+    if (cy >= rows) continue;
+    for (const [c0, c1, k] of spr.runs[r]) {
+      const a = clampX(X.get(c0)), b = clampX(X.get(c1));
+      const col = colourOf(k);
+      for (let x = Math.min(a, b); x < Math.max(a, b); x++) plot(x, cy, col);
+    }
+  }
+}
+
+/**
  * The objects as the game selects their parts: for every placement, its most
  * detailed LOD's elements once each, plus the game's display list for every
  * view sector (which elements, in which order). Each frame, frameObjects()

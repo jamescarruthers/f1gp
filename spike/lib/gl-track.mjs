@@ -572,7 +572,7 @@ export class TrackRenderer {
   /**
    * Draw one frame.
    * @param {object} cam  { x, y (fine), z, heading, horizon (row), rows (viewport rows), top (first screen row) }
-   * @param {object} [opt] { framing: 'original'|'wide'|'screen', haze: 'off' (default) | 'classic' (the
+   * @param {object} [opt] { framing: 'original'|'wide'|'screen'|'stage', haze: 'off' (default) | 'classic' (the
    *   game's steps) | 'smooth', pitLane: true when the camera is in the pit lane }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
@@ -590,20 +590,26 @@ export class TrackRenderer {
     gl.viewport(0, y0, w, h);
     // The game's viewport is 320 columns by cam.rows rows, shown at 4:3 (each
     // row 1.2 columns tall). In 'wide' framing the canvas keeps the vertical
-    // scale and shows more to the sides.
-    const rows = cam.rows;
+    // scale and shows more to the sides. In 'stage' framing the canvas height
+    // is the game's whole 200-row screen, with the 3D view's rows at
+    // cam.top..cam.top+cam.rows as on the game's screen, and the 3D fills
+    // the rest too (under the game's cockpit and bars, laid over it); the
+    // game's 320 columns are the middle 4:3 of the canvas.
+    const stage = opt.framing === 'stage';
+    const rows = stage ? 200 : cam.rows;
+    const horizon = stage ? cam.top + cam.horizon : cam.horizon;
     const nativeAspect = 320 / (rows * 1.2);
     const aspect = w / h;
-    const xScale = opt.framing === 'wide' ? nativeAspect / aspect : 1;
+    const xScale = opt.framing === 'wide' || stage ? nativeAspect / aspect : 1;
     const sx = (256 / 160) * xScale;
     const sy = (2 * VSCALE) / rows;
-    const cy = 1 - (2 * cam.horizon) / rows;
+    const cy = 1 - (2 * horizon) / rows;
     const o = this.origin || [0, 0, 0];
     const a = (cam.heading / 65536) * 2 * Math.PI;
 
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(this.bgProg);
-    gl.uniform4f(this.bgU.uView, cam.horizon, rows, xScale, (cam.heading >> 5) & 511);
+    gl.uniform4f(this.bgU.uView, horizon, rows, xScale, (cam.heading >> 5) & 511);
     gl.uniform2f(this.bgU.uCanvas, w, h);
     gl.uniform3fv(this.bgU.uGround, this.ground.map((k) => k / 255));
     gl.uniform3fv(this.bgU.uSkyTop, COLOURS.skyTop.map((k) => k / 255));
