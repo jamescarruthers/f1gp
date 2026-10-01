@@ -22,8 +22,13 @@
                           transparent over the original screen
     cars=1|0              draw the cars as the game does (boxes with source=file)
     objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
+    style=modern|classic  modern: every car as a 3D model at any distance, 3D wheels
+                          and helmets, all cars on the circuit, smooth haze;
+                          classic: as the game draws (bitmap cars beyond 52 ft,
+                          bitmap wheels and helmets, its choice of cars, its haze
+                          steps) and the game's 4:3 framing. Also a menu on the page.
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
-                          in the game's steps, or none
+                          in the game's steps, or none (default from the style)
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -39,6 +44,8 @@
   header { padding: 10px 16px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
   header h1 { font-size: 16px; margin: 0; }
   #status { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+  header label { color: var(--muted); font-size: 13px; }
+  header select { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   #screen { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
@@ -55,7 +62,9 @@
 </style>
 </head>
 <body>
-<header><h1>F1GP track renderer</h1><span id="status">loading...</span></header>
+<header><h1>F1GP track renderer</h1>
+  <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
+  <span id="status">loading...</span></header>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><canvas id="gl"></canvas><pre id="perf"></pre></div>
@@ -82,8 +91,28 @@ const opts = {
   cars: (q.get('cars') ?? '1') !== '0',
   source: q.get('source') ?? 'memory',
   objects: (q.get('objects') ?? '1') !== '0',
-  haze: q.get('haze') ?? 'smooth',
+  style: q.get('style') === 'classic' ? 'classic' : 'modern',
+  hazeParam: q.get('haze'),
+  framingParam: q.get('framing'),
 };
+// the style sets the defaults; explicit haze= and framing= win
+function applyStyle(style) {
+  opts.style = style;
+  opts.haze = opts.hazeParam ?? (style === 'classic' ? 'classic' : 'smooth');
+  if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
+}
+applyStyle(opts.style);
+{
+  const sel = $('style');
+  sel.value = opts.style;
+  sel.addEventListener('change', () => {
+    applyStyle(sel.value);
+    const u = new URL(location.href);
+    u.searchParams.set('style', sel.value);
+    history.replaceState(null, '', u);
+    sel.blur(); // keys go back to the game
+  });
+}
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
 if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
 const events = window.emuEvents = [];
@@ -211,8 +240,11 @@ function frame(now) {
     if (opts.cars && carData && cur.cars) {
       const smoothCars = alpha < 1 && prev && prev.cars;
       const states = smoothCars ? lerpCarStates(prev.cars.states, cur.cars.states, alpha) : cur.cars.states;
+      const modern = opts.style === 'modern';
+      // classic: the game's choice of cars; modern: every car on the circuit, 3D at any distance
       const fc = frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
-        { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: cur.cars.drawn, wide: opts.framing === 'wide' });
+        { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : cur.cars.drawn, all: modern,
+          modern, paletteRgb: renderer.lastPalette, wide: modern || opts.framing === 'wide' });
       renderer.setCarFrame(fc, carData);
     } else if (opts.cars) {
       const cars = [];
@@ -232,6 +264,10 @@ function frame(now) {
       renderer.setCars(cars);
     }
     cam.noHorizonImage = horizonOff(mem);
+    // the original framing: the canvas takes the shape of the game's 3D view (320 columns by
+    // cam.rows rows of a 4:3 screen), so nothing is stretched
+    const shape = opts.framing === 'original' && opts.layout !== 'overlay' ? `320 / ${(cam.rows * 1.2).toFixed(1)}` : '';
+    if (glCanvas.style.aspectRatio !== shape) glCanvas.style.aspectRatio = shape;
     if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
     renderer.draw(cam, { framing: opts.framing, haze: opts.haze, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     perf.frames++;
@@ -244,12 +280,12 @@ setInterval(() => {
   const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
   const st = cur && cur.st;
   $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
-  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}`;
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}`;
   window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, size: [glCanvas.width, glCanvas.height] };
   perf.kept = 0;
 }, 1000);
 
-window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null };
+window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null, setStyle: (v) => { applyStyle(v); $('style').value = v; } };
 // the Phase 1 tools (route driver, autopilot) look for window.mapApp
 window.mapApp = window.renderApp;
 requestAnimationFrame(frameLoop);

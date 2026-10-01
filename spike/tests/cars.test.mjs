@@ -125,6 +125,46 @@ test('Monza (RAM capture): frameCars gives one-sided triangles, layers and sprit
   assert.equal(q.length, fc.frame.sprites.length * 42);
 });
 
+test('Monza (RAM capture): modern style draws every car as polygons with 3D wheels and helmets', { skip: !haveS2 && 'no RAM captures in out/' }, async () => {
+  const { readCars, frameCars } = await import('../lib/cars.mjs');
+  const { mem, st } = await load(path.join(S2, 'grid-chase.ram'));
+  const cars = readCars(mem);
+  const H = mem.heap(), p = mem.memBase + (mem.SS << 4) + 0x05da;
+  const rgb = Uint8Array.from(H.subarray(p, p + 768), (v) => (v << 2) | (v >> 4));
+  const cam = { x: st.camera.x >> 8, y: st.camera.y >> 8, z: st.camera.z, heading: st.camera.heading, mode: st.view.mode };
+  const classic = frameCars(cars, st, cam, { indexed: true });
+  const modern = frameCars(cars, st, cam, { indexed: true, modern: true, all: true, paletteRgb: rgb, wide: true });
+  // no bitmaps at all: far cars are polygons, wheels and helmets are geometry
+  assert.equal(modern.frame.sprites.length, 0);
+  assert.ok(modern.list.length >= classic.list.length);
+  const drawn = modern.list.filter((l) => l.parts.some((q) => q.kind === 'polygons'));
+  assert.ok(drawn.length > 0);
+  for (const l of drawn) {
+    const car = l.parts.find((q) => q.what === 'car');
+    assert.equal(car.elements.filter((e) => e.kind === 'wheel3d').length, 4, `slot ${l.slot}: four wheels`);
+    assert.ok(car.elements.filter((e) => e.kind === 'helmet3d').length <= 1);
+  }
+  // the solid triangles: whole triangles of x, y, z, r, g, b with colours in 0..1
+  assert.ok(modern.solid.length > 0 && modern.solid.length % 18 === 0);
+  for (let i = 3; i < modern.solid.length; i += 6) for (let k = 0; k < 3; k++) assert.ok(modern.solid[i + k] >= 0 && modern.solid[i + k] <= 1);
+  // every solid triangle faces away from its own wheel or helmet centre (outward, counter-clockwise)
+  const centres = drawn.flatMap((l) => l.parts.flatMap((q) => q.elements.filter((e) => e.kind === 'wheel3d' || e.kind === 'helmet3d').map((e) => e.at)));
+  const o = modern.mesh.origin;
+  let outward = 0, n = 0;
+  for (let t = 0; t < modern.solid.length; t += 18) {
+    const v = (k) => [modern.solid[t + 6 * k], modern.solid[t + 6 * k + 1], modern.solid[t + 6 * k + 2]];
+    const [a, b, c] = [v(0), v(1), v(2)];
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const nn = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    const m = [(a[0] + b[0] + c[0]) / 3 + o[0], (a[1] + b[1] + c[1]) / 3 + o[1], (a[2] + b[2] + c[2]) / 3];
+    const ctr = centres.reduce((best, q) => (Math.hypot(q[0] - m[0], q[1] - m[1], q[2] - m[2]) < Math.hypot(best[0] - m[0], best[1] - m[1], best[2] - m[2]) ? q : best));
+    if (nn[0] * (m[0] - ctr[0]) + nn[1] * (m[1] - ctr[1]) + nn[2] * (m[2] - ctr[2]) >= 0) outward++;
+    n++;
+  }
+  // hub and sidewall triangles face along the axle, so a few test against the centre at 0
+  assert.ok(outward / n > 0.95, `${outward} of ${n} outward`);
+});
+
 // pixel agreement with the game's frames inside the pixels our cars cover
 async function agreement(dir, names, histK) {
   const { drawFrame, compareCars } = await import('../probes/p3-cars-lib.mjs');

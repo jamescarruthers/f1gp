@@ -541,6 +541,8 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
     return out;
   }
   let lod = shape.lods.find((l) => Math.max(depth8, 0) <= l.max) ?? shape.lods[shape.lods.length - 1];
+  // modern style: the car's polygon model at every distance (the game switches to a bitmap beyond 52 ft)
+  if (opt.modern && lod.sprite && pose.shapeId === CAR_SHAPE) lod = shape.lods.find((l) => !l.sprite) ?? lod;
   out.lod = lod;
   const r44 = opt.wide ? rayCorr(sp.ref) : corrOfCol(sp.col(sp.ref));
   const a = (r42 + r44) & 0xffff;
@@ -559,7 +561,7 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
     lod = shape.lods.find((l) => !l.sprite);
   }
   const sh = pose.alt ? cars.carAlt : shape;
-  const P = shapePoints(sh, lod);
+  const P = cachedPoints(sh, lod);
   const W = posePoints(cars, sh, lod, pose, P);
   const C = sp.points(sh, lod, P, W);
   // visibility list: all behind, all left or all right of the screen -> nothing
@@ -612,6 +614,7 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
       if (loop.length < 3) continue;
       out.elements.push({ kind: 'poly', pts: loop.map((i) => W[i]), g: loop.map((i) => C[i]), cols: loop.map((i) => proj.get(i)?.x ?? null), code: el.colour, colour: cars.palettes[(pose.palette + el.colour) & 0xffff] ?? 0, order: o, face: el.facePoint });
     } else if (el.kind === 'bitmap') {
+      if (opt.modern && el.id < 0x4b) continue; // modern style: 3D wheels and helmet below
       if (el.type & 0x10 && !pose.driver) continue; // the driver's parts (helmet)
       const pc = C[el.point];
       if (!pc || pc.dep < 8) continue;
@@ -635,6 +638,21 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
     } else if (el.kind === 'line') {
       const [ia, ib] = sh.vector(el.vector);
       out.elements.push({ kind: 'line', a: W[ia], b: W[ib], colour: cars.palettes[pose.palette & 0xffff] ?? 0, order: o });
+    }
+  }
+  if (opt.modern) {
+    // modern style: every wheel and the helmet as geometry at its bitmap's anchor (the
+    // wheel's hub, the helmet's centre), turned as the game turns their bitmaps
+    for (const el of sh.elements.values()) {
+      if (el.kind !== 'bitmap' || el.id >= 0x4b || !W[el.point]) continue;
+      if (el.type & 0x10 && !pose.driver) continue;
+      if (el.id >= 0x42) {
+        out.elements.push({ kind: 'helmet3d', at: W[el.point], yaw: (pose.yaw + steerAngle(pose.steer) + 2 * pose.steer) & 0xffff, palette: pose.helmet ?? pose.palette, what: 'helmet' });
+      } else {
+        const front = el.id >= 0x21;
+        out.elements.push({ kind: 'wheel3d', at: W[el.point], front, yaw: (pose.yaw + (front ? steerAngle(pose.steer) : 0)) & 0xffff,
+          palette: el.type & 2 ? el.palette : pose.palette, what: front ? 'front wheel' : 'rear wheel' });
+      }
     }
   }
   return out;
@@ -781,8 +799,11 @@ export function mirrorClip(cars) {
  *   consistent read as the states (the selection and order to use), wide: true to take the true ray angle for
  *   sectors and wheel frames (views wider than the game's), all: draw every car record
  *   (not only the game's selection), wheelBias: depth bias of wheel bitmaps as a fraction
- *   of their width (default 0.25) }
- * @returns {{ mesh, frame, list, mirrors }}
+ *   of their width (default 0.25), modern: true for the modern style (the polygon model at
+ *   every distance; 3D wheels and helmets, shaded in RGB from paletteRgb, the live palette,
+ *   768 bytes 0-255) }
+ * @returns {{ mesh, frame, list, mirrors, solid }}
+ *   solid: modern style's wheels and helmets (Float32Array, x, y, z, r, g, b per vertex, triangles);
  *   list: per drawn car { slot, key, parts } (shapeParts results); mirrors: mirrorImage() results
  *   (cars the cockpit mirrors show; the game draws them as bitmaps into its own cockpit image)
  */
@@ -802,10 +823,11 @@ export function frameCars(cars, st, cam, opt = {}) {
   const list = [], mirrors = [];
   const vtx = (p, c, oi) => { data.push(p[0] - origin[0], p[1] - origin[1], p[2], c[0], c[1], c[2]); vobj.push(oi); };
   const wheelBias = opt.wheelBias ?? 0.25;
+  const solids = [];
   for (const e of chosen) {
     const c = e.state;
     if (opt.all && c.slot === camObjSlot && !(c.f9a & 0x08)) continue;
-    const cp = carParts(cars, c, cam, { wide: opt.wide, cameraObject: c.slot === camObjSlot });
+    const cp = carParts(cars, c, cam, { wide: opt.wide, cameraObject: c.slot === camObjSlot, modern: opt.modern });
     list.push({ slot: c.slot, key: e.key, parts: cp.parts });
     // parts painted after the car (broken wings over its own wings) go on higher decal layers
     let layerBase = 0, carTop = 0, carSeen = false;
@@ -828,6 +850,8 @@ export function frameCars(cars, st, cam, opt = {}) {
           const bias = el.what === 'far' ? 0 : el.what.endsWith('wheel') ? w * wheelBias : w / 2;
           frSprites.push({ sprite: sprites.length, id: el.id, mirrored: el.mirrored });
           sprites.push({ at: [el.at[0] - origin[0], el.at[1] - origin[1], el.at[2]], id: el.id, palette: el.palette, mirrorSet: el.mirrored, onPolygons: false, bias, what: el.what, object: oi, slot: c.slot, maxDepth: 0, ray: false, yaw: part.pose.yaw });
+        } else if (el.kind === 'wheel3d' || el.kind === 'helmet3d') {
+          solids.push(el);
         } else if (el.kind === 'line') {
           frLines.push(lines.length / 6, lines.length / 6 + 1);
           for (const p of [el.a, el.b]) lines.push(p[0] - origin[0], p[1] - origin[1], p[2], ...rgb(el.colour));
@@ -841,7 +865,7 @@ export function frameCars(cars, st, cam, opt = {}) {
         const layer = layerBase + poly.layer;
         if (part.what === 'car') carTop = Math.max(carTop, layer);
         while (layers.length <= layer) layers.push([]);
-        for (const t of triangulate(P)) for (const k of t) { layers[layer].push(data.length / 6); vtx(P[k], col, oi); }
+        for (const t of cachedTriangles(part, poly, P)) for (const k of t) { layers[layer].push(data.length / 6); vtx(P[k], col, oi); }
       }
       placements.push({ centre: [ref[0] - origin[0], ref[1] - origin[1], ref[2]], yaw: part.pose.yaw, object: oi, palette: part.pose.palette, slot: c.slot, what: part.what });
     }
@@ -852,7 +876,114 @@ export function frameCars(cars, st, cam, opt = {}) {
     counts: { cars: list.length, triangles: data.length / 18, sprites: sprites.length },
   };
   const frame = { layers: layers.map((l) => Uint32Array.from(l)), crowd: new Uint32Array(0), lines: Uint32Array.from(frLines), sprites: frSprites };
-  return { mesh, frame, list, mirrors };
+  // modern style: wheels and helmets as shaded RGB triangles (x, y, z relative to origin, r, g, b),
+  // one-sided (counter-clockwise from outside), drawn without the game's haze
+  let n = 0;
+  for (const el of solids) n += solidTriangles(cars, el).length * 18;
+  const solid = new Float32Array(n);
+  let o = 0;
+  for (const el of solids) o = emitSolid(cars, opt.paletteRgb, el, solid, o, origin);
+  mesh.counts.triangles += n / 18;
+  return { mesh, frame, list, mirrors, solid };
+}
+
+// ------------------------------------------------------------------ modern style: 3D wheels and helmets
+
+// Sizes from the game's bitmaps (fine units = Z units = 1/64 ft): a wheel seen
+// side-on is 154 across with its anchor at the hub; seen end-on a rear tyre is
+// about 124 wide and a front one 86. The helmet bitmap is 87 wide and 72 tall,
+// anchored at its centre.
+const WHEEL_R = 77, WHEEL_W = { front: 86, rear: 124 }, HUB_R = 0.5, WHEEL_SIDES = 10;
+const HELMET = { lat: 40, fwd: 44, up: 34, rows: 6, cols: 10 };
+const LIGHT = (() => { const v = [0.35, 0.25, 0.9], n = Math.hypot(...v); return v.map((x) => x / n); })();
+
+// Triangles in an object's own frame: points [forward, right, up], the
+// outward normal, and the colour code. Built once.
+function solidTemplates(cars) {
+  if (cars.solidTemplates) return cars.solidTemplates;
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  // one triangle facing away from `centre` (vertices ordered counter-clockwise seen from outside)
+  const tri = (out, a, b, c, centre, code) => {
+    let n = cross(sub(b, a), sub(c, a));
+    const m = [(a[0] + b[0] + c[0]) / 3 - centre[0], (a[1] + b[1] + c[1]) / 3 - centre[1], (a[2] + b[2] + c[2]) / 3 - centre[2]];
+    if (n[0] * m[0] + n[1] * m[1] + n[2] * m[2] < 0) { [b, c] = [c, b]; n = n.map((x) => -x); }
+    const l = Math.hypot(...n) || 1;
+    out.push({ p: [a, b, c], n: n.map((x) => x / l), code });
+  };
+  const quad = (out, a, b, c, d, centre, code) => { tri(out, a, b, c, centre, code); tri(out, a, c, d, centre, code); };
+  const wheel = (width) => {
+    const out = [], hw = width / 2, N = WHEEL_SIDES;
+    const ring = (r, side) => Array.from({ length: N }, (_, i) => { const t = (2 * Math.PI * i) / N; return [r * Math.cos(t), side * hw, r * Math.sin(t)]; });
+    const oL = ring(WHEEL_R, -1), oR = ring(WHEEL_R, 1), iL = ring(WHEEL_R * HUB_R, -1), iR = ring(WHEEL_R * HUB_R, 1);
+    const cL = [0, -hw, 0], cR = [0, hw, 0];
+    for (let i = 0; i < N; i++) {
+      const j = (i + 1) % N;
+      quad(out, oL[i], oL[j], oR[j], oR[i], [0, 0, 0], 0);   // tread: tyre, code 0
+      quad(out, oL[i], oL[j], iL[j], iL[i], cR, 0);          // sidewalls face along the axle
+      quad(out, oR[i], oR[j], iR[j], iR[i], cL, 0);
+      tri(out, iL[i], iL[j], cL, cR, 10);                    // hubs: code 10
+      tri(out, iR[i], iR[j], cR, cL, 10);
+    }
+    return out;
+  };
+  // the helmet's shell takes, band by band from the top, the codes of the
+  // rear-view helmet bitmap (42h) down its middle; the visor code 0
+  const spr = cars.sprite(0x42);
+  const bands = spr ? spr.runs.map((row) => { const r = row.find(([c0, c1]) => c0 <= 0 && c1 > 0) ?? row[0]; return r ? r[2] : 0; }) : [0];
+  const helmet = [];
+  const { rows, cols } = HELMET;
+  const P = (k, i) => {
+    const phi = Math.PI / 2 - (Math.PI * k) / rows, lam = (2 * Math.PI * i) / cols;
+    return [HELMET.fwd * Math.cos(phi) * Math.cos(lam), HELMET.lat * Math.cos(phi) * Math.sin(lam), HELMET.up * Math.sin(phi)];
+  };
+  for (let k = 0; k < rows; k++) {
+    const band = bands[Math.min(bands.length - 1, Math.floor(((k + 0.5) / rows) * bands.length))];
+    for (let i = 0; i < cols; i++) {
+      const j = (i + 1) % cols, lam = (2 * Math.PI * (i + 0.5)) / cols;
+      const code = Math.cos(lam) > 0.6 && (k === 2 || k === 3) ? 0 : band; // the visor: front, just above the middle
+      const a = P(k, i), b = P(k, j), c = P(k + 1, j), d = P(k + 1, i);
+      if (k === 0) tri(helmet, a, c, d, [0, 0, 0], code);
+      else if (k === rows - 1) tri(helmet, a, b, c, [0, 0, 0], code);
+      else quad(helmet, a, b, c, d, [0, 0, 0], code);
+    }
+  }
+  cars.solidTemplates = { front: wheel(WHEEL_W.front), rear: wheel(WHEEL_W.rear), helmet };
+  return cars.solidTemplates;
+}
+
+/**
+ * Writes a wheel3d or helmet3d element as flat-shaded triangles into `out`
+ * from float `o` on (x, y, z relative to origin, r, g, b per vertex; RGB 0-1,
+ * shaded by a fixed light from
+ * the live palette `rgb`, 768 bytes 0-255; mid grey without it). Colours come
+ * from the game's bitmaps: tyre code 0 and hub code 10 of the team palette,
+ * helmet codes of the driver's helmet palette.
+ */
+function solidTriangles(cars, el) {
+  const T = solidTemplates(cars);
+  return el.kind === 'helmet3d' ? T.helmet : el.front ? T.front : T.rear;
+}
+function emitSolid(cars, rgb, el, out, o, origin) {
+  const tris = solidTriangles(cars, el);
+  const h = (el.yaw / 65536) * 2 * Math.PI, s = Math.sin(h), c = Math.cos(h);
+  const x0 = el.at[0] - origin[0], y0 = el.at[1] - origin[1], z0 = el.at[2];
+  for (const t of tris) {
+    const nx = s * t.n[0] + c * t.n[1], ny = c * t.n[0] - s * t.n[1], nz = t.n[2];
+    const shade = 0.55 + 0.45 * Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+    const idx = cars.palettes[(el.palette + t.code) & 0xffff] ?? 0;
+    const r = rgb ? Math.min(1, (rgb[idx * 3] / 255) * shade) : 0.38 * shade;
+    const g = rgb ? Math.min(1, (rgb[idx * 3 + 1] / 255) * shade) : 0.38 * shade;
+    const b = rgb ? Math.min(1, (rgb[idx * 3 + 2] / 255) * shade) : 0.38 * shade;
+    // (forward, right, up) is a mirror image of world (x, y, z): reverse the order to keep
+    // the triangle counter-clockwise from outside
+    for (let k = 2; k >= 0; k--) {
+      const p = t.p[k];
+      out[o++] = x0 + s * p[0] + c * p[1]; out[o++] = y0 + c * p[0] - s * p[1]; out[o++] = z0 + p[2];
+      out[o++] = r; out[o++] = g; out[o++] = b;
+    }
+  }
+  return o;
 }
 
 /**
@@ -898,6 +1029,26 @@ export function lerpCarStates(a, b, t) {
       yaw: ang(ca.yaw, cb.yaw), pitch: ang(ca.pitch, cb.pitch), steer: Math.round(ca.steer + (cb.steer - ca.steer) * t),
     };
   });
+}
+
+// A shape's points per level of detail, and each polygon's triangulation, depend on
+// the shape alone: work them out once (posing is a rotation, a move and a small tilt).
+const pointsCache = new WeakMap();
+function cachedPoints(sh, lod) {
+  let m = pointsCache.get(sh);
+  if (!m) { m = new Map(); pointsCache.set(sh, m); }
+  if (!m.has(lod)) m.set(lod, shapePoints(sh, lod));
+  return m.get(lod);
+}
+const trianglesCache = new WeakMap();
+function cachedTriangles(part, poly, P) {
+  if (!part.lod) return triangulate(P);
+  let m = trianglesCache.get(part.lod);
+  if (!m) { m = new Map(); trianglesCache.set(part.lod, m); }
+  const key = `${part.pose.alt ? 1 : 0}:${poly.el.order}:${P.length}`;
+  let t = m.get(key);
+  if (!t) { t = triangulate(P); m.set(key, t); }
+  return t;
 }
 
 function normalOf(P) {

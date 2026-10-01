@@ -537,8 +537,15 @@ export class TrackRenderer {
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
       const lebo = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
+      // modern style's wheels and helmets: shaded RGB triangles
+      const solidVao = gl.createVertexArray();
+      gl.bindVertexArray(solidVao);
+      const svbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, svbo);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
       gl.bindVertexArray(null);
-      this.carGl = { vao, vbo, ebo, lineVao, lvbo, lebo, objTex: gl.createTexture() };
+      this.carGl = { vao, vbo, ebo, lineVao, lvbo, lebo, solidVao, svbo, objTex: gl.createTexture() };
     }
     const G = this.carGl, m = fc.mesh;
     // the haze channel: 2 + the car part the vertex belongs to (hazed as a whole, like objects)
@@ -548,6 +555,10 @@ export class TrackRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, m.data.length ? m.data : new Float32Array(6), gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, G.lvbo);
     gl.bufferData(gl.ARRAY_BUFFER, m.lines.length ? m.lines : new Float32Array(6), gl.DYNAMIC_DRAW);
+    if (fc.solid && fc.solid.length) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, G.svbo);
+      gl.bufferData(gl.ARRAY_BUFFER, fc.solid, gl.DYNAMIC_DRAW);
+    }
     const rows = Math.max(1, Math.ceil(m.objects.length / 256));
     const centres = new Float32Array(256 * rows * 4);
     m.objects.forEach((ob, k) => centres.set([ob.x, ob.y, ob.size, 0], k * 4));
@@ -700,6 +711,12 @@ TrackRenderer.prototype.drawCars = function drawCars(cam) {
   });
   gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.depthFunc(gl.LESS);
+  if (fc.solid && fc.solid.length) {
+    // modern style: wheels and helmets, counter-clockwise seen from outside
+    gl.frontFace(gl.CCW);
+    gl.bindVertexArray(G.solidVao);
+    gl.drawArrays(gl.TRIANGLES, 0, fc.solid.length / 6);
+  }
   gl.disable(gl.CULL_FACE);
   if (fc.frame.lines.length) {
     gl.bindVertexArray(G.lineVao);
