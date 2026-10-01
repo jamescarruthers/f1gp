@@ -42,6 +42,7 @@ node build-bundle.mjs --autoexec "gp /g" --out dist/route-g-25000.jsdos
 | `index.html` | Test page using the js-dos `Dos()` player (the site's landing page is `site/index.html`). |
 | `render.html` | The new view: one screen, our WebGL view with the game's cockpit, dash and messages over it (`layout=side` puts the game beside it), `style=modern|classic`. |
 | `lib/overlay.mjs` | Replaces the game's 3D drawing with a fill, so the page can lay the game's screen over its own view. |
+| `lib/pace.mjs` | The game's frame rate (30 fps), the emulated CPU speed while the fill runs, and which game frames the page draws between. |
 | `lib/cars.mjs` | The cars as the game draws them (classic), or as 3D models with 3D wheels and helmets (modern). |
 | `lib/audio.mjs` | Sound for the direct-mode pages (an AudioWorklet fed by the emulator). |
 | `build-site.mjs` | Builds the GitHub Pages site. |

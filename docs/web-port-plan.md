@@ -273,14 +273,43 @@ on the page puts the game's renderer back. Checked in Monza Quick Races in
 every view (`spike/probes/p3-overlay.mjs`, `spike/tests/overlay.test.mjs`).
 Details: `docs/renderer-notes.md`, "Replacing the renderer".
 
+**Frame rate and CPU (done).** With the 3D drawing gone the game's frame
+work is about 1% of its frame at 25,000 cycles, so the page
+(`spike/lib/pace.mjs`) runs the game at 30 fps instead of 15 (SS:1230 = 10,
+set in the menus before the session loads; 30 is the most the physics
+allows, `docs/memory-map.md`), and lowers the emulated CPU while the fill
+runs. Measured with `spike/probes/p4-framerate.mjs`, Monza Quick Race, in
+Node:
+
+| Setting | Game's load | Game speed | Host CPU (one core) |
+| --- | --- | --- | --- |
+| 30 fps, the game's drawing, 25,000 cycles | 56% (peak 60%) | full | 48% |
+| 30 fps, fill, 25,000 cycles | 0.1% | full | 48% |
+| 30 fps, fill, 12,000 cycles | 13% | full | 26% |
+| 30 fps, fill, 8,000 cycles | 22% (peak 30%) | full | 20% |
+| 30 fps, fill, 4,000 cycles | 50% | full | 14% |
+
+At 30 fps the start matches 15 fps within the start's own timing (100 mph
+in 3.88 s against 3.82 s, 160 mph in 7.56 s against 7.77 s), and 12 s after
+the start the computer cars have covered the same ground within 4%. The page runs at 8,000 cycles in the
+race and steps up (12,000, 16,000, 25,000) when a frame's work reaches 60%
+of its time, back down after 10 s under 30%, and runs at 25,000 elsewhere.
+
+In headless Chromium (software WebGL, GPU compositing on, a small canvas):
+the old settings gave the page 15 game frames a second; the new ones give it
+30, at 60 page frames a second and full game speed. js-dos's direct mode
+waits by posting messages to itself, so the emulator keeps the main thread
+busy at any cycles setting; the lower setting gives slow machines room to
+keep up rather than freeing the thread. The page draws at a render clock one
+game frame behind the newest frame and blends between the two frames around
+it, so bursts of frames from the emulator do not show.
+
 To do:
 
-- Lower the cycles while the fill runs, and raise them again for menus and
-  2D screens, which need the game's speed.
 - Check that no game logic depends on the drawing: run whole races with and
   without the fill and compare lap times, positions and incidents.
 - Measure the game's load at its busiest (pit stops, crashes, all 26 cars
-  close together, 25 fps) to choose the cycles setting.
+  close together) to check the governor's steps.
 
 ## Phase 3: cars and cockpit (2–6 weeks)
 
@@ -327,10 +356,13 @@ Progress:
    beyond its draw distance, for example) looks wrong.
 2. **Smooth motion:** draw at the screen's refresh rate and ease each car
    between the game's last two frames. Physics runs once per drawn frame, so
-   this adds one game frame of delay (67 ms at 15 fps). The game's 25 fps
-   setting cuts that to 40 ms, at the cost of more emulator CPU; measure it.
+   this adds one game frame of delay (67 ms at 15 fps). Done: the game runs at
+   30 fps (33 ms), the most its physics allows (Phase 2, "Frame rate and CPU").
 3. **Better looks, optional:** textures, lighting, shadows, anti-aliasing and
    draw distance. Each is a separate choice; keep the original look available.
+   Done so far: the ground texture (the game's T option), in the game's whole
+   shades for the classic style and blended for the modern one
+   (`texture=classic|smooth|off`).
 
 ## Sound from the Amiga version (1–2 weeks, optional)
 

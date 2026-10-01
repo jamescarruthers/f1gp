@@ -104,12 +104,14 @@ session, the main loop (image 0xEE13–0xEEFC, SC) does this in order:
 | (derived) | Frame number = round((DS:2955 + DS:2959/65536) / step). `readState().frame` computes it. It is exact, and it stays right when a read lands between the clock's two adds. | frames | DT: one such torn read in 2,916 frames (tick 1 ms short); frame was still right | high |
 | DS:2977 byte | +2 per frame, at the start of the frame's work, before the cars move. Races only: both increments are on the session-type-80h branch (0xDA68, 0xDAA9). | count | SC; DT | high (races) |
 | DS:294F dword | Session and lap timer. Each frame it advances by frame ms × DS:0220/4000h in races, or × DS:0214/4000h in other sessions. Both are per-circuit factors from 1.003 to 1.069, so read them; do not assume a value | ms | SC 0x0951; DT: 1.0223 at Monza (416Eh), 1.0618 in a Silverstone race (43F7h), 1.0197 in Hungaroring free practice (DS:0214 = 4145h) | high |
-| SS:1230 word | Frame-rate setting: 300 Hz ticks per frame; fps = 300/N. 20 in the Quick Race. Comes from F1PREFS.DAT byte 1160. | ticks | DT, SC | high |
+| SS:1230 word | Frame-rate setting: 300 Hz ticks per frame; fps = 300/N. 20 in the Quick Race. Comes from F1PREFS.DAT byte 1160 (the 286, 386 and 486 presets hold 37, 30 and 20). The frame limiter reads it every frame (0xC2B9); the physics step and the other per-frame values below come from it when a session loads (0:7CAF, called from the loader at 8EAA:01BE and 01FD), so change it only between sessions. The lowest safe value is 10 (30 fps): see DS:0156. | ticks | DT, SC | high |
 | SS:05C8 word | 300 Hz ticks since the last flip. Reset at the flip (0xC2BF). | ticks | DT, SC | high |
 | SS:05D2 word / SS:05D4 word | Free-running 300 Hz counter / 18.2 Hz counter. | ticks | DT | high |
 | DS:2C63 word | Ticks the last frame's work took, stored just before the limiter waits. | ticks | DT, SC | high |
 | DS:2C59 / 2C5B / 2C5D word | Physics dt for the current car / the player / computer cars: SS:1230/300 s in 0.16 fixed point. Below 12 fps the player takes 2 half steps (DS:2C5F = FFh). | 0.16 s | DT, SC | high |
 | DS:2C61 word | Integer fps. | fps | DT | high |
+| DS:0156 word | 4000000h / DS:2C5D (0:7C2B), used in signed multiplies (imul) by the physics (0:282C, 2DBC, 2F8F, 3214, 33ED, 34F4, 6118, 6274, 75ED) and for the cars' yaw wobble. 3C00h at 15 fps, 7807h at 30 fps; below 10 ticks per frame it passes 7FFFh and changes sign, at 4 ticks the division overflows. | factor | SC; DT (`spike/probes/p4-framerate.mjs`: at 30 fps the start matches 15 fps within the start's timing: 100 mph in 3.88 s against 3.82 s, 160 mph in 7.56 s against 7.77 s) | high |
+| DS:2225 word | clamp(30 − SS:1230/2, 12, 23): cars the renderer takes in race order (0:7CAF). 20 at 15 fps, 23 at 30. | cars | SC; DT | high |
 
 **Reading between frames.** The cars move (step 3) before the clock changes
 (step 6). So a read during a frame's work can see cars one frame ahead of

@@ -284,7 +284,14 @@ them from the segment array instead of rebuilding them from the track file.
   runs 0F47:7F64, which perturbs the flat ground colours into speckles: road
   pixels become 18h–1Bh around 1Ah, grass 11h–13h around 12h (DT: pixel counts
   in the same view with T on and off). The pattern follows the camera's motion
-  since the last frame. Its exact algorithm is not decoded.
+  since the last frame: in the cockpit and chase views 7F64 moves it by the
+  viewed car's speed (car+10h >> 11, clamped) and yaw rate (car+4Ah); TV views
+  take another path (7C5A instead of 7D62).
+  On screen it is faint streaks along the direction of travel. Its exact
+  pattern (0F47:7988, 7C5A, 7D62) is not decoded. `gl-track.mjs` lays a noise
+  texture on the ground instead: along the track on the road (from the scene
+  mesh's u, v), in world space on the grass (the ground pass meets each pixel's
+  ray with the ground plane under the camera), in the same shades.
 - **D** cycles DS:0068 through 3, 2, 1, 0 (0:DC94; DT). The renderer uses it
   only to drop trackside objects (0F47:9E2A), from bits of the object
   setting's byte +1: level 3 draws all; 2 skips bit 1; 1 skips bit 1 or bit 6;
