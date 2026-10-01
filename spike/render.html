@@ -43,6 +43,11 @@
                           the word typed) and the joystick question (Use Keys)
     audio=own|off         the game's sound through our AudioWorklet (starts on the first
                           key or click), or none
+    sound=adlib|amiga|amiga-clean  the PC version's AdLib sound (the game's own), or the
+                          Amiga version's: its title tune in the menus, its sampled engine
+                          and race effects in a session, played from the game's events
+                          (lib/amiga-sound.mjs; needs dist/amiga-sound.bin), through the
+                          A500's filters or without them (clean). Also a menu.
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
                           in the game's steps, or none (default from the style)
     texture=smooth|classic|off  the ground texture (the game's T option): the road and
@@ -106,6 +111,7 @@
 <body>
 <header><h1>F1GP track renderer</h1>
   <label>Screen <select id="screenmode"><option value="new">New view</option><option value="original">Original game</option></select></label>
+  <label>Sound <select id="sound"><option value="adlib">PC: AdLib</option><option value="amiga">Amiga</option><option value="amiga-clean">Amiga, no filter</option></select></label>
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
   <span id="status">loading...</span><span id="notice"></span></header>
 <main>
@@ -123,6 +129,7 @@ import { readScene, readPalette, horizonOff, markingsKey } from './lib/scene.mjs
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
+import { makeAmigaSound } from './lib/amiga-sound.mjs';
 import { manualHelper } from './lib/manual.mjs';
 import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
@@ -145,6 +152,7 @@ const opts = {
   textureParam: q.get('texture'),
   crowdParam: q.get('crowd'),
   audio: q.get('audio') ?? 'own',
+  sound: ['amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'adlib',
   manual: q.get('manual') ?? 'auto',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
@@ -196,6 +204,34 @@ if (opts.layout === 'single') {
     opts.screen = sel.value;
     const u = new URL(location.href);
     u.searchParams.set('screen', sel.value);
+    history.replaceState(null, '', u);
+    sel.blur();
+  });
+}
+// the sound: the game's AdLib, or the Amiga version's (made when first chosen)
+let amiga = null, amigaLoading = null;
+function setSound(v) {
+  opts.sound = v;
+  if (v === 'adlib') { if (amiga) amiga.setEnabled(false); return; }
+  if (amiga) { amiga.setEnabled(true); amiga.setFilter(v === 'amiga-clean' ? 'off' : 'a500'); return; }
+  if (amigaLoading) return;
+  amigaLoading = makeAmigaSound({ data: 'dist/amiga-sound.bin', filter: v === 'amiga-clean' ? 'off' : 'a500' })
+    .then((a) => { amiga = a; window.renderApp.amiga = a; log('amiga-sound', { filter: v }); if (opts.sound === 'adlib') a.setEnabled(false); else a.setFilter(opts.sound === 'amiga-clean' ? 'off' : 'a500'); })
+    .catch((e) => {
+      log('amiga-sound-failed', { error: String(e) });
+      $('notice').textContent = `No Amiga sound: ${e.message}`;
+      opts.sound = 'adlib'; $('sound').value = 'adlib';
+    })
+    .finally(() => { amigaLoading = null; });
+}
+{
+  const sel = $('sound');
+  sel.value = opts.sound;
+  if (opts.audio === 'off') sel.disabled = true;
+  sel.addEventListener('change', () => {
+    setSound(sel.value);
+    const u = new URL(location.href);
+    u.searchParams.set('sound', sel.value);
     history.replaceState(null, '', u);
     sel.blur();
   });
@@ -344,6 +380,7 @@ function frame(now) {
     log(swap ? 'swap-new-view' : 'swap-game-screen');
   }
   sizeCanvas();
+  if (amiga && opts.sound !== 'adlib') amiga.update(mem);
   if (mem) {
     const st = reader.read();
     window.renderApp.state = st;
@@ -453,7 +490,9 @@ requestAnimationFrame(frameLoop);
   const ownAudio = opts.audio === 'own' ? await makeOwnAudio().catch((e) => { log('audio-failed', { error: String(e) }); return null; }) : null;
   window.renderApp.audio = ownAudio;
   ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
-  if (ownAudio) ci.events().onSoundPush((samples) => ownAudio.push(samples, ci.soundFrequency()));
+  // the game's own sound, unless the Amiga's plays instead
+  if (ownAudio) ci.events().onSoundPush((samples) => { if (opts.sound === 'adlib') ownAudio.push(samples, ci.soundFrequency()); });
+  if (opts.audio === 'own' && opts.sound !== 'adlib') setSound(opts.sound);
   if (opts.manual === 'auto') {
     // the game's manual question: type the word for the player
     const helper = manualHelper({

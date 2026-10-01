@@ -170,6 +170,25 @@ kept states.
 | SS:1A4A, 40 × 24 bytes | Driver names, indexed by (ID & 3Fh) − 1, zero-padded ASCII | text | DT: the camera agent matched four names to the on-screen banner | high |
 | SS:3264, 4,098 words | Cosine table, 0–180° in 1/8-unit steps, 4000h = 1.0. The same values as `cosTable()` in lib/track-file.mjs | 2.14 fixed point | DT, SC | high |
 
+## Sound
+
+The game's sound events, read by the page's Amiga sound
+(`spike/lib/dos-sound.mjs`; `docs/amiga-sound.md`, "The DOS game's sound
+events").
+
+| Address | Meaning | Values / units | Evidence | Conf. |
+| --- | --- | --- | --- | --- |
+| SS:018E byte | The game's sounds off: 80h in the menus and from the end of a session (0:EED5, 0:F163); 0 while a session runs with sound on (0:DCE1). 19ED:2D73 starts no effect while it is set | flag | DT: 80h in the menus before and after a Quick Race (Esc), 0 on the grid and in the race; SC | high |
+| DS:006A byte | The sound setting: 0 = off (0:DCED sets SS:018E), 2 = everything (the tyres need 2, 19ED:2DA9) | 2 in our runs | SC; DT | medium |
+| SS:018C word | The effect 19ED:2D73 starts | 0–9 | SC | high |
+| SS:0102, 7 far pointers | The sound driver's functions, from its words at 24h (19ED:2D50); 19ED:2D37 calls entry DX / 4: 3 (DX = 0Ch) starts the effect in AX, 4 (10h) stops one | far pointers | SC | high |
+| 8CE6:0000, 1C40h bytes | The sound driver's buffer: the race driver (xsound.bin) from a session's loading on, and still there after the session; before the first session a stub with no sound. The game writes some effects' details into its first 24h bytes: es:[0Eh] the kerb's side (1 = left), es:[12h] the tyres' volume | – | DT: asound.bin there from the circuit view on, in the race and after Esc; SC | high |
+| DS:0948 byte | Engine sound state: 0 running, 20h winding down, 40h stop now (the timer routine makes it 81h), 81h (the game stops every effect and sets 80h), 80h off. The Amiga version's 3CC06h | state | SC 8B6E:03FA, 0:6AA1, 19ED:2D25, 19ED:3D50; DT: 80h, then 0 at the engine start on the grid | high |
+| DS:0054 word | Engine sound revs: moved by DS:0056 every sixth timer tick (8B6E:0425), clamped to 500–3A19h; plus random 0–127, written to the driver's es:[0] | rpm | SC; DT: 0 before the engine starts, up to 14,873 (the clamp) in a Quick Race | high |
+| DS:0056 word | The revs' rate, set each frame towards the viewed car's +62 (0:933C) | rpm per step | SC | medium |
+| DS:0950 / DS:0952 word | Winding down (state 20h): the step and the revs where the engine stops | rpm | SC | medium |
+| DS:0954 / DS:0956 word | The passing sound's variant (0–3 in turn, effects 6–9) and the passing car (0 after a change of view) | – / near pointer | SC 19ED:2E87–2EBD, 2EDD | high |
+
 ## View and camera
 
 | Address | Meaning | Values / units | Evidence | Conf. |
