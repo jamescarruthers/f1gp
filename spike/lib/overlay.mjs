@@ -4,8 +4,9 @@
 // main loop) is replaced by an 82-byte routine that fills the 3D viewport of
 // the game's back buffer with one colour index K, where the renderer's own
 // drawing would cover it each frame, and keeps the renderer's 2D parts:
-//   - the sound driver's service call (19ED:008C), four times as the
-//     renderer makes it between its steps;
+//   - the palette step (19ED:008C), four times as the renderer makes it
+//     between its steps: while a palette change is pending it sends the
+//     next part of the palette to the VGA;
 //   - in the cockpit, the mirror backdrop (19ED:3AFA, which the renderer's
 //     sky step calls), so the mirror housings and glass stay;
 //   - the end of the renderer's draw step (0F47:812B-8179): the start
@@ -33,7 +34,7 @@ const SERVICE_SEG = 0x19ed;
 // code the routine replaces or calls: [segment, offset, first bytes]
 const EXPECT = [
   [0x0f47, 0x81ce, [0x1e, 0x36, 0x8e, 0x1e, 0xf4, 0x00]],       // the renderer: push ds; mov ds, ss:[00F4]
-  [0x19ed, 0x008c, [0x36, 0xf7, 0x06, 0xda, 0x08]],             // service: test word ss:[08DA], ...
+  [0x19ed, 0x008c, [0x36, 0xf7, 0x06, 0xda, 0x08]],             // palette step: test word ss:[08DA], ...
   [0x19ed, 0x3afa, [0x1e, 0x06, 0x60, 0x36, 0x8e, 0x1e, 0xf0]], // mirror backdrop: push ds; push es; pusha; ...
   [0x0f47, 0x812b, [0x36, 0x8e, 0x1e, 0xf0, 0x00, 0xf6, 0x06, 0x81, 0x09]], // draw step's end: mov ds, ss:[00F0]; test [0981]
   [0x0f47, 0x8178, [0x1f, 0xc3]],                               // ... pop ds; ret

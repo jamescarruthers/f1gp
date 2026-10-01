@@ -269,8 +269,8 @@ now replaces the routine itself rather than its calls
 (`spike/lib/overlay.mjs`). The replacement fills the 3D view in the game's
 back buffer with one marker colour, a grass or road shade that only the 3D
 view uses, and keeps the routine's 2D parts: the mirror backdrop, the start
-lights, the cockpit patches and pit-stop images, and the sound driver's
-service calls. The game then draws its cockpit, dash and messages as usual.
+lights, the cockpit patches and pit-stop images, and the palette steps
+that send a changed palette to the VGA in parts. The game then draws its cockpit, dash and messages as usual.
 The page keys the game's frame (marker colour see-through, and in the
 outside views the black bars) and lays it over our view, which is drawn for
 the whole 200-row screen. It paints the cars in the mirrors itself, from
@@ -371,23 +371,27 @@ Progress:
    shades for the classic style and blended for the modern one
    (`texture=classic|smooth|off`).
 
-## Sound from the Amiga version (1–2 weeks, optional)
+## Sound from the Amiga version (done)
 
 The Amiga version's title tune (Dave Lowe's original, four-channel samples)
-and its sampled engine sound better than the DOS AdLib sound. Both can be
-played from the player's own Amiga disks, without emulating the Amiga
-(`docs/amiga-sound.md`):
+and its sampled engine sound better than the DOS AdLib sound. The page plays
+them without emulating the Amiga (`render.html?sound=amiga`, the Sound menu;
+`docs/amiga-sound.md`, "In the browser"):
 
-1. **Import** the Amiga disk images next to the DOS files (Phase 5).
-2. **Title tune:** port the game's music player (music.unit, in `frontend`)
-   and the sound chip's rules to JavaScript; play it on the title screen.
-3. **Engine:** loop the Amiga engine sample in WebAudio, its rate set from
-   the DOS game's revs by the Amiga game's rule; silence the AdLib engine.
-4. **Other effects** (tyres, crashes, crowd): map the DOS game's events to the
-   Amiga samples, or keep the DOS sounds for those.
-
-Already done: both decoded and played offline from the disks; recordings of
-the DOS and Amiga versions compared (title tune; engine on the same revs).
+1. **Data:** the site's build takes the tune and the race sounds (195 KB)
+   from the Amiga disk images in `original/amiga` (`spike/lib/amiga-disk.mjs`).
+   Phase 5's import would read them from the player's own disks instead.
+2. **Title tune:** the game's music player (music.unit) and the sound chip
+   in JavaScript, in an AudioWorklet; checked write for write against the
+   68000 code. It plays in the menus and fades as a session loads, as the
+   Amiga front end does.
+3. **Engine:** the Amiga engine sample, its rate set 50 times a second from
+   the DOS engine sound's revs (DS:0054) by the Amiga game's rule.
+4. **Effects:** a hook in the DOS race sound driver counts the effects the
+   game starts; each one has an Amiga counterpart started by the same code
+   (start lights, starter motor, tyres, kerbs, contact, cars passing the TV
+   camera), played by the Amiga rules. The DOS game's AdLib sound is not
+   played meanwhile.
 
 ## Phase 5: make it a product (2–3 weeks)
 

@@ -46,6 +46,8 @@ node build-bundle.mjs --autoexec "gp /g" --out dist/route-g-25000.jsdos
 | `lib/pace.mjs` | The game's frame rate (30 fps), the emulated CPU speed while the fill runs, and which game frames the page draws between. |
 | `lib/cars.mjs` | The cars as the game draws them (classic), or as 3D models with 3D wheels and helmets (modern). |
 | `lib/audio.mjs` | Sound for the direct-mode pages (an AudioWorklet fed by the emulator). |
+| `lib/amiga-sound.mjs` | The Amiga version's sound for `render.html?sound=amiga`: its title tune in the menus, its engine and effects in a session. With `lib/amiga-disk.mjs` (the data from the Amiga disk images; `node lib/amiga-disk.mjs` writes `dist/amiga-sound.bin`), `lib/amiga-music.mjs` (the music player), `lib/paula.mjs` (the sound chip), `lib/amiga-race.mjs` (the race rules), `lib/amiga-worklet.mjs` and `lib/dos-sound.mjs` (the DOS game's sound events). |
+| `amiga/` | Python tools for the Amiga version: disk and hunk readers, a 68000 disassembler, the offline Paula renderer, the title tune and engine renders, `tune-log.py` (the music player's register writes from the 68000 code, for the tests). |
 | `build-site.mjs` | Builds the GitHub Pages site. |
 | `raw.html` | Test page using the lower-level engine API with our own canvas, input and audio. |
 | `lib/f1gp-mem.mjs` | Browser-safe version of `guest-mem.cjs`: finds the game in the emulator heap and reads it. |

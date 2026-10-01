@@ -1116,7 +1116,7 @@ back buffer. SC.
 
 | Routine | Called from | Draws | Evidence |
 | --- | --- | --- | --- |
-| 19ED:008C | between the renderer's steps (4 times) | nothing: calls the sound driver (8B6E:0000, AX = 7) when SS:08DA ≠ 0 | SC |
+| 19ED:008C | between the renderer's steps (4 times) | nothing: while a palette change is pending (SS:08DA ≠ 0), 8B6E:0000 with AX = 7 sends the next SS:1110 entries of the palette (SS:05DA) to the VGA (INT 10h AX=1012h); section 8 | SC |
 | 19ED:3AFA | the sky step, 0F47:72E4, cockpit only | the mirror backdrop: 22 rows (116–137) of 48 bytes at columns 0 and 272, from the cockpit image (far pointer DS:8783, +1400h) | SC; DT (without it the mirrors and their housings are gone) |
 | 19ED:3B46 | the draw step's end, 0F47:8145, when DS:0981 is 0 or A0h and DS:2923 ≠ 0 | the start lights, from the cockpit image (+14E0h) to the back buffer (+0AE0h, row 8, column 224); DS:290D (1–6) is the light state | SC; DT (red then green with the fill in place) |
 | 19ED:3C1A | the draw step's end, 0F47:8151, cockpit only | two 5×4 cockpit patches at row 140, columns 25 and 290 | SC |
@@ -1135,7 +1135,7 @@ there) and keeps the original bytes to put back. The replacement:
 2. fills from R:001C (R = SS:00F4; the 3D view's first pixel) with the marker
    colour: 180 rows in the cockpit (the renderer draws below row 103 too,
    seen through the cockpit's gaps), 164 rows in the outside views;
-3. makes the four sound-driver calls;
+3. makes the four palette-step calls;
 4. in the cockpit, calls 19ED:3AFA (mirror backdrop);
 5. pushes DS and jumps to 0F47:812B (start lights, cockpit patches, pit-stop
    images), which returns to it.
