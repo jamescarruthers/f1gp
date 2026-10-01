@@ -13,7 +13,8 @@
     http://127.0.0.1:8080/render.html?bundle=dist/p2-render-25000.jsdos
 
   Query options:
-    bundle=...            the js-dos bundle (built with build-bundle.mjs)
+    bundle=...            the js-dos bundle (built with build-bundle.mjs; default
+                          dist/f1gp.jsdos, the one build-site.mjs puts on the site)
     framing=wide|original wide keeps the game's vertical scale and shows more
                           at the sides; original matches the game's framing
     smooth=1|0            ease between game frames (one game frame behind)
@@ -27,6 +28,8 @@
                           classic: as the game draws (bitmap cars beyond 52 ft,
                           bitmap wheels and helmets, its choice of cars, its haze
                           steps) and the game's 4:3 framing. Also a menu on the page.
+    audio=own|off         the game's sound through our AudioWorklet (starts on the first
+                          key or click), or none
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
                           in the game's steps, or none (default from the style)
     source=memory|file    build the scene from the game's memory (all parts,
@@ -51,6 +54,9 @@
   #screen { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
   #gl { width: min(100%, 960px); aspect-ratio: 16 / 9; display: block; }
   .glpane { flex: 1 1 560px; min-width: 0; }
+  .glwrap { position: relative; }
+  #glnote { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; text-align: center; color: #c9c8c2; font-size: 15px; pointer-events: none; }
+  #glnote[hidden] { display: none; }
   #perf { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
   body.gl-only .origpane { display: none; }
   body.overlay .glpane { display: none; }
@@ -67,7 +73,7 @@
   <span id="status">loading...</span></header>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
-  <div class="pane glpane"><canvas id="gl"></canvas><pre id="perf"></pre></div>
+  <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
 </main>
 <script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
 <script type="module">
@@ -79,12 +85,13 @@ import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
+import { makeOwnAudio } from './lib/audio.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
 const opts = {
-  bundle: q.get('bundle') ?? 'dist/p2-render-25000.jsdos',
+  bundle: q.get('bundle') ?? 'dist/f1gp.jsdos',
   framing: q.get('framing') ?? 'wide',
   smooth: (q.get('smooth') ?? '1') !== '0',
   layout: q.get('layout') ?? 'side',
@@ -93,6 +100,7 @@ const opts = {
   objects: (q.get('objects') ?? '1') !== '0',
   style: q.get('style') === 'classic' ? 'classic' : 'modern',
   hazeParam: q.get('haze'),
+  audio: q.get('audio') ?? 'own',
   framingParam: q.get('framing'),
 };
 // the style sets the defaults; explicit haze= and framing= win
@@ -230,6 +238,8 @@ function frame(now) {
     } else { prev = cur = null; }
   }
   const t0 = performance.now();
+  const note = $('glnote');
+  if (note.hidden !== !!cur) note.hidden = !!cur;
   if (cur) {
     let cam = cur.cam, alpha = 1;
     const st = cur.st;
@@ -296,7 +306,10 @@ requestAnimationFrame(frameLoop);
   if (!res.ok) throw new Error(`bundle ${opts.bundle}: HTTP ${res.status} (build one with build-bundle.mjs)`);
   const bundle = new Uint8Array(await res.arrayBuffer());
   for (const [n, b] of Object.entries(unzipSync(bundle, { filter: (f) => /^F1CT\d\d\.DAT$/i.test(f.name) }))) trackFiles[n.toUpperCase()] = b;
-  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: true });
+  const ownAudio = opts.audio === 'own' ? await makeOwnAudio().catch((e) => { log('audio-failed', { error: String(e) }); return null; }) : null;
+  window.renderApp.audio = ownAudio;
+  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
+  if (ownAudio) ci.events().onSoundPush((samples) => ownAudio.push(samples, ci.soundFrequency()));
   window.ci = ci; window.emuCi = ci; window.emuReady = true;
   log('ci-ready');
   const ev = ci.events();

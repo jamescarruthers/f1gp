@@ -342,7 +342,11 @@ the DOS and Amiga versions compared (title tune; engine on the same revs).
 3. **Controls:** keyboard, mouse, gamepad (needs the emulator change for
    analogue input), touch.
 4. **Offline:** a service worker caches the page and emulator.
-5. **Deploy** to a static host with a GitHub Actions job.
+5. **Deploy** to a static host with a GitHub Actions job. Done for GitHub
+   Pages (`.github/workflows/pages.yml`, `spike/build-site.mjs`): every push to
+   `main` builds the site and deploys it. The project's owner chose to publish
+   a game bundle built from `original/` with it, so the import step above is
+   not needed for this site.
 
 ## Risks and open questions
 

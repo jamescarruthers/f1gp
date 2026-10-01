@@ -4,7 +4,17 @@ Scripts for running F1GP 1.05 in js-dos, driving it from tests, and reading
 its memory. See `../docs/web-port-plan.md` for the plan and the findings.
 
 Bundles (`dist/`), screenshots and logs (`out/`) contain copyrighted game
-data. Git ignores both folders. Never commit or publish them.
+data. Git ignores both folders: never commit them. The project's owner
+publishes one bundle on the GitHub Pages site (below); nothing else in them is
+published.
+
+## The site
+
+`node build-site.mjs --out ../_site` builds the GitHub Pages site: the landing
+page (`site/index.html`), `render.html` and `map.html`, the modules they import,
+the emulator files, and a bundle built from `../original` (AdLib, 25,000 cycles,
+with the intro). `.github/workflows/pages.yml` runs it on every push to `main`
+and deploys it; pull requests build it as a check.
 
 ## Setup
 
@@ -29,7 +39,11 @@ node build-bundle.mjs --autoexec "gp /g" --out dist/route-g-25000.jsdos
 | `lib/route.cjs` | Drives the game from boot to the car on track by recognising each screen. Reads the dash speed and the processor occupancy figure. Works with Node or browser drivers. |
 | `lib/browser-emu.mjs` | Starts `serve.mjs` and headless Chromium, opens a test page, and returns a driver for `route.cjs`. |
 | `serve.mjs` | Local static server on 127.0.0.1; `--isolate` adds COOP/COEP headers. |
-| `index.html` | Test page using the js-dos `Dos()` player. |
+| `index.html` | Test page using the js-dos `Dos()` player (the site's landing page is `site/index.html`). |
+| `render.html` | The new view: the game beside (or under) our WebGL renderer, `style=modern|classic`. |
+| `lib/cars.mjs` | The cars as the game draws them (classic), or as 3D models with 3D wheels and helmets (modern). |
+| `lib/audio.mjs` | Sound for the direct-mode pages (an AudioWorklet fed by the emulator). |
+| `build-site.mjs` | Builds the GitHub Pages site. |
 | `raw.html` | Test page using the lower-level engine API with our own canvas, input and audio. |
 | `lib/f1gp-mem.mjs` | Browser-safe version of `guest-mem.cjs`: finds the game in the emulator heap and reads it. |
 | `lib/f1gp-state.mjs` | `readState()`: every car's position, speed, lap and flags, the camera, view, clock and pause state. `readTrack()`: the game's segment array. See `../docs/memory-map.md`. |
