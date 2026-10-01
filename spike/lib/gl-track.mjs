@@ -21,16 +21,26 @@ precision highp float;
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aColour;
 layout(location = 2) in vec2 aUv;  // road: feet along and across the track (0, 0 elsewhere)
+layout(location = 3) in float aSide; // poles: -1 or 1, the side of the strip this vertex is on (0 elsewhere)
 uniform vec3 uCam;      // camera position relative to the origin
 uniform vec2 uSinCos;   // sin(yaw), cos(yaw)
 uniform vec4 uProj;     // sx, sy, cy, unused
 uniform vec2 uDepth;    // near, far
+uniform vec2 uPole;     // a pole's half-width: fine units, and at least this much of the screen (NDC)
 out vec3 vColour;
 out float vDepth;
 out vec2 vUv;
 out vec3 vWorld;
 void main() {
-  vec3 d = aPos - uCam;
+  vec3 p = aPos;
+  if (aSide != 0.0) {
+    // a pole is a strip facing the camera, widened sideways on the screen
+    vec3 d0 = aPos - uCam;
+    float depth0 = max(d0.x * uSinCos.x + d0.y * uSinCos.y, uDepth.x);
+    float hw = max(uPole.x, uPole.y * depth0 / uProj.x);
+    p.xy += aSide * hw * vec2(uSinCos.y, -uSinCos.x);
+  }
+  vec3 d = p - uCam;
   float lat = d.x * uSinCos.y - d.y * uSinCos.x;
   float depth = d.x * uSinCos.x + d.y * uSinCos.y;
   float n = uDepth.x, f = uDepth.y;
@@ -38,7 +48,7 @@ void main() {
   vColour = aColour;
   vDepth = depth;
   vUv = aUv;
-  vWorld = aPos;
+  vWorld = p;
 }`;
 
 // The ground texture (the game's T option, 0F47:7F64): the road and the grass
@@ -46,16 +56,20 @@ void main() {
 // grass 11h-13h around 12h (each circuit's ramps run dark to light). The game
 // does it in screen space, as streaks that follow the camera's motion; here a
 // noise texture lies on the ground: along the track on the road (streaks four
-// times longer than wide), in world space on the grass. Mode 1 keeps the
-// game's whole shades; mode 2 blends between them. Mipmaps fade it with
-// distance, as the shades average out.
+// times longer than wide), in world space on the grass, with a grain about a
+// quarter of its size on top; on the road about two pixels in three take a
+// neighbouring shade. Mode 1 keeps the game's whole shades; mode 2 blends
+// between them. Mipmaps fade it with distance, as the shades average out.
 const GROUND_TEXTURE = `
 uniform sampler2D uNoise;   // R8, tileable noise, mipmapped
 uniform int uTexMode;       // 0 off, 1 the game's shades, 2 smooth
-vec3 groundShade(sampler2D pal, int idx, float noise, int lo, int hi) {
-  float n = noise * 2.0 - 1.0;
-  if (uTexMode == 1) return texelFetch(pal, ivec2(idx + clamp(int(floor(n * 1.6 + 0.5)), lo, hi), 0), 0).rgb;
-  float f = clamp(n * 1.6, float(lo), float(hi));
+// the noise at p (texture repeats): the broad patches, and a finer grain on top
+float groundNoise(vec2 p) {
+  return (texture(uNoise, p).r - 0.5) * 2.0 + (texture(uNoise, p * 4.31 + 0.37).r - 0.5) * 1.4;
+}
+vec3 groundShade(sampler2D pal, int idx, float n, int lo, int hi) {
+  if (uTexMode == 1) return texelFetch(pal, ivec2(idx + clamp(int(floor(n * 2.6 + 0.5)), lo, hi), 0), 0).rgb;
+  float f = clamp(n * 2.6, float(lo), float(hi));
   int k = int(floor(f));
   vec3 a = texelFetch(pal, ivec2(idx + k, 0), 0).rgb;
   vec3 b = texelFetch(pal, ivec2(idx + min(k + 1, hi), 0), 0).rgb;
@@ -98,9 +112,9 @@ vec3 hazeColour(sampler2D pal, int idx, float level) {
 // from a strip, each screen row starting at its own offset (0F47:142A). The
 // game does it in screen space, so the crowd stays put on the screen while the
 // stands move under it. Mode 2 (default) lays the same strip and row offsets on
-// the stand itself: columns along the face, rows up it, a crowd texel about
-// half a foot wide. Where texels get smaller than a pixel, they double in size
-// step by step, along the face and up it separately (a stand seen at a slant
+// the stand itself: columns along the face, rows up it, a crowd texel 1.75 ft
+// wide by 2.2 ft, about one spectator. Where texels get smaller than a pixel,
+// they double in size step by step, along the face and up it separately (a stand seen at a slant
 // shrinks along the face only), blending between steps, so a far crowd is
 // still a speckle of people rather than a shimmer; uCrowdSharp keeps every texel.
 // Mode 1 keeps the game's screen-space crowd.
@@ -135,7 +149,7 @@ void main() {
     int idx = int(vColour.x + 0.5);
     // the road only (it alone has u, v; a car part in the road's colour has none)
     if (uTexMode > 0 && idx == uRoadIdx && int(vColour.z + 0.5) == 0 && any(notEqual(vUv, vec2(0.0)))) {
-      outColour = vec4(groundShade(uPalette, idx, texture(uNoise, vUv / vec2(32.0, 8.0)).r, -2, 1), 1.0);
+      outColour = vec4(groundShade(uPalette, idx, groundNoise(vUv / vec2(32.0, 8.0)), -2, 1), 1.0);
       return;
     }
     int idx2 = -1; float blend = 0.0;  // a second crowd texel to blend in (mode 2, far away)
@@ -150,7 +164,7 @@ void main() {
       vec3 t = dot(th, th) > 1e-6 ? vec3(normalize(th), 0.0) : vec3(1.0, 0.0, 0.0);
       vec3 b = normalize(cross(n, t));
       if (b.z < 0.0) b = -b;
-      vec2 uv = vec2(dot(vWorld, t), dot(vWorld, b)) / vec2(32.0, 40.0); // 0.5 ft by 0.625 ft
+      vec2 uv = vec2(dot(vWorld, t), dot(vWorld, b)) / vec2(112.0, 140.0); // 1.75 ft by 2.2 ft: about one spectator
       vec2 lod = uCrowdSharp == 1 ? vec2(0.0) : max(log2(fwidth(uv)) + 0.5, vec2(0.0));
       vec2 l0 = floor(lod), f = lod - l0;
       idx = crowdAt(uv, l0);
@@ -253,8 +267,7 @@ void main() {
     float depth = uProj.y * uCamH / max(uProj.z - vY, 1e-4);
     float lat = xn * depth / uProj.x;
     vec2 w = uCam.xy + vec2(lat * uSinCos.y + depth * uSinCos.x, -lat * uSinCos.x + depth * uSinCos.y);
-    float noise = texture(uNoise, w / (64.0 * 16.0)).r;
-    outColour = vec4(groundShade(uPalette, uGroundIdx, noise, uGroundIdx == uRoadIdx ? -2 : -1, 1), 1.0);
+    outColour = vec4(groundShade(uPalette, uGroundIdx, groundNoise(w / (64.0 * 16.0)), uGroundIdx == uRoadIdx ? -2 : -1, 1), 1.0);
     return;
   }
   if (uUseScene == 0) {
@@ -313,7 +326,7 @@ export class TrackRenderer {
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
     this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn',
-      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp']
+      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp', 'uPole']
       .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
@@ -523,13 +536,16 @@ export class TrackRenderer {
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
       const ebo = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+      // the poles: strips the vertex shader widens (aSide)
       const lineVao = gl.createVertexArray();
       gl.bindVertexArray(lineVao);
       const lvbo = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, lvbo);
-      gl.bufferData(gl.ARRAY_BUFFER, mesh.lines.length ? mesh.lines : new Float32Array(6), gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const strips = poleStrips(mesh.lines);
+      gl.bufferData(gl.ARRAY_BUFFER, strips.length ? strips : new Float32Array(7), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
+      gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
       const lebo = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
       gl.bindVertexArray(null);
@@ -699,7 +715,8 @@ export class TrackRenderer {
    *   game's steps) | 'smooth', texture: 'off' (default) | 'classic' (the game's shades) | 'smooth' (the
    *   ground texture, with setScene), crowd: 'stands' (default: on the stands, coarser texels far
    *   away) | 'sharp' (on the stands, every texel) | 'screen' (the game's, fixed to the screen),
-   *   pitLane: true when the camera is in the pit lane }
+   *   poles: 'solid' (default: six inches wide, at least one game pixel) | 'pixel' (one game pixel
+   *   wide, as the game draws them), pitLane: true when the camera is in the pit lane }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
@@ -784,6 +801,9 @@ export class TrackRenderer {
       gl.uniform1i(this.u.uCrowdOn, 0);
     }
     gl.uniform2f(this.u.uCell, (w * xScale) / 320, h / rows);
+    // a pole's half-width: one game pixel wide (xScale / 160 of the screen across), or 6 inches
+    // wide and at least one game pixel (and two canvas pixels)
+    this.poleWidth = opt.poles === 'pixel' ? [0, xScale / 320] : [16, Math.max(xScale / 320, 2 / w)];
     const hazeMode = { classic: 1, smooth: 2 }[opt.haze] ?? 0;
     this.hazeMode = hazeMode;
     gl.uniform1i(this.u.uHazeMode, hazeMode);
@@ -901,12 +921,15 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.depthFunc(gl.LESS);
   gl.disable(gl.CULL_FACE);
-  // poles: one-pixel vertical lines in the game
+  // poles (flag poles, posts): one-pixel vertical lines in the game; strips here, one game
+  // pixel wide in the classic style, six inches (at least two pixels) in the modern one
   if (fr.lines.length) {
+    gl.uniform2f(this.u.uPole, ...this.poleWidth);
     gl.bindVertexArray(set.lineVao);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, set.lebo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, fr.lines, gl.DYNAMIC_DRAW);
-    gl.drawElements(gl.LINES, fr.lines.length, gl.UNSIGNED_INT, 0);
+    const tris = poleTriangles(fr.lines);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, tris, gl.DYNAMIC_DRAW);
+    gl.drawElements(gl.TRIANGLES, tris.length, gl.UNSIGNED_INT, 0);
   }
   // bitmaps
   this.drawSprites(spriteQuads(set.mesh.sprites, O.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, O.objs, set.mesh.origin, fr.sprites, set.mesh.placements));
@@ -918,6 +941,35 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
  * 128 cells across, bytes around 128 (standard deviation about 50). Fixed seed.
  * @returns {Uint8Array} size x size
  */
+/**
+ * The poles of a line list (x, y, z, r, g, b per vertex, a pair per pole) as
+ * strips for the vertex shader to widen: per pole its two ends, each on both
+ * sides (side -1 and 1 as a seventh float), vertices 4l..4l+3.
+ */
+export function poleStrips(lines) {
+  const n = lines.length / 12, out = new Float32Array(n * 28);
+  for (let l = 0; l < n; l++) {
+    for (let e = 0; e < 2; e++) {
+      for (let s = 0; s < 2; s++) {
+        const o = (l * 4 + e * 2 + s) * 7;
+        out.set(lines.subarray((l * 2 + e) * 6, (l * 2 + e) * 6 + 6), o);
+        out[o + 6] = s ? 1 : -1;
+      }
+    }
+  }
+  return out;
+}
+
+/** The strips' triangles for a frame's poles (vertex index pairs 2l, 2l + 1 into the line list). */
+export function poleTriangles(pairs) {
+  const out = new Uint32Array((pairs.length / 2) * 6);
+  for (let i = 0; i < pairs.length / 2; i++) {
+    const b = (pairs[2 * i] >> 1) * 4;
+    out.set([b, b + 1, b + 2, b + 1, b + 3, b + 2], i * 6);
+  }
+  return out;
+}
+
 export function groundNoise(size = 256) {
   const out = new Float32Array(size * size);
   let seed = 0x9e3779b9;

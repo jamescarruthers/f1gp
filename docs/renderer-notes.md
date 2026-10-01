@@ -339,7 +339,9 @@ a Monza capture with the aid on, all 668 such segments follow the rule.
   pattern (0F47:7988, 7C5A, 7D62) is not decoded. `gl-track.mjs` lays a noise
   texture on the ground instead: along the track on the road (from the scene
   mesh's u, v), in world space on the grass (the ground pass meets each pixel's
-  ray with the ground plane under the camera), in the same shades.
+  ray with the ground plane under the camera), in the same shades, with a
+  finer grain on top; on the road about two pixels in three take a
+  neighbouring shade (69 %, by the noise's distribution).
 - **D** cycles DS:0068 through 3, 2, 1, 0 (0:DC94; DT). The renderer uses it
   only to drop trackside objects (0F47:9E2A), from bits of the object
   setting's byte +1: level 3 draws all; 2 skips bit 1; 1 skips bit 1 or bit 6;
@@ -740,8 +742,13 @@ is pulled toward the camera by half its width so that the shape's own faces do
 not hide it; edges are not rasterised with the game's rounding. The game's
 crowd is screen-space (it stays put on the screen while the stands move
 under it); `gl-track.mjs` lays the same strip and row offsets on the stand's
-face instead (columns along it, rows up it, about 0.5 by 0.6 ft), coarsening
-each axis to about a pixel far away, with `crowd=screen` for the game's way.
+face instead (columns along it, rows up it, 1.75 by 2.2 ft, about one
+spectator), coarsening each axis to about a pixel far away, with
+`crowd=screen` for the game's way. The game's poles are one pixel wide at any
+distance, which at a high resolution is a hairline; `gl-track.mjs` draws each
+as a strip facing the camera, one game pixel wide in the classic style and 6
+inches wide, but never less than one game pixel, in the modern one
+(`poles=pixel|solid`).
 
 ### Evidence (DT)
 

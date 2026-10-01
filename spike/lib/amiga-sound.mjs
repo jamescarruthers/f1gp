@@ -47,8 +47,9 @@ export async function makeAmigaSound({ data = 'dist/amiga-sound.bin', filter = '
   let hook = null, hookMem = null, lastEngine = null, seen = null;
 
   // Where the game is: 'intro' (gp.exe not running), 'menus', 'loading' (a
-  // session loads: the game has loaded its race sound driver) or 'session'
-  // (the game's sounds are on, SS:018E = 0). The race driver stays loaded
+  // session loads: the game has loaded its race sound driver), 'session'
+  // (the game's sounds are on, SS:018E = 0) or 'muted' (a session with the
+  // game's sound turned off). The race driver stays loaded
   // when the game goes back to the menus, so in the menus the hook marks the
   // copy that is there; a session's loading puts a fresh copy in.
   function where(mem) {
@@ -56,6 +57,8 @@ export async function makeAmigaSound({ data = 'dist/amiga-sound.bin', filter = '
     let place;
     if (flags.on) place = 'session';
     else if (!present || flags.left) place = 'menus';
+    // the player turned the game's sound off (=, - in a session): silence, not the tune
+    else if (flags.level === 0 && (state.place === 'session' || state.place === 'muted')) place = 'muted';
     else if (state.place === 'loading') place = 'loading';
     else if (!hook.installed && (seen === 'absent' || seen === 'ours')) place = 'loading';
     else place = 'menus';
