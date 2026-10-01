@@ -67,6 +67,9 @@
     cycles=auto|fixed     auto: the emulated CPU runs slower (8,000 cycles, raised when
                           the game's load climbs) while our view replaces the game's
                           drawing, and at 25,000 otherwise; fixed: as the bundle says
+    sleep=timer|spin      how the emulator waits out the rest of each millisecond: on a
+                          timer (default, lib/dos-sleep.mjs), or as js-dos does, passing
+                          messages to itself until the time comes (the main thread busy)
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -150,6 +153,7 @@ import { keysHtml } from './lib/keys.mjs';
 import { manualHelper } from './lib/manual.mjs';
 import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
+import { timerSleep } from './lib/dos-sleep.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -178,6 +182,8 @@ const opts = {
   fps: q.get('fps') === 'game' ? null : Math.min(30, Math.max(8, +(q.get('fps') ?? 30) || 30)),
   // auto: a low emulated CPU speed while our view replaces the game's drawing, raised when the game needs it
   cycles: q.get('cycles') ?? 'auto',
+  // timer: the emulator's idle time spent idle, not passing messages (lib/dos-sleep.mjs)
+  sleep: q.get('sleep') === 'spin' ? 'spin' : 'timer',
 };
 // the style sets the defaults; explicit haze= and framing= win
 function applyStyle(style) {
@@ -538,6 +544,7 @@ requestAnimationFrame(frameLoop);
   const ownAudio = opts.audio === 'own' ? await makeOwnAudio().catch((e) => { log('audio-failed', { error: String(e) }); return null; }) : null;
   window.renderApp.audio = ownAudio;
   ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
+  if (opts.sleep === 'timer') log('sleep', { timer: timerSleep(ci) });
   // the game's own sound, unless the Amiga's plays instead
   if (ownAudio) ci.events().onSoundPush((samples) => { if (opts.sound === 'adlib') ownAudio.push(samples, ci.soundFrequency()); });
   if (opts.audio === 'own' && opts.sound !== 'adlib') setSound(opts.sound);

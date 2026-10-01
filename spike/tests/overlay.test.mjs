@@ -99,6 +99,25 @@ test('keying: the marker is see-through; in the outside views so is bar black re
   assert.equal(a(5, 190), 255, 'the cockpit keeps its black');
 });
 
+test('the cockpit: black beside a mirror is our view, black inside its housing stays', () => {
+  const K = [10, 200, 30], grey = [160, 160, 160];
+  // rows 116-137: the left mirror's housing x 0-39 (grey, a black mark at x 20, y 125),
+  // black x 40-47 (the backdrop's corner), the marker from x 48 (the 3D view)
+  const src = frame((x, y) => {
+    if (y >= 116 && y < 138 && x < 48) return x >= 40 ? [0, 0, 0] : x === 20 && y === 125 ? [0, 0, 0] : grey;
+    if (y > 150) return [0, 0, 0]; // the cockpit's own black, below
+    return K;
+  });
+  const dst = new Uint8ClampedArray(64000 * 4);
+  const a = (x, y) => dst[(y * 320 + x) * 4 + 3];
+  keyFrame(src, dst, K, { top: 0, rows: 103, cockpit: true });
+  assert.equal(a(44, 120), 0, 'the corner beside the mirror');
+  assert.equal(a(40, 137), 0, 'all of it');
+  assert.equal(a(20, 125), 255, 'a mark inside the housing');
+  assert.equal(a(10, 120), 255, 'the housing');
+  assert.equal(a(5, 190), 255, 'the cockpit below');
+});
+
 test('the marker as shown: exact, or faded with the screen', () => {
   const K = [100, 200, 40];
   const view = { top: 16, rows: 164 };
