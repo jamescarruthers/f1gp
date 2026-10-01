@@ -3,6 +3,8 @@
 //
 //   node build-bundle.mjs --autoexec "gp /g" --cycles 25000 --out dist/p2-render-25000.jsdos
 //   timeout 240 node probes/p2-render-run.mjs [--tag run1] [--framing wide|original]
+//     [--haze smooth|classic|off] [--haze-all 1 (each shot paused, in all three haze modes)]
+//     [--style modern|classic] [--style-all 1 (each shot paused, in both styles)]
 //
 // Output: out/p2-render/<tag>/{page-*.png, fb-*.png, summary.json}
 
@@ -29,7 +31,7 @@ const summary = { tag: TAG, shots: [] };
 try {
   emu = await launch({
     bundle: opt('bundle', 'dist/p2-render-25000.jsdos'), page: 'render.html', input: 'real',
-    viewport: { width: 1600, height: 900 }, query: { framing: opt('framing', 'wide'), smooth: opt('smooth', '1'), layout: opt('layout', 'side') }, log,
+    viewport: { width: 1600, height: 900 }, query: { ...(opt('framing') ? { framing: opt('framing') } : {}), smooth: opt('smooth', '1'), layout: opt('layout', 'side'), style: opt('style', 'modern'), ...(opt('haze') ? { haze: opt('haze') } : {}) }, log,
   });
   const { page, driver } = emu;
   await route.toTrack(driver, { mode: 'quickrace', log });
@@ -46,6 +48,24 @@ try {
     if (step.key) { await tap(step.key); await sleep(1500); }
     const name = `${String(step.at).padStart(2, '0')}-${step.view}`;
     await driver.pageShot(path.join(OUT, `page-${name}.png`));
+    if (opt('haze-all', '0') === '1') {
+      await page.evaluate(() => window.ci.pause());
+      for (const mode of ['off', 'classic', 'smooth']) {
+        await page.evaluate((m) => { window.renderApp.opts.haze = m; }, mode);
+        await sleep(400);
+        await driver.pageShot(path.join(OUT, `page-${name}-haze-${mode}.png`));
+      }
+      await page.evaluate(() => window.ci.resume());
+    }
+    if (opt('style-all', '0') === '1') {
+      await page.evaluate(() => window.ci.pause());
+      for (const style of ['classic', 'modern']) {
+        await page.evaluate((v) => window.renderApp.setStyle(v), style);
+        await sleep(400);
+        await driver.pageShot(path.join(OUT, `page-${name}-${style}.png`));
+      }
+      await page.evaluate(() => window.ci.resume());
+    }
     await driver.shot(path.join(OUT, `fb-${name}.png`));
     const info = await page.evaluate(() => ({ perf: window.renderApp.perf, track: window.renderApp.track, view: window.renderApp.state?.view, frame: window.renderApp.state?.frame }));
     summary.shots.push({ name, ...info });

@@ -1,0 +1,54 @@
+# Build the site (spike/build-site.mjs: the pages, their modules, the emulator
+# and a game bundle built from original/) and deploy it to GitHub Pages.
+# Pull requests build it as a check; only main deploys.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: spike/package-lock.json
+      - name: Install
+        working-directory: spike
+        run: npm ci --omit=dev
+      - name: Test
+        working-directory: spike
+        run: node --test tests/*.test.mjs
+      - name: Build the site
+        working-directory: spike
+        run: node build-site.mjs --out ../_site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

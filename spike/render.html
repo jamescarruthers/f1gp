@@ -13,15 +13,25 @@
     http://127.0.0.1:8080/render.html?bundle=dist/p2-render-25000.jsdos
 
   Query options:
-    bundle=...            the js-dos bundle (built with build-bundle.mjs)
+    bundle=...            the js-dos bundle (built with build-bundle.mjs; default
+                          dist/f1gp.jsdos, the one build-site.mjs puts on the site)
     framing=wide|original wide keeps the game's vertical scale and shows more
                           at the sides; original matches the game's framing
     smooth=1|0            ease between game frames (one game frame behind)
     layout=side|gl|overlay  original screen beside the new view, the new view
                           alone, or the new view (game framing) laid half
                           transparent over the original screen
-    cars=1|0              draw cars (boxes for now)
+    cars=1|0              draw the cars as the game does (boxes with source=file)
     objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
+    style=modern|classic  modern: every car as a 3D model at any distance, 3D wheels
+                          and helmets, all cars on the circuit, smooth haze;
+                          classic: as the game draws (bitmap cars beyond 52 ft,
+                          bitmap wheels and helmets, its choice of cars, its haze
+                          steps) and the game's 4:3 framing. Also a menu on the page.
+    audio=own|off         the game's sound through our AudioWorklet (starts on the first
+                          key or click), or none
+    haze=smooth|classic|off  distance haze with the game's haze tables: blended,
+                          in the game's steps, or none (default from the style)
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -37,11 +47,16 @@
   header { padding: 10px 16px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
   header h1 { font-size: 16px; margin: 0; }
   #status { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+  header label { color: var(--muted); font-size: 13px; }
+  header select { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   #screen { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
   #gl { width: min(100%, 960px); aspect-ratio: 16 / 9; display: block; }
   .glpane { flex: 1 1 560px; min-width: 0; }
+  .glwrap { position: relative; }
+  #glnote { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; text-align: center; color: #c9c8c2; font-size: 15px; pointer-events: none; }
+  #glnote[hidden] { display: none; }
   #perf { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
   body.gl-only .origpane { display: none; }
   body.overlay .glpane { display: none; }
@@ -53,10 +68,12 @@
 </style>
 </head>
 <body>
-<header><h1>F1GP track renderer</h1><span id="status">loading...</span></header>
+<header><h1>F1GP track renderer</h1>
+  <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
+  <span id="status">loading...</span></header>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
-  <div class="pane glpane"><canvas id="gl"></canvas><pre id="perf"></pre></div>
+  <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
 </main>
 <script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
 <script type="module">
@@ -67,19 +84,43 @@ import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
+import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
+import { makeOwnAudio } from './lib/audio.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
 const opts = {
-  bundle: q.get('bundle') ?? 'dist/p2-render-25000.jsdos',
+  bundle: q.get('bundle') ?? 'dist/f1gp.jsdos',
   framing: q.get('framing') ?? 'wide',
   smooth: (q.get('smooth') ?? '1') !== '0',
   layout: q.get('layout') ?? 'side',
   cars: (q.get('cars') ?? '1') !== '0',
   source: q.get('source') ?? 'memory',
   objects: (q.get('objects') ?? '1') !== '0',
+  style: q.get('style') === 'classic' ? 'classic' : 'modern',
+  hazeParam: q.get('haze'),
+  audio: q.get('audio') ?? 'own',
+  framingParam: q.get('framing'),
 };
+// the style sets the defaults; explicit haze= and framing= win
+function applyStyle(style) {
+  opts.style = style;
+  opts.haze = opts.hazeParam ?? (style === 'classic' ? 'classic' : 'smooth');
+  if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
+}
+applyStyle(opts.style);
+{
+  const sel = $('style');
+  sel.value = opts.style;
+  sel.addEventListener('change', () => {
+    applyStyle(sel.value);
+    const u = new URL(location.href);
+    u.searchParams.set('style', sel.value);
+    history.replaceState(null, '', u);
+    sel.blur(); // keys go back to the game
+  });
+}
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
 if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
 const events = window.emuEvents = [];
@@ -130,7 +171,8 @@ function sizeCanvas() {
 
 const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
-let prev = null, cur = null; // last two kept frames: { st, cam, at }
+let prev = null, cur = null; // last two kept frames: { st, cam, at, cars }
+let carData = null;           // readCars(mem) for the circuit (source=memory)
 const perf = { raf: [], draw: [], frames: 0, kept: 0, last: null };
 
 const teamColour = (car) => (car.isPlayer ? [255, 120, 20] : [235, 235, 235]);
@@ -145,10 +187,15 @@ function loadCircuit(st) {
     // everything the game built at track load, read from its memory
     const scene = readScene(mem);
     info = renderer.setScene(scene, { surroundRoad: (parsed.header.surrounding & 0x80) !== 0 });
-    if (opts.objects) {
-      try { info.objects = renderer.setObjects(readObjects(mem), readCrowd(mem)); }
-      catch (e) { log('objects-failed', { error: String(e?.stack ?? e) }); }
+    carData = null;
+    if (opts.cars) {
+      try { carData = readCars(mem); }
+      catch (e) { log('cars-failed', { error: String(e?.stack ?? e) }); }
     }
+    if (opts.objects) {
+      try { info.objects = renderer.setObjects(readObjects(mem), readCrowd(mem), { cars: carData }); }
+      catch (e) { log('objects-failed', { error: String(e?.stack ?? e) }); }
+    } else if (carData) renderer.setCarSprites(carData);
   } else {
     const compiled = compileTrack(parsed).segs;
     const segs = fromCompiled(compiled);
@@ -180,12 +227,19 @@ function frame(now) {
       if (st.session.circuit !== circuit) loadCircuit(st);
       if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
         prev = cur;
-        cur = { st, cam: cameraFromState(st), at: now };
+        cur = { st, cam: cameraFromState(st), at: now, cars: null };
+        // the cars' poses and the game's choice of cars, read at the same moment as st
+        if (carData) {
+          const states = carStates(carData, st);
+          cur.cars = { states, drawn: selectCars(carData, states).drawn };
+        }
         perf.kept++;
       }
     } else { prev = cur = null; }
   }
   const t0 = performance.now();
+  const note = $('glnote');
+  if (note.hidden !== !!cur) note.hidden = !!cur;
   if (cur) {
     let cam = cur.cam, alpha = 1;
     const st = cur.st;
@@ -193,7 +247,16 @@ function frame(now) {
       alpha = Math.min(1, (now - cur.at) / st.frameMs);
       cam = lerpCamera(prev.cam, cur.cam, alpha);
     }
-    if (opts.cars) {
+    if (opts.cars && carData && cur.cars) {
+      const smoothCars = alpha < 1 && prev && prev.cars;
+      const states = smoothCars ? lerpCarStates(prev.cars.states, cur.cars.states, alpha) : cur.cars.states;
+      const modern = opts.style === 'modern';
+      // classic: the game's choice of cars; modern: every car on the circuit, 3D at any distance
+      const fc = frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
+        { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : cur.cars.drawn, all: modern,
+          modern, paletteRgb: renderer.lastPalette, wide: modern || opts.framing === 'wide' });
+      renderer.setCarFrame(fc, carData);
+    } else if (opts.cars) {
       const cars = [];
       for (let i = 0; i < st.cars.length; i++) {
         const c = st.cars[i];
@@ -211,8 +274,12 @@ function frame(now) {
       renderer.setCars(cars);
     }
     cam.noHorizonImage = horizonOff(mem);
+    // the original framing: the canvas takes the shape of the game's 3D view (320 columns by
+    // cam.rows rows of a 4:3 screen), so nothing is stretched
+    const shape = opts.framing === 'original' && opts.layout !== 'overlay' ? `320 / ${(cam.rows * 1.2).toFixed(1)}` : '';
+    if (glCanvas.style.aspectRatio !== shape) glCanvas.style.aspectRatio = shape;
     if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
-    renderer.draw(cam, { framing: opts.framing, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+    renderer.draw(cam, { framing: opts.framing, haze: opts.haze, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     perf.frames++;
   }
   perf.draw.push(performance.now() - t0);
@@ -223,12 +290,12 @@ setInterval(() => {
   const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
   const st = cur && cur.st;
   $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
-  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}`;
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}`;
   window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, size: [glCanvas.width, glCanvas.height] };
   perf.kept = 0;
 }, 1000);
 
-window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null };
+window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null, setStyle: (v) => { applyStyle(v); $('style').value = v; } };
 // the Phase 1 tools (route driver, autopilot) look for window.mapApp
 window.mapApp = window.renderApp;
 requestAnimationFrame(frameLoop);
@@ -239,7 +306,10 @@ requestAnimationFrame(frameLoop);
   if (!res.ok) throw new Error(`bundle ${opts.bundle}: HTTP ${res.status} (build one with build-bundle.mjs)`);
   const bundle = new Uint8Array(await res.arrayBuffer());
   for (const [n, b] of Object.entries(unzipSync(bundle, { filter: (f) => /^F1CT\d\d\.DAT$/i.test(f.name) }))) trackFiles[n.toUpperCase()] = b;
-  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: true });
+  const ownAudio = opts.audio === 'own' ? await makeOwnAudio().catch((e) => { log('audio-failed', { error: String(e) }); return null; }) : null;
+  window.renderApp.audio = ownAudio;
+  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
+  if (ownAudio) ci.events().onSoundPush((samples) => ownAudio.push(samples, ci.soundFrequency()));
   window.ci = ci; window.emuCi = ci; window.emuReady = true;
   log('ci-ready');
   const ev = ci.events();

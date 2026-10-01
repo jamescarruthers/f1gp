@@ -109,6 +109,17 @@ byte means "an object is in this segment". SC 0F47:343A, 354F, 3306. DT: in
 21 captures every one of 280 cross-sections was at a segment flagged this
 way; the running set was not modelled, so the flags alone over-predict.
 
+Between cross-sections the road is a straight polygon, so on a hill it
+follows the chord, not the segments' heights. Near the camera this shows: in
+a TV view on the Imola hill (segment 757) no road-edge cross-section lies
+between segment 746 (behind the camera) and 757, and the chord passes up to
+101/64 ft (1.6 ft) from the true height; projected, the game's road edge sits
+1–12 px lower on the screen than the true edge, most at the nearest segments.
+A Magny-Cours hill frame shows the same (segments 653–661, up to 37/64 ft,
+1–6 px). These are the two frames that were 4–5 px off in the alignment
+check. Our renderer keeps the true heights. DT (`hillsegs.py`, `hillpx.py`
+on RAM captures from `probes/p2-capture.cjs --ram`).
+
 The colour rows also change with distance: kerbs and white lines use a "far"
 row beyond 9 segments, a "near" row at 5–9 and a "nearest" row at 0–4. SC
 0F47:367E; DT (all kerb records beyond 9 segments carried the plain white
@@ -703,3 +714,316 @@ estimated camera segment of the reference frames.
 - The pit-lane pass 0F47:9C05 (which part of the pit lane, its fences).
 - The polygon LODs of the car and the cockpit path of the own car; 0F47:8261.
 - Wet-weather haze for objects (SS:0182).
+
+## Cars: shapes, placement and colours (decoded)
+
+This section covers how the scene renderer chooses, places, colours and draws
+the 26 cars, the effect shapes attached to them, the cockpit mirrors and the
+routine 0F47:8261. It corrects two statements made earlier in this file (see
+"Corrections"). The code is `spike/lib/cars.mjs`; the checks are
+`spike/probes/p3-cars-*.mjs` and `spike/tests/cars.test.mjs`; the working
+files (captures, listing extracts, comparison sheets, results) are in
+`spike/out/research-phase3/cars/`.
+
+Units as above: X/Y fine units (1/64 ft), Z in Z units, depths in 1/8 ft unless
+stated, angles 10000h = one turn. "car+NN" is byte NN of a car record (DS:0D1B
++ slot × C0h).
+
+### Which cars are drawn (0F47:A533, 88A5)
+
+Once per frame A533 takes a window of cars in race order and files each one
+on a track segment, so that the segment walk lists it with the objects (A737
+removes the marks at the end of the frame):
+
+```
+count = DS:2225                      ; = clamp(30 - SS:1230/2, 12, 23): 20 at 15 fps, 23 at 25, 15 at 10 (0:7CAF)
+start = (camera object)+66 + 6       ; +66 = race position x 2; reverse walk: + (count - 2) * 2 instead of 6
+for each entry of DS:0C65 from start - 2 downwards (towards the leader), wrapping round the order:
+    car+96 bit 80h                   -> skip (does not count)
+    car is the camera object (DS:097D) and not car+9A bit 08h -> skip (counts)
+    car+84 = 1 (2 when the camera looks more than 45 deg across the track, R:0186 >= 2000h)
+    seg = the car's segment, moved between the pit and track arrays near the pit junctions
+          (A5DD-A6AB, from the junction pointers DS:0182/018A/018E/01A8/01B4/01CC and SS:0160/0164/0170)
+    while seg+26 bit 7 (an object, or a car filed earlier): seg = next segment, car+84 += 1
+    seg+26 |= C0h; seg+2A |= 80h; seg+0A |= 80h; seg+1E = car+66 | 80h
+stop after `count` cars, or 26 entries
+```
+
+- So the cars drawn are, in forward views, at most two places behind the
+  viewed car in race order and up to 17 places ahead (with lapped cars where
+  the order wraps); in reverse views up to 17 behind and 2 ahead. The camera
+  object is the viewed car in the cockpit view and the camera record DS:099B
+  otherwise; its +66 is the viewed car's in chase views but was seen to differ
+  in a TV view, so read it. SC; DT (below).
+- The bytes marked are the band markers of the bands 0–9 (+26), 10–25 (+2A)
+  and 26–58 (+0A) segments ahead, not +2B: **no car is drawn more than 58
+  segments (928 ft) ahead**, nor beyond the view distance from seg+20. Behind
+  the camera the walk lists 9 segments (58 in polygon mode). SC.
+- The shape drawer then drops a car whose reference point (centre, 168 Z units
+  up) is nearer than R:0058 = 1Ah (3.25 ft) in depth, or behind: in external
+  views it is not drawn at all; in the cockpit view it goes to a mirror (see
+  "Cockpit and mirrors"). It also drops a car when its list key minus R:0062
+  is negative ([bp+190], set in A07D; R:0062 is set during the walk to a
+  counter − 2, meaning not traced) and one whose visibility points (the four
+  wheel points, the front-wing tips and four ground corners) are all behind,
+  all left or all right of the screen. SC.
+- Hidden, retired and parked cars: car+96 bit 80h means not drawn (practice
+  garages, some retired cars); car+96 bit 20h (no driver) draws the car without
+  the helmet. Cars in the pit lane are drawn where the walk passes them: near
+  the junctions they are filed on the parallel track segments, in the middle
+  of the pit lane on pit segments, which the pit pass (0F47:9C05) walks; that
+  pass draws cars although it draws no objects (9E2A tests SS:0172 only after
+  the car branch). A car on the jacks is the same car raised by car+8C (0, then
+  40, then 64 Z units during one stop). SC; DT for 80h, 20h and +8C.
+- The viewed car: not drawn in the cockpit view (camera object), unless
+  car+9A bit 08h, which the contact code sets with a front impact so that the
+  debris in front of you is drawn (A19E draws only that effect for the camera
+  object). In chase, reverse chase and TV views it is drawn like any car. SC.
+
+### Order
+
+The walk pushes each listed car on the "later" object list (R:0074, with the
+objects whose setting +1 has bit 7) with the key: segment counter − car+84,
+that is one (or two) segments nearer than the segment the car stands on
+(0F47:5201). 53BF sorts the list by key, far first, keeping the walk's far-to-
+near order for equal keys. 6425 then draws, for each segment record from far
+to near, the R:0074 entries whose key is at least the record's counter, then
+the record's fences and kerbs (then the R:0072 objects). So a car is painted
+after all ground-level polygons of its block, after the fences and kerbs of
+its own segment and of farther segments, and before those of nearer segments
+and nearer objects; a hill crest (block boundary) hides it like the track.
+Inside a car the painter's order is the view sector's display list. SC; DT
+(ordering equal keys by the walk raised the far-car agreement in a TV frame of
+the pack from 92.9 % to 100 %).
+
+### Pose (0:14A2, 0F47:A07D)
+
+```
+x, y  = 14A2: car+28/+2C in physics mode, else from the segment (memory-map.md), >> 8 (fine)
+z     = 14A2: car+08, or the interpolated segment Z + car+8C
+pitch = 14A2: car+02, or seg+02 * cos(car heading - segment heading)
+yaw   = car+1A + hi16((car+4A * DS:0156) << 3)
+```
+
+- The pitch is used as the shape drawer's tilt: each point's Z rises by
+  hi16(y · sin(pitch) << 2) of its Y scale value (negated for a negative
+  word). There is no roll. SC; DT.
+- The yaw "wobble": car+4A is written by 0:67A7 as the line heading minus the
+  direction of travel (car+00); car+1A there is the line heading + car+48.
+  DS:0156 = 4000000h / DS:2C5D (the computer cars' time step), 3C00h at 15 fps,
+  so the drawn offset is car+4A × 1.875 at 15 fps and scales with the frame
+  rate. SC; DT: without the wobble the near-car agreement in the Monza race
+  frames fell from 99.1 % to 90.5 % and the far-car one from 99.7 % to 92.5 %.
+- The game works in integers from its own camera (SS:0142/014A fine X/Y,
+  SS:013E, SS:0154/0156 cos/sin): the reference point through 20AB (in 1/64 ft
+  within 3E80h fine units, else in 1/8 ft), every point as the reference point
+  plus scale values rotated by yaw − camera yaw with table cos/sin, each
+  rotated value floored once and negated for negative point words. Doing the
+  same rather than rotating world coordinates in floating point raised the
+  near-car agreement by 1–1.5 points. SC; DT.
+
+### Colours
+
+- Body: the team palette, 16 colours at SS:2964 + (car+25 − 1) × 16; element
+  colour c → that entry, hazed for the car as for objects (max(depth, 64)).
+- Helmet: the driver's palette SS:2AA4 + (number − 1) × 16 (number = car+AC &
+  3Fh), passed as an offset from SS:2964 (+140h). Wheels use the team palette.
+- Bitmaps are hazed by their own depth. Haze starts at 400 ft. SC; DT
+  (palette ablation: drawing helmets in the team palette lowered the near-car
+  agreement from 98.6 % to 95.8 %; without haze 0.2–0.4 % of far-car pixels
+  change).
+
+### The car shape (shape 0)
+
+- Header: size 512 (8 ft), reference point 168 Z units up, two LODs. LOD 0:
+  polygons up to depth 1A0h (52 ft, the reference point's depth, not its
+  distance), 14 scale values, 32 view sectors of 11.25°, 23–41 elements per
+  sector, 61 elements and 84 points in all. LOD 1: a bitmap LOD (mode 2, mirror
+  for negative angles): frames B0h–CFh one per 100h (1.4°) for view angles
+  0–1F00h, D0h–DCh one per 800h up to 7FFFh, mirrored for 8000h–FFFFh; angle 0
+  is the car seen from behind. SC; DT.
+- View angle a = yaw − camera yaw − atan((column − 160)/256) of the reference
+  point (table SS:5268, column offset capped at 255; 0 or 320 when behind);
+  sector = a >> 11. As for objects. SC; DT.
+- Polygons are one-sided. A polygon whose colour byte has bit 6 has one more
+  byte, a point p: it is drawn only when the projected **column** of p is not
+  right of its partner's (point word +6) (0F47:99F8 compares slot word +6,
+  the column; the earlier text in this file called it a depth test). The
+  front-wing and rear-wing endplates use it to show their outer or inner face.
+  When a point is projected and its partner is already on the same column,
+  it moves one column right (9224). Points are projected when an element
+  first uses them, vector by vector. SC; DT (the endplates were missing in
+  front views before the column rule).
+- Team 1 (car+25 = 1) draws the same display lists from a second element
+  block at DS:7793 (8E2E sets the element base when [bp+17A] bit 7, which A07D
+  sets for team 1): only the first nine elements, the nose, differ. SC; DT
+  (without it the near-car agreement fell from 98.6 % to 97.5 %).
+- Wheels: four bitmap elements, front id 21h at (±204, 276, 80), rear id 00h at
+  (±204, −374, 80) (fine X, Y, Z). Each has 33 frames over 90° of view:
+  ```
+  a = yaw - camera yaw + correction of the wheel point's own column
+  front wheels: a += s(car+48)        s(v) = 4v up to |v| < 200h, else (|v| - 200h)/2 + 800h, signed
+  a &= 7FFFh; mirrored = a bit 14; if a > 4000h: a = 8000h - a
+  id = base + ((a + 100h) >> 9)       ; 00h-20h rear, 21h-41h front
+  ```
+  So the front wheels turn with the steering (car+48, ± about 25° at full lock
+  for the player); nothing makes the wheels spin. Computer cars have car+48 = 0
+  most of the time. SC; DT (without the steering term the near-car agreement
+  fell by 0.6–1.1 points; a reverse-chase frame at full lock matches).
+- Helmet: one bitmap element, id 42h at (0, 42, 166), type bit 4 (drawn only
+  with a driver), 9 frames over 180°:
+  ```
+  a = s(car+48) + yaw - camera yaw + correction of the car's column + 2 * car+48   (16-bit, signed)
+  mirrored = a < 0; id = 42h + ((|a| + 800h) >> 12)
+  ```
+  so the driver's head turns with the steering. SC; DT.
+- The rear wing, its endplates, the front wing, the cockpit and the body are
+  polygons; there are no line elements.
+
+### Effect shapes (DS:351B, 0F47:A1C1, A30A, A406)
+
+Five entries of 16 bytes {dx, dy, dz, yaw add, pitch add, palette offset,
+shape id}, placed from the car's pose (offsets rotated by the yaw, dz raised
+by sin(pitch) × dy):
+
+| Entry | Drawn when | Shape | Where | What (DT) |
+| --- | --- | --- | --- | --- |
+| 0 | car+97 bit 80h | 8: bitmap LOD, frames 9Bh–9Fh by angle, palette 500h | 9.3 ft behind, 2.9 ft up | a mechanic in red overalls standing behind the car (set at 0:8D62) |
+| 1 | car+9A bits 10h and 04h | 0Eh: 8 bitmaps 91h–9Ah, size 8000, palette 520h | 9.3 ft behind | a burst of debris on the ground |
+| 4 | car+9A bit 10h without 04h | 0Eh, pitch + 6000h | 9.3 ft ahead | debris thrown up in front |
+| 2 | car+9A bits 80h and 20h | 0Fh: 4 polygons, 4 sectors | the rear wing (8 ft behind, 3.4 ft up) | the broken rear wing, in team colours |
+| 3 | car+9A bits 80h and 40h | 10h: 7 polygons, 8 sectors, turned round | the nose (8 ft ahead) | the broken front wing hanging down, in team colours |
+
+- The contact code (0:B9B0, B9D9) sets 80h|40h|10h|08h on one car of a hard
+  contact and 80h|20h|10h|04h on the other; bit 10h (the debris) lasts only a
+  few frames; 0:3E53 clears 80h, 40h and 20h. DT: the flags persist in race
+  frames on cars that touched earlier.
+- Parts 2 and 3 are drawn through A2D3, which skips the palette load at A2CC:
+  they keep the team palette (entries 0, 1 and 4 use the entry's 500h/520h).
+- Order: entries 0, 1 and 4 are drawn before or after the car, whichever is
+  farther from the camera first. Part 3 is drawn after the car when the
+  camera sees the car's front (|clamped ray angle − yaw| ≥ 4000h), before it
+  between 1000h and 4000h, not at all within 1000h of the rear; part 2 always
+  after the car. SC; DT: 2,193 of 2,277 effect pixels (96.3 %) match in 13
+  frames with these flags poked on the viewed car.
+
+### Routine 0F47:8261
+
+It does not touch a car shape. While the camera is in the pit area (DS:016E
+bit 7) it sets the fence colour code of one side (DS:0256 bit 7: left, else
+right) to 1 on the first two segments of the viewed car's pit box
+(DS:0196 + car+AD × 8Ah) and 82CC restores them after the frame. Code 1 is
+R:0220[1] = 3Ch, red: the viewed car's own box is shown in red. SC; DT (riding
+in a car on the jacks, the panel beside it has palette colour 3Ch while the
+stored code of those segments is 3, grey).
+
+### Cockpit and mirrors
+
+- The player's own car is not drawn in the cockpit view; the cockpit, dash
+  and mirror housings are a 2D image in the screen rows below the 3D view.
+- The mirrors are drawn by the scene renderer itself (0F47:8A09–8B9E, then
+  19E8 in mirror mode). They show **cars only**, no track and no objects, over
+  a fixed backdrop (sky and grey ground) that is part of the cockpit image.
+  A listed car whose reference point is nearer than R:0058 (3.25 ft) or behind
+  the camera goes to a mirror:
+  ```
+  lat, dep = the car's camera-space position (1/8 ft)
+  left mirror if lat < 0: angle R:005A = 9000h, column offset -140; else R:005C = 7000h, +140
+  A = lat*cos(angle) - dep*sin(angle);  B = dep*cos(angle) + lat*sin(angle)
+  dep' = B >> 12 (4 x the depth: the image is small); lat' = -A (mirrored)
+  column = 160 + (lat' << 8) / dep' + offset; dropped if it crosses to the other half
+  the far bitmap (LOD 1), frame from -(yaw - camera yaw - angle) + the column's correction,
+  scaled by dep', anchor row 123 + (row - horizon) = 123, clipped to rows 116-137 and,
+  per row, to [SS:63DE+1F2h+2r, SS:63DE+298h+2r) minus the gap [SS:63DE+A6h+2r, +14Ch+2r)
+  (left glass x 0-39, right glass x 280-319)
+  ```
+  Because of the race-order window only the two cars directly behind in race
+  order (and lapped cars) can appear, within the 9 segments the walk lists
+  behind the camera. SC; DT: 1,712 of 1,716 mirror pixels (99.8 %) match in 19
+  cockpit frames; 86 % of the mirror-glass pixels are identical in 6 cockpit
+  frames taken at different places (the rest are cars); drawing every car
+  instead of the window put about 85 pixels into the mirrors that the game
+  leaves empty.
+- A later cockpit renderer can draw real rear views; for the original look it
+  needs this list (`mirrorImage` in cars.mjs) and the backdrop from the
+  game's frame.
+
+### What a WebGL renderer can take from this
+
+`spike/lib/cars.mjs`: `readCars(mem)` (shape 0 and its team-1 variant, the
+effect shapes and table, the 16-colour palettes, constants; it can be passed
+as `objs` to objects.mjs `buildSpriteAtlas`/`spriteQuads`), `carStates` (the
+per-car pose, palettes and flags of A07D), `selectCars` (A533: which cars, on
+which segment, in which order), `carParts`/`shapeParts` (what 88A5 draws for a
+car: the chosen sector's polygons in order, wheels and helmet with frames,
+effects, the near cut), `frameCars` (this frame's triangles in the format of
+`buildSectorMesh` with layers as `frameObjects`, plus sprites),
+`carSpriteQuads` (sprite quads with a per-bitmap depth bias), `carSpriteIds`,
+`lerpCarStates` (easing between two frames), `mirrorImage` and `mirrorClip`,
+`gameCamera`/`gameProject` (the integer arithmetic, for pixel checks).
+
+Approximations a depth-buffered renderer makes: polygons depth-tested instead
+of painted in display-list order (coplanar details and the broken wings on
+decal layers); wheel bitmaps pulled a quarter of their width towards the
+camera, the helmet half its width; cars against the track by depth instead of
+the per-segment painter's order; float projection.
+
+### Evidence (DT)
+
+Captures: `out/research-phase3/cars/cap/` (Monza Quick Race at 25,000 cycles,
+`probes/p3-cars-capture.mjs`): `grid1` (grid and start: cockpit, chase,
+reverse chase, TV, riding in other cars; 26 frames), `race1` (the start, the
+pack in TV views, chase and reverse chase at full steering lock, a stopped
+car; 29), `flags2` (effect and driver flags poked on the viewed car; 13),
+`pit1` (computer cars sent into the pits by setting car+23 bit 80h, car+B3 bit
+4 and car+9A bit 80h; on the jacks; 13). These pause the emulator on a
+consistent read: the screen then shows the frame before the one in RAM while
+anything moves, so the check splices the previous frame's game memory back in
+(`<name>.hist.json`). The Phase 2 captures `static/cap/s2` (19 frames, game
+paused with P) need no splice.
+
+Pixel agreement inside the pixels our cars cover (`probes/p3-cars-check.mjs`,
+banner rows and the PAUSED sign left out):
+
+| Set | Game rules: polygon cars | bitmap cars | mirrors | WebGL data (mesh): polygon | bitmap |
+| --- | --- | --- | --- | --- | --- |
+| s2, 19 frames | 99.1 % of 41,789 px | 99.7 % of 10,995 | 99.0 % of 103 | 96.6 % | 98.6 % |
+| grid1, 26 | 98.3 % of 43,043 | 100.0 % of 12,251 | 98.9 % of 263 | 97.3 % | 98.6 % |
+| race1, 29 | 98.6 % of 42,703 | 100.0 % of 13,438 | – | 97.4 % | 99.0 % |
+| flags2, 13 | 98.5 % of 21,993 | 100.0 % of 12,397 | – | 97.0 % | 98.1 % |
+
+Lowest frame (game rules, polygon cars with ≥ 200 px): 96.9 %. The remaining
+differences are one-pixel polygon edges (the game's edge rasteriser,
+0F47:0000, is not modelled) and thin parts near the near plane. "Mesh" draws
+`frameCars` with a depth buffer and the game's integer projection. In the pit
+lane frames (`pit1`) the polygon agreement is 79 %: the renderer there walks
+the pit lane, which the Phase 2 scene code does not draw (garages, pit crews
+and walls missing), so the occlusion cannot be checked; mirrors in those
+frames match 100 %.
+
+Ablations (game rules, all sets): without the yaw wobble 90.5–97.7 % (polygon)
+and 92.5–99.7 % (bitmap); without the steering term −0.6 to −1.1 points;
+without the team-1 nose −0.9 to −1.1 (where team-1 cars are near); helmets in
+the team palette −0.3 to −2.8;
+floating-point instead of the game's integer arithmetic −1 to −1.5 (polygon),
+−0.7 to −1.6 (bitmap).
+
+### Corrections to this file
+
+- Section 1, step 1 and "Cars (for Phase 3)": 0F47:8261 patches fence colour
+  codes of the viewed car's pit box (above), not the car's shape record.
+- "Cars (for Phase 3)": 88A5's 8A09–8B9E is the mirror path, not the cockpit
+  view of the own car; the colour bit 6 test compares columns, not depths.
+
+### Open questions (cars)
+
+- Wet races (spray or darkening of cars) were not captured.
+- The game's polygon edge rasteriser (the last 1–2 % of car pixels).
+- The pit pass 0F47:9C05 with cars in the middle of the pit lane, and the
+  junction mapping A5DD–A6AB, are implemented from the code but not checked
+  against frames (the pit-lane scene is missing).
+- What makes car+97 bit 80h (the mechanic behind the car) in play (0:8D62);
+  the meaning of car+9A bits 01h and 02h (02h is set on the player's car).
+- Where the mirror backdrop is restored each frame.
+- Other circuits and frame rates: all car frames are from Monza at 15 fps;
+  DS:2225 and DS:0156 depend on the frame-rate setting and must be read.

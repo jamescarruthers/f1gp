@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1GP in the Browser</title>
+<meta name="description" content="MicroProse Formula One Grand Prix (1991) running in the browser, with a new high-resolution 3D view drawn from the game's own state.">
+<style>
+  :root { --bg: #f4f3ef; --fg: #1d1d1b; --muted: #6b6a66; --panel: #ffffff; --line: #d9d7d0; --accent: #c8102e; --accent-fg: #ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #161615; --fg: #ecebe6; --muted: #9a9993; --panel: #20201e; --line: #3a3936; --accent: #e0303f; }
+  }
+  :root[data-theme="dark"] { --bg: #161615; --fg: #ecebe6; --muted: #9a9993; --panel: #20201e; --line: #3a3936; --accent: #e0303f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 16px 56px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 8px; }
+  .lede { color: var(--muted); margin: 0 0 28px; }
+  .modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 0 0 32px; }
+  .mode { display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; color: inherit; text-decoration: none; }
+  .mode:hover, .mode:focus-visible { border-color: var(--accent); outline: none; }
+  .mode strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  .mode span { color: var(--muted); font-size: 14px; }
+  .mode.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .mode.primary span { color: var(--accent-fg); opacity: 0.85; }
+  h2 { font-size: 18px; margin: 28px 0 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { width: 9em; white-space: nowrap; }
+  kbd { font: 13px ui-monospace, monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  p, li { margin: 0 0 10px; }
+  ul { padding-left: 20px; margin: 0 0 10px; }
+  .small { color: var(--muted); font-size: 14px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Formula One Grand Prix in the browser</h1>
+  <p class="lede">MicroProse's 1991 game, unchanged, running in an emulator. A new renderer reads the game's state as it runs and draws the 3D view at your screen's full resolution and width. The handling, the other drivers, the timing and the sound are the original game's.</p>
+
+  <div class="modes">
+    <a class="mode primary" href="render.html?style=modern"><strong>Play: modern</strong><span>Widescreen, every car in 3D with 3D wheels and helmets, smooth haze.</span></a>
+    <a class="mode" href="render.html?style=classic"><strong>Play: classic</strong><span>Drawn as the original: its framing, its picture cars, its haze.</span></a>
+    <a class="mode" href="map.html"><strong>Live map</strong><span>The game beside a top-down map of every car.</span></a>
+  </div>
+
+  <h2>Playing</h2>
+  <ul>
+    <li>The game loads in a few seconds (about 4 MB). The original screen is on the left; the new view, on the right, starts when you are in the car.</li>
+    <li>Sound starts on your first key press or click.</li>
+    <li>The game asks for a word from its manual before the menus.</li>
+    <li>You can switch between modern and classic with the menu at the top of the page.</li>
+  </ul>
+
+  <h2>Keys</h2>
+  <table>
+    <tr><td><kbd>A</kbd> <kbd>Z</kbd></td><td>Accelerate, brake</td></tr>
+    <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>Steer left, right</td></tr>
+    <tr><td><kbd>Space</kbd></td><td>Drop the car off its jacks in the pits</td></tr>
+    <tr><td><kbd>Page Down</kbd></td><td>Chase view</td></tr>
+    <tr><td><kbd>Delete</kbd></td><td>Reverse view</td></tr>
+    <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>TV view, back to the cockpit</td></tr>
+    <tr><td><kbd>P</kbd> <kbd>Esc</kbd></td><td>Pause, menu</td></tr>
+  </table>
+
+  <h2>How it works</h2>
+  <p>The game runs in <a href="https://js-dos.com/">js-dos</a>, DOSBox compiled to WebAssembly. The page reads the cars, the camera and the track from the emulated PC's memory every frame and draws them with WebGL, using the game's own projection, colours and drawing rules, which were decoded from the program. The source and the notes are on <a href="https://github.com/jamescarruthers/f1gp">GitHub</a>.</p>
+  <p class="small">Formula One Grand Prix © 1991 MicroProse, by Geoff Crammond.</p>
+</main>
+</body>
+</html>

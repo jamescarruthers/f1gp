@@ -4,8 +4,9 @@
 //                         [--sound adlib|beep|roland] [--cycles 25000]
 //                         [--autoexec "f1gp.bat"]
 //
-// The bundle holds the game files, so it must never be committed or served
-// publicly. dist/ is ignored by git.
+// The bundle holds the game files. dist/ is ignored by git: never commit a
+// bundle. build-site.mjs builds one for the project's GitHub Pages site, which
+// the owner has chosen to publish.
 
 import { readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";

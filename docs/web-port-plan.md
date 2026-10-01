@@ -195,8 +195,10 @@ Progress:
   Projected from the game's camera, the track edges land on the game's road
   edges with a median error of 0–0.3 px on every circuit, and 97% of edge
   samples within 2 px (`spike/tests/p2-alignment.test.mjs`). Two TV frames
-  on hills (Imola, Magny-Cours) are 4–5 px off near the camera; the cause is
-  not known yet.
+  on hills (Imola, Magny-Cours) are 4–5 px off near the camera. The cause is
+  the game's, not ours: it builds cross-sections only at flagged segments,
+  so on a hill its road runs as a straight chord over up to 11 segments,
+  up to 1.6 ft from the track's true height. We keep the true heights.
 - **What the game draws for the track is decoded** (`docs/renderer-notes.md`):
   road edges, white lines, kerbs with their stripes and end ramps, fences,
   road markings, colours, sky and horizon image. 3,657 of 3,664 points the
@@ -213,8 +215,16 @@ Progress:
   rules at 320×200, 95.6% of pixels inside objects have the game's colour
   over 576 frames on all 16 circuits (97.5% at Monza). The WebGL view draws
   them too; there one-pixel edge rounding brings the figure to about 88%.
-- **Still to do:** the game's crowd pattern in the stands (now flat colour),
-  distance haze (optional), and the two TV frames on hills.
+- **Crowd in the stands: done.** The WebGL view fills the crowd colour with
+  the game's crowd strip, row by row, as the game does in races.
+- **Distance haze: done, as an option** (`haze=smooth|classic|off` on
+  `render.html`). It uses the game's own haze tables and rules: lines,
+  markings, kerbs and fences by segments ahead; each object as a whole by its
+  centre's depth or its size; bitmaps by their anchor's depth. "Classic" keeps
+  the game's four steps; "smooth" blends between them. Not done: wet-weather
+  haze, and the game's far and near colour rows for kerbs and white lines
+  (beyond 9 segments it draws kerbs plain white); we draw the nearest row
+  everywhere.
 
 Main risk: the scenery. How the game builds walls, fences, verges and
 buildings from the track file's commands and objects is only partly
@@ -273,6 +283,25 @@ To do before relying on it:
 4. **Effects the game draws** (sparks, smoke, dust, tyre marks, if any):
    list them and match them.
 
+Progress:
+
+- **Cars: decoded and drawn.** `spike/lib/cars.mjs` builds the cars as the
+  game does (`docs/renderer-notes.md`, "Cars"): which cars it draws, pose
+  with the yaw wobble, team and helmet palettes, polygon and bitmap versions,
+  wheels and helmets framed by angle and steering, effect shapes (mechanic,
+  debris, broken wings), drawing order with the objects, and the mirrors.
+  With the game's rules at 320×200, 98.3–99.1% of polygon-car pixels,
+  99.7–100% of bitmap-car pixels and 99.8% of mirror pixels have the game's
+  colour (87 frames, `spike/tests/cars.test.mjs`).
+- **The WebGL view draws them** (`render.html`, `cars=1`, the default) in
+  place of the boxes, eased between the game's frames with the camera and
+  hazed per car. Laid over the game's own screen, the followed car sits
+  exactly on the game's.
+- **Still to do:** the cockpit image and dash, and mirrors in our own view
+  (the game draws its mirrors into the cockpit image, so they come with it at
+  first); pit-lane cars are unchecked (79% in the one pit capture, where the
+  pit-lane scene is missing); wet races and other frame rates are unchecked.
+
 ## Phase 4: better graphics (3–6 weeks)
 
 1. **Resolution and widescreen:** draw at the window's size. Widen the field
@@ -285,6 +314,24 @@ To do before relying on it:
 3. **Better looks, optional:** textures, lighting, shadows, anti-aliasing and
    draw distance. Each is a separate choice; keep the original look available.
 
+## Sound from the Amiga version (1–2 weeks, optional)
+
+The Amiga version's title tune (Dave Lowe's original, four-channel samples)
+and its sampled engine sound better than the DOS AdLib sound. Both can be
+played from the player's own Amiga disks, without emulating the Amiga
+(`docs/amiga-sound.md`):
+
+1. **Import** the Amiga disk images next to the DOS files (Phase 5).
+2. **Title tune:** port the game's music player (music.unit, in `frontend`)
+   and the sound chip's rules to JavaScript; play it on the title screen.
+3. **Engine:** loop the Amiga engine sample in WebAudio, its rate set from
+   the DOS game's revs by the Amiga game's rule; silence the AdLib engine.
+4. **Other effects** (tyres, crashes, crowd): map the DOS game's events to the
+   Amiga samples, or keep the DOS sounds for those.
+
+Already done: both decoded and played offline from the disks; recordings of
+the DOS and Amiga versions compared (title tune; engine on the same revs).
+
 ## Phase 5: make it a product (2–3 weeks)
 
 1. **Import:** the player picks their game folder or zip. The page checks
@@ -295,7 +342,11 @@ To do before relying on it:
 3. **Controls:** keyboard, mouse, gamepad (needs the emulator change for
    analogue input), touch.
 4. **Offline:** a service worker caches the page and emulator.
-5. **Deploy** to a static host with a GitHub Actions job.
+5. **Deploy** to a static host with a GitHub Actions job. Done for GitHub
+   Pages (`.github/workflows/pages.yml`, `spike/build-site.mjs`): every push to
+   `main` builds the site and deploys it. The project's owner chose to publish
+   a game bundle built from `original/` with it, so the import step above is
+   not needed for this site.
 
 ## Risks and open questions
 
