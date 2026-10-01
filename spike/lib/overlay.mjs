@@ -209,7 +209,10 @@ export function shownMarker(src, markerRgb, view) {
  * shows (our 3D view), and, in the outside views, in the game's black bars
  * outside the 3D view's rows: black from either screen edge up to the first
  * other colour, so a message box over a bar (the "Viewing" banner) keeps its
- * black inside.
+ * black inside. In the cockpit, also the black corners of the mirror
+ * backdrop (19ED:3AFA copies 48 by 22 pixels, black beside each mirror's
+ * rounded end): the game draws it before the 3D view, which covers them,
+ * and the fill after; black there that touches the marker is our 3D view.
  * @param {Uint8Array|Uint8ClampedArray} src  the emulator's frame, RGB or RGBA, 320x200
  * @param {Uint8ClampedArray} dst             RGBA, 320x200
  * @param {number[]} markerRgb                [r, g, b]
@@ -223,8 +226,32 @@ export function keyFrame(src, dst, markerRgb, view) {
     dst[d] = r; dst[d + 1] = g; dst[d + 2] = b;
     dst[d + 3] = r === kr && g === kg && b === kb ? 0 : 255;
   }
-  if (view.cockpit) return;
   const black = (d) => (dst[d] | dst[d + 1] | dst[d + 2]) === 0;
+  if (view.cockpit) {
+    // the mirror backdrop's rectangles: rows 116-137, columns 0-47 and 272-319
+    const inBackdrop = (x, y) => y >= 116 && y < 138 && (x < 48 || x >= 272);
+    const queue = [];
+    for (let y = 116; y < 138; y++) {
+      for (const x0 of [0, 272]) {
+        for (let x = x0; x < x0 + 48; x++) {
+          const d = (y * 320 + x) * 4;
+          if (dst[d + 3] === 0 || !black(d)) continue;
+          const nb = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
+          if (nb.some(([u, v]) => u >= 0 && u < 320 && v >= 0 && v < 200 && dst[(v * 320 + u) * 4 + 3] === 0)) queue.push(x, y);
+        }
+      }
+    }
+    while (queue.length) {
+      const y = queue.pop(), x = queue.pop(), d = (y * 320 + x) * 4;
+      if (dst[d + 3] === 0) continue;
+      dst[d + 3] = 0;
+      for (const [u, v] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        const e = (v * 320 + u) * 4;
+        if (inBackdrop(u, v) && dst[e + 3] !== 0 && black(e)) queue.push(u, v);
+      }
+    }
+    return;
+  }
   for (let y = 0; y < 200; y++) {
     if (y >= view.top && y < view.top + view.rows) continue;
     const row = y * 320 * 4;
