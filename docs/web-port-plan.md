@@ -295,6 +295,24 @@ To do before relying on it:
 3. **Better looks, optional:** textures, lighting, shadows, anti-aliasing and
    draw distance. Each is a separate choice; keep the original look available.
 
+## Sound from the Amiga version (1–2 weeks, optional)
+
+The Amiga version's title tune (Dave Lowe's original, four-channel samples)
+and its sampled engine sound better than the DOS AdLib sound. Both can be
+played from the player's own Amiga disks, without emulating the Amiga
+(`docs/amiga-sound.md`):
+
+1. **Import** the Amiga disk images next to the DOS files (Phase 5).
+2. **Title tune:** port the game's music player (music.unit, in `frontend`)
+   and the sound chip's rules to JavaScript; play it on the title screen.
+3. **Engine:** loop the Amiga engine sample in WebAudio, its rate set from
+   the DOS game's revs by the Amiga game's rule; silence the AdLib engine.
+4. **Other effects** (tyres, crashes, crowd): map the DOS game's events to the
+   Amiga samples, or keep the DOS sounds for those.
+
+Already done: both decoded and played offline from the disks; recordings of
+the DOS and Amiga versions compared (title tune; engine on the same revs).
+
 ## Phase 5: make it a product (2–3 weeks)
 
 1. **Import:** the player picks their game folder or zip. The page checks
