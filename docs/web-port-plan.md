@@ -304,12 +304,30 @@ of its time, back down after 10 s under 30%, and runs at 25,000 elsewhere.
 
 In headless Chromium (software WebGL, GPU compositing on, a small canvas):
 the old settings gave the page 15 game frames a second; the new ones give it
-30, at 60 page frames a second and full game speed. js-dos's direct mode
-waits by posting messages to itself, so the emulator keeps the main thread
-busy at any cycles setting; the lower setting gives slow machines room to
-keep up rather than freeing the thread. The page draws at a render clock one
-game frame behind the newest frame and blends between the two frames around
-it, so bursts of frames from the emulator do not show.
+30, at 60 page frames a second and full game speed. The page draws at a
+render clock one game frame behind the newest frame and blends between the
+two frames around it, so bursts of frames from the emulator do not show.
+
+**The emulator's idle time (done).** js-dos's direct mode waits out the rest
+of each emulated millisecond by posting messages to itself until the time
+comes, so the emulator kept the main thread busy at any cycles setting. The
+page now waits on a timer instead (`spike/lib/dos-sleep.mjs`, the page's
+`sleep` option). Measured with `spike/probes/p5-profile.mjs`, the DevTools
+profiler on the main thread, Monza Quick Race, cockpit view, 8,000 cycles,
+game at 30 fps, in headless Chromium with SwiftShader:
+
+| Main thread | Spin (js-dos), 1248×648 | Timer, 1248×648 | Spin, 608×288 | Timer, 608×288 |
+| --- | --- | --- | --- | --- |
+| Idle | 3% | 80% | 3% | 74% |
+| Messages to itself, and the browser's own work | 79% | 6% | 76% | 8% |
+| Emulator (WebAssembly) | 13% | 12% | 14% | 12% |
+| Our page (state, overlay, renderer) | 1.3% | 1.4% | 3.6% | 3.5% |
+| Page frames a second | 6–7 | 8–9 | 22–23 | 24–28 |
+
+The page's own work is about 1 ms a frame. In this headless browser the page's
+frame rate is limited by SwiftShader filling pixels on the CPU in the GPU
+process (the profile does not see it): a fifth of the pixels gives three
+times the frames. A machine with a GPU does not have that limit.
 
 To do:
 
@@ -415,7 +433,7 @@ them without emulating the Amiga (`render.html?sound=amiga`, the Sound menu;
 | --- | --- | --- |
 | Scenery (walls, fences, buildings) can't be matched by comparison alone | Phase 2 takes longer | Read the game's drawing code; ask the F1GP community for their IDA database |
 | Car shapes not found or hard to decode | Cars look wrong | Search the data files at the start of Phase 3; nobody has looked yet |
-| Direct mode runs the emulator on the page's main thread | In this container the emulator slowed once the page spent more than 5–7 ms per frame of its own work | Skip the game's own 3D drawing and lower the emulated CPU speed (see "Turning off the game's own 3D drawing"); if that is not enough, run the emulator and the state reader in our own worker |
+| Direct mode runs the emulator on the page's main thread | In this container the emulator slowed once the page spent more than 5–7 ms per frame of its own work | Skip the game's own 3D drawing, lower the emulated CPU speed and wait out its idle time on a timer (see "Frame rate and CPU" and "The emulator's idle time"); if that is not enough, run the emulator and the state reader in our own worker |
 | The game draws things not in any data file | Missing effects | List them in Phase 3 |
 | Memory layout differs between game versions | Only 1.05 European works | Support one version first; detect others by hash |
 | Game files in a public repo | Anyone can download the game | Never serve them; consider removing `original/` |
