@@ -22,6 +22,8 @@
                           transparent over the original screen
     cars=1|0              draw cars (boxes for now)
     objects=1|0           draw the trackside objects (stands, buildings, trees, boards)
+    haze=smooth|classic|off  distance haze with the game's haze tables: blended,
+                          in the game's steps, or none
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -79,6 +81,7 @@ const opts = {
   cars: (q.get('cars') ?? '1') !== '0',
   source: q.get('source') ?? 'memory',
   objects: (q.get('objects') ?? '1') !== '0',
+  haze: q.get('haze') ?? 'smooth',
 };
 if (opts.layout === 'gl') document.body.classList.add('gl-only');
 if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
@@ -212,7 +215,7 @@ function frame(now) {
     }
     cam.noHorizonImage = horizonOff(mem);
     if (opts.source === 'memory' && now - lastPaletteAt > 500) { lastPaletteAt = now; renderer.setPalette(readPalette(mem)); }
-    renderer.draw(cam, { framing: opts.framing, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+    renderer.draw(cam, { framing: opts.framing, haze: opts.haze, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     perf.frames++;
   }
   perf.draw.push(performance.now() - t0);
@@ -223,7 +226,7 @@ setInterval(() => {
   const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
   const st = cur && cur.st;
   $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
-  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}`;
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game frames kept ${perf.kept}/s · ${glCanvas.width}x${glCanvas.height} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}`;
   window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, size: [glCanvas.width, glCanvas.height] };
   perf.kept = 0;
 }, 1000);

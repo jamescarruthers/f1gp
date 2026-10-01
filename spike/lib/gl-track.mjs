@@ -24,6 +24,7 @@ uniform vec2 uSinCos;   // sin(yaw), cos(yaw)
 uniform vec4 uProj;     // sx, sy, cy, unused
 uniform vec2 uDepth;    // near, far
 out vec3 vColour;
+out float vDepth;
 void main() {
   vec3 d = aPos - uCam;
   float lat = d.x * uSinCos.y - d.y * uSinCos.x;
@@ -31,21 +32,58 @@ void main() {
   float n = uDepth.x, f = uDepth.y;
   gl_Position = vec4(uProj.x * lat, uProj.y * d.z + uProj.z * depth, (depth * (f + n) - 2.0 * f * n) / (f - n), depth);
   vColour = aColour;
+  vDepth = depth;
 }`;
 
-// Colours are RGB, or (palette index, -1, 0) looked up in the live palette.
+// Distance haze as the game does it: a haze level 0-4 from the distance, and
+// level k > 0 maps palette index c to table[k - 1][c] (four 256-byte tables the
+// game builds at 7BCE:7BC0). Track parts (0F47:188A): level = clamp((d - 10) >> 3,
+// 0, 4), d = segments ahead (16 ft = 1024 fine units). Objects (0F47:8801) and
+// bitmaps (0F47:1931): d = max(depth of the object's centre, size) in 1/8 ft,
+// level = clamp(((clamp(d + 80h, 0, 3C00h) >> 8) - 5) >> 3, 0, 4). Mode 1 keeps
+// the game's steps; mode 2 blends between them, centred on the game's steps.
+const HAZE = `
+uniform int uHazeMode;      // 0 off, 1 the game's steps, 2 smooth
+uniform sampler2D uHaze;    // R8, 256 x 4: the game's haze tables
+float trackHaze(float depth) {
+  float d = depth / 1024.0;
+  if (uHazeMode == 1) return clamp(floor((floor(d) - 10.0) / 8.0), 0.0, 4.0);
+  return clamp((d - 14.0) / 8.0, 0.0, 4.0);
+}
+float objectHaze(float d8) {
+  float v = clamp(d8 + 128.0, 0.0, 15360.0) / 256.0 - 5.0;
+  if (uHazeMode == 1) return clamp(floor(max(floor(v), 0.0) / 8.0), 0.0, 4.0);
+  return clamp((v - 4.0) / 8.0, 0.0, 4.0);
+}
+int hazed(int idx, int k) {
+  return k == 0 ? idx : int(texelFetch(uHaze, ivec2(idx, k - 1), 0).r * 255.0 + 0.5);
+}
+vec3 hazeColour(sampler2D pal, int idx, float level) {
+  int k = int(floor(level));
+  vec3 a = texelFetch(pal, ivec2(hazed(idx, k), 0), 0).rgb;
+  if (level <= float(k)) return a;
+  return mix(a, texelFetch(pal, ivec2(hazed(idx, min(k + 1, 4)), 0), 0).rgb, level - float(k));
+}`;
+
+// Colours are RGB, or (palette index, -1, haze) looked up in the live palette,
+// where haze is 0 (none: road, grass), 1 (track parts) or 2 + n (object n).
 // In races the game fills colour 1Bh (the stands) with a crowd: pixels copied
 // from a strip, each screen row starting at its own offset (0F47:142A). We do
 // the same per game pixel, so the crowd has the original's grain.
 const FS = `#version 300 es
 precision highp float;
 in vec3 vColour;
+in float vDepth;
 uniform sampler2D uPalette;
 uniform sampler2D uCrowd;      // R8, 512 x 1: the crowd strip (palette indices)
 uniform sampler2D uCrowdRows;  // R8, 64 x 1: each row's start offset
 uniform vec2 uCell;            // canvas pixels per game pixel
 uniform int uCrowdOn;
+uniform sampler2D uObjects;    // RGBA32F, 256 wide: each object's centre x, y and size (fine units)
+uniform vec3 uCam;
+uniform vec2 uSinCos;
 out vec4 outColour;
+${HAZE}
 void main() {
   if (vColour.y < 0.0) {
     int idx = int(vColour.x + 0.5);
@@ -54,7 +92,15 @@ void main() {
       int r = int(texelFetch(uCrowdRows, ivec2(c.y & 63, 0), 0).r * 255.0 + 0.5);
       idx = int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
     }
-    outColour = vec4(texelFetch(uPalette, ivec2(idx, 0), 0).rgb, 1.0);
+    int cls = int(vColour.z + 0.5);
+    float level = 0.0;
+    if (uHazeMode > 0 && cls == 1) level = trackHaze(vDepth);
+    else if (uHazeMode > 0 && cls >= 2) {
+      vec4 o = texelFetch(uObjects, ivec2((cls - 2) & 255, (cls - 2) >> 8), 0);
+      vec2 d = o.xy - uCam.xy;
+      level = objectHaze(max(d.x * uSinCos.x + d.y * uSinCos.y, o.z) / 8.0);
+    }
+    outColour = vec4(hazeColour(uPalette, idx, level), 1.0);
   } else outColour = vec4(vColour, 1.0);
 }`;
 
@@ -71,6 +117,7 @@ uniform vec2 uSinCos;
 uniform vec4 uProj;
 uniform vec2 uDepth;
 out vec2 vUv;
+out float vDepth;
 flat out int vPal;
 void main() {
   vec3 d = aPos - uCam;
@@ -80,23 +127,27 @@ void main() {
   float dz = max(depth - aBias, n);   // drawn as if nearer by aBias
   gl_Position = vec4(uProj.x * lat, uProj.y * d.z + uProj.z * depth, ((dz * (f + n) - 2.0 * f * n) / ((f - n) * dz)) * depth, depth);
   vUv = aUv;
+  vDepth = depth;
   vPal = int(aPal + 0.5);
 }`;
 const SPRITE_FS = `#version 300 es
 precision highp float;
 precision highp usampler2D;
 in vec2 vUv;
+in float vDepth;
 flat in int vPal;
 uniform sampler2D uAtlas;   // R8: colour codes
 uniform sampler2D uPalMap;  // R8, 256 x 9: object palettes (palette indices)
 uniform sampler2D uPalette; // RGBA, 256 x 1: the live palette
 out vec4 outColour;
+${HAZE}
 void main() {
   int code = int(texelFetch(uAtlas, ivec2(floor(vUv)), 0).r * 255.0 + 0.5);
   if (code >= 255) discard;
   int n = vPal + code;
   int idx = int(texelFetch(uPalMap, ivec2(n % 256, n / 256), 0).r * 255.0 + 0.5);
-  outColour = vec4(texelFetch(uPalette, ivec2(idx, 0), 0).rgb, 1.0);
+  // a bitmap faces the camera, so every pixel has its anchor's depth
+  outColour = vec4(hazeColour(uPalette, idx, uHazeMode > 0 ? objectHaze(vDepth / 8.0) : 0.0), 1.0);
 }`;
 
 // Background: sky above the horizon row, ground below.
@@ -176,11 +227,12 @@ export class TrackRenderer {
     this.canvas = canvas;
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
-    this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn']
+    this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn',
+      'uHazeMode', 'uHaze', 'uObjects']
       .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
-    this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
+    this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette', 'uHazeMode', 'uHaze'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
     this.objects = null;
     this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon']
       .map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
@@ -195,6 +247,33 @@ export class TrackRenderer {
     this.track = null;
     this.cars = { vao: gl.createVertexArray(), buf: gl.createBuffer(), count: 0 };
     this.ground = COLOURS.ground;
+    // placeholders for samplers with nothing to read yet
+    this.hazeTex = this.texture(gl.R8, 256, 4, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1024));
+    this.noObjectsTex = this.texture(gl.RGBA32F, 1, 1, gl.RGBA, gl.FLOAT, new Float32Array(4));
+  }
+
+  /** A NEAREST, clamped 2D texture. */
+  texture(internal, w, h, format, type, data) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, data);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    return t;
+  }
+
+  /** The game's four haze tables (1024 bytes, objects.mjs readObjects().haze). */
+  setHaze(tables) {
+    if (!tables || tables.length < 1024) return;
+    if (this.lastHaze && this.lastHaze.every((v, i) => v === tables[i])) return;
+    this.lastHaze = Uint8Array.from(tables.subarray(0, 1024));
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.hazeTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 256, 4, 0, gl.RED, gl.UNSIGNED_BYTE, this.lastHaze);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   }
 
   /**
@@ -310,6 +389,13 @@ export class TrackRenderer {
     const gl = this.gl, origin = [this.origin[0], this.origin[1]];
     const meshFor = (set) => {
       const mesh = buildSectorMesh(objs, { indexed: true, origin, crowd: crowd.active, set });
+      // the haze channel: 2 + the object the vertex belongs to (the game hazes whole objects)
+      for (let k = 0; k < mesh.vertexObject.length; k++) mesh.data[k * 6 + 5] = 2 + mesh.vertexObject[k];
+      for (let k = 0; k < mesh.lineObject.length; k++) mesh.lines[k * 6 + 5] = 2 + mesh.lineObject[k];
+      const nObj = Math.max(mesh.objects.length, 1), rowsObj = Math.ceil(nObj / 256);
+      const centres = new Float32Array(256 * rowsObj * 4);
+      mesh.objects.forEach((ob, k) => centres.set([ob.x, ob.y, ob.size, 0], k * 4));
+      const objTex = this.texture(gl.RGBA32F, 256, rowsObj, gl.RGBA, gl.FLOAT, centres);
       const vao = gl.createVertexArray();
       gl.bindVertexArray(vao);
       const vbo = gl.createBuffer();
@@ -329,7 +415,7 @@ export class TrackRenderer {
       const lebo = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
       gl.bindVertexArray(null);
-      return { mesh, vao, ebo, lineVao, lebo };
+      return { mesh, vao, ebo, lineVao, lebo, objTex };
     };
     const track = meshFor('track'), pit = meshFor('pit');
     const atlas = buildSpriteAtlas(objs, spriteIdsUsed(objs));
@@ -362,6 +448,7 @@ export class TrackRenderer {
       crowdRowsTex = r8(64, 1, crowd.rows.subarray(0, 64));
     }
     this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, spriteVao, spriteVbo, crowdTex, crowdRowsTex };
+    this.setHaze(objs.haze);
     return { track: track.mesh.counts, pit: pit.mesh.counts, atlas: [atlas.width, atlas.height] };
   }
 
@@ -400,7 +487,8 @@ export class TrackRenderer {
   /**
    * Draw one frame.
    * @param {object} cam  { x, y (fine), z, heading, horizon (row), rows (viewport rows), top (first screen row) }
-   * @param {object} [opt] { framing: 'original'|'wide'|'screen' }
+   * @param {object} [opt] { framing: 'original'|'wide'|'screen', haze: 'off' (default) | 'classic' (the
+   *   game's steps) | 'smooth', pitLane: true when the camera is in the pit lane }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
@@ -462,6 +550,11 @@ export class TrackRenderer {
       gl.uniform1i(this.u.uCrowdOn, 0);
     }
     gl.uniform2f(this.u.uCell, (w * xScale) / 320, h / rows);
+    const hazeMode = { classic: 1, smooth: 2 }[opt.haze] ?? 0;
+    this.hazeMode = hazeMode;
+    gl.uniform1i(this.u.uHazeMode, hazeMode);
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, this.hazeTex); gl.uniform1i(this.u.uHaze, 5);
+    gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, this.noObjectsTex); gl.uniform1i(this.u.uObjects, 6);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform3f(this.u.uCam, cam.x - o[0], cam.y - o[1], cam.z);
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
@@ -496,6 +589,8 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   const gl = this.gl, O = this.objects;
   const set = opt.pitLane ? O.pit : O.track;
   const fr = frameObjects(set.mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: true });
+  gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, set.objTex);
+  gl.activeTexture(gl.TEXTURE0);
   // one-sided polygons, layer by layer (later layers are coplanar details on top)
   gl.enable(gl.CULL_FACE);
   gl.cullFace(gl.BACK);
@@ -530,11 +625,13 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, O.atlasTex); gl.uniform1i(u.uAtlas, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, O.palMapTex); gl.uniform1i(u.uPalMap, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex); gl.uniform1i(u.uPalette, 2);
+    gl.uniform1i(u.uHazeMode, this.hazeMode); gl.uniform1i(u.uHaze, 5);
     gl.bindVertexArray(O.spriteVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, O.spriteVbo);
     gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
     gl.drawArrays(gl.TRIANGLES, 0, quads.length / 7);
     gl.useProgram(this.prog);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
   }
   this.lastObjects = { layers: fr.layers.map((l) => l.length / 3), lines: fr.lines.length / 2, sprites: fr.sprites.length };
 };

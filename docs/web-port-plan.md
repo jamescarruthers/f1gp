@@ -217,7 +217,14 @@ Progress:
   them too; there one-pixel edge rounding brings the figure to about 88%.
 - **Crowd in the stands: done.** The WebGL view fills the crowd colour with
   the game's crowd strip, row by row, as the game does in races.
-- **Still to do:** distance haze (optional).
+- **Distance haze: done, as an option** (`haze=smooth|classic|off` on
+  `render.html`). It uses the game's own haze tables and rules: lines,
+  markings, kerbs and fences by segments ahead; each object as a whole by its
+  centre's depth or its size; bitmaps by their anchor's depth. "Classic" keeps
+  the game's four steps; "smooth" blends between them. Not done: wet-weather
+  haze, and the game's far and near colour rows for kerbs and white lines
+  (beyond 9 segments it draws kerbs plain white); we draw the nearest row
+  everywhere.
 
 Main risk: the scenery. How the game builds walls, fences, verges and
 buildings from the track file's commands and objects is only partly

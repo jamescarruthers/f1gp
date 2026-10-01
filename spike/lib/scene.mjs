@@ -115,8 +115,10 @@ export function horizonOff(mem) {
  * Coloured triangles for the whole lap (and pit lane).
  * @param {object} scene  from readScene()
  * @param {object} [opt]  { kerbRow: 0x10 nearest | 8 near | 0 far, origin: [x, y],
- *                          indexed: true to store (palette index, -1, 0) instead of RGB, so a
- *                          renderer can look colours up in the live palette }
+ *                          indexed: true to store (palette index, -1, haze) instead of RGB, so a
+ *                          renderer can look colours up in the live palette; haze is 1 for the
+ *                          parts the game hazes with distance (lines, markings, kerbs, fences),
+ *                          0 for the road }
  * @returns {{ data: Float32Array, origin: number[], counts: object, ranges: object }}
  *   data = x, y, z, r, g, b per vertex, grouped: ground (road), decals (white
  *   lines, markings: flat on the road), raised (kerbs, fences); ranges give
@@ -130,10 +132,10 @@ export function buildSceneMesh(scene, opt = {}) {
   const groups = { ground: [], decals: [], raised: [] };
   const groupOf = { road: 'ground', line: 'decals', marking: 'decals', kerb: 'raised', kerbFace: 'raised', fence: 'raised' };
   const counts = {};
-  const rgb = opt.indexed ? (i) => [i, -1, 0] : (i) => [pal[i * 3] / 255, pal[i * 3 + 1] / 255, pal[i * 3 + 2] / 255];
+  const rgb = opt.indexed ? (i, haze = 1) => [i, -1, haze] : (i) => [pal[i * 3] / 255, pal[i * 3 + 1] / 255, pal[i * 3 + 2] / 255];
   const lineNearest = T.lines[2];
   const colours = {
-    road: rgb(scene.road),
+    road: rgb(scene.road, 0),
     lineLeft: rgb(lineNearest & 15), lineRight: rgb(lineNearest >> 4),
   };
   // point C + k*h + m*w at height z
