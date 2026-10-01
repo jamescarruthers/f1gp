@@ -344,8 +344,10 @@ game's own data. It also follows the pit-lane splice.
 - Car +20, +26, +80, +84 and +88, most flag bits, and the gap +04.
 - Why +54 (lap start) equals timer − along/(2·speed), and where the
   per-circuit timer factors DS:0214/DS:0220 come from.
-- Whole races were checked at 2× speed (`p1-accuracy/race{1,2,3}`) and in
-  part at real speed; see `docs/web-port-plan.md` for the real-speed run.
+- Whole races were checked at 2× speed (`p1-accuracy/race{1,2,3}`) and
+  once at real speed after the consistency fix
+  (`p1-accuracy/race-realtime`: 5,567/5,567 frames read consistently, dash
+  speed 465/465, lap and position 408/408, finishing order 26/26).
 - Live runs cover races at Monza and Silverstone and practice at Monaco,
   the Hungaroring and Suzuka. Qualifying, wet races, replays in depth and
   builds other than European 1.05 are not covered.

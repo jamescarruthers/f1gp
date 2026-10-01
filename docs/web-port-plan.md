@@ -147,7 +147,12 @@ How it was checked:
   file. The finishing order matched the results screen.
 - A separate agent repeated the core checks at Silverstone, the Hungaroring,
   Monaco and Suzuka, at 10 and 15 fps and at 18,000 and 40,000 cycles.
-- REALTIME_RACE_RESULT
+- One whole Quick Race at real speed, run after the reader fix
+  (`spike/out/p1-accuracy/race-realtime`, 371 game seconds): every one of
+  5,567 frames recorded and read consistently; dash speed 465/465, lap and
+  position 408/408; computer cars within 0.76 m of the track edges; the
+  camera exactly at the viewed car in 4,171/4,171 cockpit frames; finishing
+  order 26/26.
 
 Fixed after the checks: the reader's "consistent read" flag could pass a read
 taken while the game was half-way through its next frame. It now keeps a
