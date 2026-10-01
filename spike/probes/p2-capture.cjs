@@ -23,11 +23,23 @@
 // The emulator only runs while this script awaits, so nothing moves between
 // the read that triggers the pause and ci.pause().
 //
+// What the runs showed (all 16 circuits, out/p2-ref/index.json):
+//   - "Stopped" means no keys held: the speed field then jitters at 8-20
+//     (< 0.3 ft/s) and the camera moves < 0.01 ft per frame; holding Z keeps
+//     it near 100. So a stop is |speed| < 40 for 5 frames.
+//   - While moving, the screenshot taken when paused on a consistent read
+//     shows the frame BEFORE the one the reader calls current (41 of 42
+//     clear-cut moving frames). Use history[-2] for moving frames.
+//   - T toggles the road/ground texture: SS:11A6 80h on (default) / 00 off.
+//     D cycles the detail level DS:0068 (3 at start, then 2, 1, 0).
+//   - --warp 2 (DOSBox clock x2, the guest unchanged) keeps every frame at
+//     25,000 cycles; one circuit takes 150-185 s of wall time.
+//
 // Output, out/p2-ref/<NN>/ (NN = track file number 01-16 = SS:1236 + 1):
 //   <k>.png   the 320x200 screenshot
 //   <k>.json  { circuit, view, texture, detail, state (full readState), history
 //              (camera of the last 3 frames, current flagged), extra, stop }
-//   track.json (readTrack at the first stop), meta.json, log.txt
+//   track.json (readTrack at the first capture), meta.json, log.txt, trace.jsonl
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');

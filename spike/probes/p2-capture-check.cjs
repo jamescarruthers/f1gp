@@ -91,7 +91,12 @@ const ignoreFor = (j) => {
 // ---------------------------------------------------------------- per frame
 const index = [];
 const colourAcc = new Map(); // key -> { road, edge, outside, above, byCircuit: {NN: n}, byView: {}, texOff: n }
+const surf = {}; // NN -> 'on'|'off' -> region -> Map(colour -> n)
 const addColour = (k, region, d, view, texOff) => {
+  const t = texOff ? 'off' : 'on';
+  const a = ((surf[d] = surf[d] || {})[t] = surf[d][t] || {});
+  const m = (a[region] = a[region] || new Map());
+  m.set(k, (m.get(k) || 0) + 1);
   let e = colourAcc.get(k);
   if (!e) { e = { road: 0, edge: 0, outside: 0, above: 0, circuits: {}, views: {}, texOff: 0 }; colourAcc.set(k, e); }
   e[region]++; e.circuits[d] = (e.circuits[d] || 0) + 1; e.views[view] = (e.views[view] || 0) + 1; if (texOff) e.texOff++;
@@ -201,6 +206,13 @@ const summarise = (list) => ({
 const still = index.filter((e) => !e.moving);
 const perCircuit = {};
 for (const [k, list] of Object.entries(groupBy((e) => String(e.file).padStart(2, '0')))) perCircuit[k] = { circuit: list[0].circuit, track: list[0].track, ...summarise(list.filter((e) => !e.moving)), movingFrames: list.filter((e) => e.moving).length };
+const perCircuitView = {};
+for (const [k, list] of Object.entries(groupBy((e) => `${String(e.file).padStart(2, '0')}/${e.view}`))) {
+  const l = list.filter((e) => !e.moving && e.overlayCheck.found >= 10);
+  perCircuitView[k] = { frames: l.length, medianOfFrameMedians: stats(l.map((e) => e.overlayCheck.medianErrPx)).median ?? null, medianOfFrameMeans: stats(l.map((e) => e.overlayCheck.meanErrPx)).median ?? null,
+    maxFrameMedian: l.length ? Math.max(...l.map((e) => e.overlayCheck.medianErrPx)) : null,
+    within2px: +(l.reduce((a, e) => a + e.overlayCheck.within2, 0) / Math.max(1, l.reduce((a, e) => a + e.overlayCheck.found, 0))).toFixed(3) };
+}
 const perView = {};
 for (const [k, list] of Object.entries(groupBy((e) => e.view))) perView[k] = summarise(list.filter((e) => !e.moving));
 const perTexture = {};
@@ -216,7 +228,24 @@ fs.writeFileSync(path.join(ROOT, 'index.json'), JSON.stringify({
   about: 'Phase 2 reference frames: paused F1GP 1.05 frames with the exact game state (probes/p2-capture.cjs), checked with probes/p2-capture-check.cjs.',
   layout: '<NN>/<k>.png (320x200 screenshot), <k>.json (state, history, view, texture, detail, circuit), <k>-overlay.png, <NN>/track.json (readTrack). NN = track file number f1ctNN.dat = circuitIndex (SS:1236) + 1.',
   overlayMethod: 'Road edges of the lap from track.json projected with the frame camera (x = 160 + 256*lat/depth, y = Y0 + horizonRow - dz*SS:017C*2/65536*32/depth; Y0 = 16 outside, 0 in the cockpit; depth < 500 ft). The game road boundary is found by colour along the search line through each edge sample (rows for steep edges, every 3rd row; columns for flat edges, every 4th column): inner = where the road-surface colours end, outer = where the verge colours start (colours learned per frame from inside/just outside the projected road). Error per sample = 0 if the projected edge lies between inner and outer (painted line or kerb band), else the distance to the nearer, perpendicular to the edge. medianErrPx is the median over samples where a boundary was found within 10 px. Signed inner/outer medians: + = right (row search) or down (column search). Cockpit, own car, banner and non-3D rows are masked.',
-  summary: { perCircuit, perView, perTexture, suspect, frameLag: { ...lag, detail: undefined } },
+  settings: {
+    texture: 'T toggles the ground/road texture (2-4 shades per surface instead of one flat colour). On at the start of every session: SS:11A6 = 80h (00 off). SS:00C0 also changed with T at Monza but is 0 at the start on other circuits, so it is not the setting.',
+    detail: 'D cycles the detail level DS:0068: 3 at the start (all frames here), then 2, 1, 0, 3. In the Silverstone pit lane 3 -> 2 removed a distant grandstand; 2 -> 1 -> 0 changed only a few pixels there.',
+    views: 'PgDn chase, Left TV, Right cockpit (Delete reverse chase, not captured). View keys do nothing in the pit lane. A "Viewing/Riding with" banner shows for about 3.2 game s after a view change; captures wait for it to go.',
+  },
+  frameLagNote: 'Moving captures: the edge check repeated with the camera of each of the last 3 frames. When one camera fits clearly best (mean inner-boundary error at most 0.6x the next), it is almost always the frame before the one the reader called current: the screenshot taken while paused on a consistent read shows the previous frame. Standing frames are unaffected (the camera moves < 0.01 ft per frame).',
+  summary: { perCircuit, perView, perCircuitView, perTexture, suspect, frameLag: { ...lag, detail: undefined, clearCut: (() => {
+    const out = {}; let n = 0;
+    for (const d of lag.detail) {
+      const c = d.candidates.filter((x) => x.meanAbsInnerPx !== null && x.found >= 10);
+      if (c.length < 3) continue;
+      const srt = [...c].sort((a, b) => a.meanAbsInnerPx - b.meanAbsInnerPx);
+      if (srt[0].meanAbsInnerPx > 0.6 * srt[1].meanAbsInnerPx) continue;
+      const cur = d.candidates.findIndex((x) => x.current), k = String(cur - d.candidates.indexOf(srt[0]));
+      out[k] = (out[k] || 0) + 1; n++;
+    }
+    return { frames: n, byFramesBeforeCurrent: out };
+  })() } },
   frameLagDetail: lag.detail,
   frames: index,
 }, null, 1));
@@ -276,9 +305,22 @@ for (const [d, m] of Object.entries(perCircuitColours)) {
   const tot = sum(m);
   perCircuitTop[d] = Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 16).map(([hex, n]) => ({ hex, share: +(n / tot).toFixed(4), label: palette.find((p) => p.hex === hex).label }));
 }
+// per circuit, texture on / off: the main colours inside the road and outside it below the horizon
+const top = (m, cover = 0.95, max = 8) => {
+  if (!m) return [];
+  const tot = sum(Object.fromEntries(m)), out = [];
+  let acc = 0;
+  for (const [k, n] of [...m.entries()].sort((a, b) => b[1] - a[1])) { if (acc >= cover * tot || out.length >= max) break; out.push({ hex: L.hex(k), share: +(n / tot).toFixed(3) }); acc += n; }
+  return out;
+};
+const perCircuitSurfaces = {};
+for (const [d, t] of Object.entries(surf)) {
+  perCircuitSurfaces[d] = { track: TRACK_NAMES[+d - 1] };
+  for (const tex of ['on', 'off']) if (t[tex]) perCircuitSurfaces[d][`texture${tex === 'on' ? 'On' : 'Off'}`] = { insideRoad: top(t[tex].road), outsideBelowHorizon: top(t[tex].outside, 0.8), aboveHorizon: top(t[tex].above, 0.8) };
+}
 fs.writeFileSync(path.join(ROOT, 'colours.json'), JSON.stringify({
   about: 'Colours in the 3D view of the reference frames (cockpit, own car in chase view, banner and non-3D rows masked). Regions from the projected road polygon (depth < 500 ft): insideRoad = road mask eroded 2 px; nearRoadEdge = within 2 px of it; outsideBelowHorizon; aboveHorizon. Labels are heuristics from where a colour occurs and its hue.',
   frames: index.length, pixels: grand,
-  byLabel, perCircuitTop, palette: palette.filter((p) => p.total / grand >= 0.00005),
+  byLabel, perCircuitSurfaces, perCircuitTop, palette: palette.filter((p) => p.total / grand >= 0.00005),
 }, null, 1));
 console.log('summary', JSON.stringify({ perView, perTexture, suspect: suspect.length, lag: lag.byFramesBeforeCurrent }, null, 1));
