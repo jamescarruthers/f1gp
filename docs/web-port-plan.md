@@ -207,8 +207,14 @@ Progress:
 - **While the car moves, the screen shows the frame before the one the
   state reader calls current.** Tests that compare moving frames must use
   the previous frame's camera.
-- **In progress:** trackside objects (stands, buildings, trees, signs). Their
-  shape format is only partly decoded; cars use the same machinery.
+- **Trackside objects: done** (`spike/lib/objects.mjs`, `docs/renderer-notes.md`).
+  The shape format, placement, per-angle display lists, bitmaps (trees,
+  boards, marshals) and object palettes are decoded. Drawn with the game's
+  rules at 320×200, 95.6% of pixels inside objects have the game's colour
+  over 576 frames on all 16 circuits (97.5% at Monza). The WebGL view draws
+  them too; there one-pixel edge rounding brings the figure to about 88%.
+- **Still to do:** the game's crowd pattern in the stands (now flat colour),
+  distance haze (optional), and the two TV frames on hills.
 
 Main risk: the scenery. How the game builds walls, fences, verges and
 buildings from the track file's commands and objects is only partly
@@ -253,8 +259,12 @@ To do before relying on it:
 
 ## Phase 3: cars and cockpit (2–6 weeks)
 
-1. **Find the car shapes** (candidates: `f1gpdata.dat`, `f1gpdatb.dat`,
-   `gp.exe`) and the team colours (ArgData documents where the colours are).
+1. **Car shapes.** Found while decoding objects: shape 0 is the car, drawn
+   by the same shape code as the trackside objects. It is polygons up to
+   52 ft away and bitmaps chosen by viewing angle beyond; wheels and helmets
+   are angle-chosen bitmaps; team and driver colours are palettes at
+   SS:2964 and SS:2AA4. The cockpit view of your own car takes a separate
+   path.
 2. **Draw every car** at its position, with wheels, and check against the
    game's frame as in Phase 2.
 3. **Cockpit and dash:** start by taking them from the game's own frame,
