@@ -192,6 +192,42 @@ buildings from the track file's commands and objects is only partly
 documented. If comparison alone does not settle it, we must read the game's
 drawing code.
 
+### Turning off the game's own 3D drawing
+
+The game draws its 3D view through one routine, called from five places
+(image offsets 0xEB7E, 0xEEA4, 0xF007, 0xF0D3, 0xF291: `lcall 0F47:81CE`).
+Replacing those calls with no-ops in emulated memory, while the game runs,
+stops the 3D drawing and nothing else: the camera is still set up, and the
+cockpit and dash are still drawn (`spike/probes/p2-norender.cjs`).
+
+Measured at Monza in a Quick Race, in Node, holding the throttle:
+
+| Emulated CPU (cycles) | 3D drawing | Game speed | Game's own load | Host CPU (one core) |
+| --- | --- | --- | --- | --- |
+| 25,000 | on | full | 30% | 46% |
+| 25,000 | off | full | under 5% | 46% |
+| 8,000 | off | full | 5% | 19% |
+| 4,000 | off | full | 17% | 13% |
+| 2,000 | off | full | 36% | 10% |
+| 1,000 | off | full | 80% | 8% |
+| 500 | off | 61% | — | 7% |
+
+Skipping the drawing alone saves no host CPU: the game waits for its next
+frame in a busy loop, which DOSBox runs at whatever speed it is set to. The
+saving comes from lowering the cycles setting as well, which js-dos can do
+while the game runs. At 3,000–4,000 cycles the host CPU falls to about a
+quarter, with a wide margin before the game slows.
+
+To do before relying on it:
+
+- Patch only while in the car, and raise the cycles again for menus and 2D
+  screens, which still need the original drawing and speed.
+- Check that no game logic depends on the drawing: run whole races with and
+  without the patch and compare lap times, positions and incidents.
+- Measure the game's load at its busiest (pit stops, crashes, all 26 cars
+  close together, 25 fps) to choose the cycles setting.
+- Keep a way to switch the original drawing back on, for the overlay check.
+
 ## Phase 3: cars and cockpit (2–6 weeks)
 
 1. **Find the car shapes** (candidates: `f1gpdata.dat`, `f1gpdatb.dat`,
@@ -234,7 +270,7 @@ drawing code.
 | --- | --- | --- |
 | Scenery (walls, fences, buildings) can't be matched by comparison alone | Phase 2 takes longer | Read the game's drawing code; ask the F1GP community for their IDA database |
 | Car shapes not found or hard to decode | Cars look wrong | Search the data files at the start of Phase 3; nobody has looked yet |
-| Direct mode runs the emulator on the page's main thread | In this container the emulator slowed once the page spent more than 5–7 ms per frame of its own work | Keep the renderer's CPU work small, or run the emulator and the state reader together in our own worker and post the state to the page; measure on a real desktop GPU first |
+| Direct mode runs the emulator on the page's main thread | In this container the emulator slowed once the page spent more than 5–7 ms per frame of its own work | Skip the game's own 3D drawing and lower the emulated CPU speed (see "Turning off the game's own 3D drawing"); if that is not enough, run the emulator and the state reader in our own worker |
 | The game draws things not in any data file | Missing effects | List them in Phase 3 |
 | Memory layout differs between game versions | Only 1.05 European works | Support one version first; detect others by hash |
 | Game files in a public repo | Anyone can download the game | Never serve them; consider removing `original/` |
