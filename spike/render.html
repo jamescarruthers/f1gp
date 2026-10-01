@@ -28,6 +28,8 @@
                           classic: as the game draws (bitmap cars beyond 52 ft,
                           bitmap wheels and helmets, its choice of cars, its haze
                           steps) and the game's 4:3 framing. Also a menu on the page.
+    manual=auto|off       auto: take the player through the manual check (English manual,
+                          the word typed) and the joystick question (Use Keys)
     audio=own|off         the game's sound through our AudioWorklet (starts on the first
                           key or click), or none
     haze=smooth|classic|off  distance haze with the game's haze tables: blended,
@@ -47,6 +49,7 @@
   header { padding: 10px 16px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
   header h1 { font-size: 16px; margin: 0; }
   #status { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+  #notice { color: var(--muted); font-size: 13px; }
   header label { color: var(--muted); font-size: 13px; }
   header select { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
@@ -70,7 +73,7 @@
 <body>
 <header><h1>F1GP track renderer</h1>
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
-  <span id="status">loading...</span></header>
+  <span id="status">loading...</span><span id="notice"></span></header>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
@@ -86,6 +89,7 @@ import { readScene, readPalette, horizonOff } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
 import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
+import { manualHelper } from './lib/manual.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
@@ -101,6 +105,7 @@ const opts = {
   style: q.get('style') === 'classic' ? 'classic' : 'modern',
   hazeParam: q.get('haze'),
   audio: q.get('audio') ?? 'own',
+  manual: q.get('manual') ?? 'auto',
   framingParam: q.get('framing'),
 };
 // the style sets the defaults; explicit haze= and framing= win
@@ -310,6 +315,20 @@ requestAnimationFrame(frameLoop);
   window.renderApp.audio = ownAudio;
   ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
   if (ownAudio) ci.events().onSoundPush((samples) => ownAudio.push(samples, ci.soundFrequency()));
+  if (opts.manual === 'auto') {
+    // the game's manual question: type the word for the player
+    const helper = manualHelper({
+      image: () => image, sendKey: (code, down) => ci.sendKeyEvent(code, down),
+      onLanguage: (key) => log('manual-language', { key }),
+      onJoystick: (key) => log('manual-joystick', { key }),
+      onAnswer: (q) => {
+        log('manual-answered', q);
+        $('notice').textContent = `Typed the manual word for you: "${q.answer}" (page ${q.page}, paragraph ${q.paragraph}, line ${q.line}, word ${q.word}).`;
+        setTimeout(() => { $('notice').textContent = ''; }, 8000);
+      },
+    });
+    setInterval(helper.check, 250);
+  }
   window.ci = ci; window.emuCi = ci; window.emuReady = true;
   log('ci-ready');
   const ev = ci.events();
