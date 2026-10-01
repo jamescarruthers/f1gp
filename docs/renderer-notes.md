@@ -737,8 +737,11 @@ Approximations a depth-buffered renderer makes: polygons are depth-tested
 instead of painted in the game's order (the game's order is used only to put
 coplanar details, "decals", on top); a bitmap that belongs to a polygon shape
 is pulled toward the camera by half its width so that the shape's own faces do
-not hide it; the crowd pattern is screen-space noise; edges are not rasterised
-with the game's rounding.
+not hide it; edges are not rasterised with the game's rounding. The game's
+crowd is screen-space (it stays put on the screen while the stands move
+under it); `gl-track.mjs` lays the same strip and row offsets on the stand's
+face instead (columns along it, rows up it, about 0.5 by 0.6 ft), coarsening
+each axis to about a pixel far away, with `crowd=screen` for the game's way.
 
 ### Evidence (DT)
 

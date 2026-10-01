@@ -48,6 +48,9 @@
     texture=smooth|classic|off  the ground texture (the game's T option): the road and
                           grass in their neighbouring shades, blended or in the game's
                           whole shades, or flat (default from the style)
+    crowd=stands|sharp|screen  the crowd in the stands: on the stands, in coarser texels far
+                          away (modern), on the stands texel by texel (classic), or fixed
+                          to the screen as the game draws it
     fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
                           (30, the default, is the most the game's physics allows; game
                           keeps the game's own setting, 15 in the Quick Race)
@@ -140,6 +143,7 @@ const opts = {
   style: q.get('style') === 'classic' ? 'classic' : 'modern',
   hazeParam: q.get('haze'),
   textureParam: q.get('texture'),
+  crowdParam: q.get('crowd'),
   audio: q.get('audio') ?? 'own',
   manual: q.get('manual') ?? 'auto',
   framingParam: q.get('framing'),
@@ -153,6 +157,7 @@ function applyStyle(style) {
   opts.style = style;
   opts.haze = opts.hazeParam ?? (style === 'classic' ? 'classic' : 'smooth');
   opts.texture = opts.textureParam ?? (style === 'classic' ? 'classic' : 'smooth');
+  opts.crowd = opts.crowdParam ?? (style === 'classic' ? 'sharp' : 'stands');
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
   document.body.classList.toggle('classic', style === 'classic');
 }
@@ -416,7 +421,7 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: opts.texture, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: opts.texture, crowd: opts.crowd, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
     }
     perf.frames++;
   }

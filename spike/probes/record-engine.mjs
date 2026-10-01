@@ -4,7 +4,10 @@
 // the same revs).
 //
 //   timeout 260 node probes/record-engine.mjs [--bundle dist/node-adlib-intro.jsdos]
-//     [--circuit Italy] [--seconds 75] [--tag adlib-monza]
+//     [--circuit Italy] [--seconds 75] [--tag adlib-monza] [--mode practice|quickrace]
+//
+// --mode quickrace records from the green light of a Monza Quick Race, among
+// the other cars (passing cars, contact, kerbs).
 //
 // Output, out/sound/engine-<tag>/: sound.wav (mono, 44.1 kHz), frames.jsonl
 // ({ sample, tick, rpm, gear, mph, inPit } per game frame), log.txt.
@@ -25,6 +28,7 @@ const BUNDLE = opt('bundle', 'dist/node-adlib-intro.jsdos');
 const CIRCUIT = opt('circuit', 'Italy');
 const SECONDS = +opt('seconds', 75);
 const TAG = opt('tag', 'adlib-monza');
+const MODE = opt('mode', 'practice');
 const OUT = path.join(import.meta.dirname, '..', 'out', 'sound', `engine-${TAG}`);
 fs.mkdirSync(OUT, { recursive: true });
 const T0 = Date.now();
@@ -54,7 +58,7 @@ const code = (k) => route.JSDOS_KEYS[k];
 const down = (k) => { if (!held.has(k)) { held.add(k); emu.ci.sendKeyEvent(code(k), true); } };
 const up = (k) => { if (held.has(k)) { held.delete(k); emu.ci.sendKeyEvent(code(k), false); } };
 try {
-  await route.toTrack(route.nodeDriver(emu), { circuit: CIRCUIT, log });
+  await route.toTrack(route.nodeDriver(emu), MODE === 'quickrace' ? { mode: 'quickrace', log } : { circuit: CIRCUIT, log });
   const mem = attach(emu.ci, { requireGame: true });
   const reader = createReader(mem);
   const track = readTrack(mem);
