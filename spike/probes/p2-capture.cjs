@@ -40,7 +40,9 @@ const WARP = +opt('warp', 2);
 const WALL = +opt('wall', 280);             // stop and save after this many real seconds
 const NSTOPS = +opt('stops', 12);
 const TEX_STOPS = (opt('tex-stops', '2,7') || '').split(',').filter(Boolean).map(Number);
-const MOVING_AFTER = (opt('moving', '1,4,8') || '').split(',').filter(Boolean).map(Number); // capture moving frames after these stops
+// moving frames: one per stretch between stops (index = stops done so far), taken in a turn
+// (heading change >= 120 units = 0.66 deg per frame) so the frame-to-frame camera change is visible
+const MOVING_AFTER = (opt('moving', '0,1,2,3,4,5,6,7,8,9,10,11') || '').split(',').filter(Boolean).map(Number);
 const BUNDLE = opt('bundle', path.join(__dirname, '..', 'dist', 'p2-capture-25000.jsdos'));
 const FIND_TEX = args.includes('--find-tex');
 const ALAT = +opt('alat', 55), BRAKE = +opt('brake', 70), LAG = +opt('lag', 0.25), DEADBAND = +opt('deadband', 300);
@@ -314,7 +316,7 @@ function bannerOn(img) {
 
     // ---------------------------------------------------------- main loop
     let phase = 'pit', stopCount = 0, stoppedFrames = 0, movingDone = new Set();
-    let lastProgress = { idx: -1, tick: 0 }, lastTrace = 0;
+    let lastProgress = { idx: -1, tick: 0 }, lastTrace = 0, lastViewSwitch = 0;
     log('driving out of the pit lane');
     while (wall() < WALL) {
       const s = poll();
@@ -366,7 +368,8 @@ function bannerOn(img) {
         if (tg && Math.abs(c.speed) < 40 && d < 60) stoppedFrames++; else stoppedFrames = 0;
         if (stoppedFrames >= 5) { phase = 'capture'; }
         // moving captures, once per listed stop, at speed
-        if (MOVING_AFTER.includes(stopCount) && !movingDone.has(stopCount) && c.speedMph > 70 && hist.length >= 3 && hist[hist.length - 1].tick - hist[hist.length - 3].tick < 200) {
+        const turn = hist.length >= 2 ? Math.abs(wrap16(hist[hist.length - 1].camera.heading - hist[hist.length - 2].camera.heading)) : 0;
+        if (MOVING_AFTER.includes(stopCount) && !movingDone.has(stopCount) && c.speedMph > 40 && turn >= 120 && s.tick - lastViewSwitch > 3600 && hist.length >= 3 && hist[hist.length - 1].tick - hist[hist.length - 3].tick < 200) {
           movingDone.add(stopCount);
           await capture(`moving after stop ${stopCount}`, { stop: null });
         }
@@ -395,7 +398,7 @@ function bannerOn(img) {
         }
         // drive on in a rotating view (for the moving captures)
         const driveView = ['cockpit', 'chase', 'tv'][stopCount % 3];
-        if (reader.read().view.mode !== driveView) { await tap(VIEW_KEY[driveView]); }
+        if (reader.read().view.mode !== driveView) { await tap(VIEW_KEY[driveView]); lastViewSwitch = reader.read().tick; }
         meta.stops.push(stopRec);
         stopCount++; ti++;
         lastProgress = { idx: -1, tick: 0 };

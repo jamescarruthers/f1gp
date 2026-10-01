@@ -194,86 +194,159 @@ function erode(bin, W, H, r) {
 }
 
 // ---------------------------------------------------------------- edge check
-// The game's road boundary vs the projected edges, along screen rows.
-//   img: decoded screenshot; state: readState output; track: readTrack output.
-// Steps: rasterise the road (lap + pit, depth < maxDepth) into a mask; learn
-// the frame's road colours (common inside the eroded mask, rare in the eroded
-// outside below the horizon); then on sample rows take every analytic edge
-// crossing of the lap whose pixel is not hidden by nearer road, and look for
-// the nearest road/not-road colour transition of the same orientation within
-// +-win px. Error = found - predicted (px, + = to the right).
-function edgeCheck(img, state, track, { k017c = 0x6e80, maxDepth = 4000, win = 12, rowStep = 3, minBelowHorizon = 3, vyEnd = null } = {}) {
+// The game's road boundary vs the projected road edges.
+//   img: decoded screenshot; state (or { camera, view: { mode } }); track: readTrack output.
+//   opts.ignore: Uint8Array(W*H), 1 = pixel not part of the 3D view (cockpit,
+//   own car in chase view, banner); samples whose search touches it are skipped.
+// 1. Rasterise the road (lap + pit lane, depth < maxDepth) into a mask.
+// 2. Learn the frame's colours: R (road surface) = common in the mask's
+//    interior (eroded 2 px) and rare in a band 3-12 px outside it; G (verge)
+//    = common in that band and rare inside. Anything else (white lines,
+//    kerbs, cars) is "other".
+// 3. Sample the projected left/right edges of the lap: steep edge pieces
+//    where they cross every rowStep-th row (search along the row), flat
+//    pieces where they cross every colStep-th column (search along the
+//    column). Skip samples hidden by nearer road.
+// 4. Along the search line find, nearest to the projected edge within
+//    +-win px: the inner boundary (2 R pixels on the road side, then 2 non-R)
+//    and the outer boundary (2 non-G on the road side, then 2 G).
+// 5. Error of a sample = 0 when the projected edge lies between the two
+//    boundaries (in the painted line or kerb band), else the distance to the
+//    nearer one; converted to the distance perpendicular to the edge.
+function edgeCheck(img, state, track, { k017c = 0x6e80, maxDepth = 4000, win = 10, rowStep = 3, colStep = 4, minBelowHorizon = 2, ignore = null } = {}) {
   const W = img.width, H = img.height;
   const view = state.view.mode;
   const cam3 = camera(state.camera, view, k017c);
-  const vy0 = cam3.Y0;
-  const vy1 = vyEnd !== null ? vyEnd : view === 'cockpit' ? 103 : 180;
+  const vy0 = cam3.Y0, vy1 = view === 'cockpit' ? 103 : 180;
   const quads = roadQuads(track, cam3, { maxDepth, pit: true });
   const rm = roadMask(quads, { W, H, vy0, vy1 });
-  const hy = Math.ceil(cam3.horizonY);
-  const below = (y) => y >= Math.max(vy0, hy + 1) && y < vy1;
-  // road colours
+  const yTop = Math.max(vy0, Math.ceil(cam3.horizonY) + minBelowHorizon);
+  const inView = (x, y) => x >= 0 && x < W && y >= yTop && y < vy1 && !(ignore && ignore[y * W + x]);
   const inBin = new Uint8Array(W * H), outBin = new Uint8Array(W * H);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  for (let y = yTop; y < vy1; y++) for (let x = 0; x < W; x++) {
     const o = y * W + x;
-    if (!below(y)) continue;
+    if (ignore && ignore[o]) continue;
     if (rm.mask[o]) inBin[o] = 1; else outBin[o] = 1;
   }
-  const inE = erode(inBin, W, H, 2), outE = erode(outBin, W, H, 2);
-  const hIn = histogram(img, (x, y) => inE[y * W + x]), hOut = histogram(img, (x, y) => outE[y * W + x]);
-  let nIn = 0, nOut = 0;
+  const inE = erode(inBin, W, H, 2);
+  // band 3-12 px outside the mask
+  const near12 = dilate(rm.mask, W, H, 12), near3 = dilate(rm.mask, W, H, 3);
+  const hIn = histogram(img, (x, y) => inE[y * W + x]);
+  const hBand = histogram(img, (x, y) => outBin[y * W + x] && near12[y * W + x] && !near3[y * W + x]);
+  let nIn = 0, nBand = 0;
   for (const v of hIn.values()) nIn += v;
-  for (const v of hOut.values()) nOut += v;
-  const roadSet = new Set();
-  for (const [k, v] of hIn) {
-    const fi = v / Math.max(1, nIn), fo = (hOut.get(k) || 0) / Math.max(1, nOut);
-    if (fi >= 0.01 && fi > 3 * fo) roadSet.add(k);
+  for (const v of hBand.values()) nBand += v;
+  const R = new Set(), G = new Set();
+  const keys = new Set([...hIn.keys(), ...hBand.keys()]);
+  for (const k of keys) {
+    const fi = (hIn.get(k) || 0) / Math.max(1, nIn), fb = (hBand.get(k) || 0) / Math.max(1, nBand);
+    if (fi >= 0.02 && fi > 3 * fb) R.add(k);
+    if (fb >= 0.02 && fb > 3 * fi) G.add(k);
   }
-  const isRoad = (x, y) => {
-    if (x < 0 || x >= W) return false;
-    const o = (y * W + x) * 4;
-    return roadSet.has(key(img.data[o], img.data[o + 1], img.data[o + 2]));
-  };
-  // sample rows
-  const rows = [];
-  for (let y = Math.max(vy0, hy + minBelowHorizon); y < vy1; y += rowStep) rows.push(y);
-  const meas = [];
-  for (const y of rows) {
-    const xs = edgeCrossings(track, cam3, y, { maxDepth, pit: false });
-    for (const c of xs) {
-      if (c.x < 2 || c.x > W - 3) continue;
-      const px = Math.round(c.x - 0.5);
-      const o = y * W + Math.min(W - 1, Math.max(0, px));
-      // hidden by nearer road (another part of the lap in front)?
-      if (rm.depth[o] < c.depth * 0.9) continue;
-      // orientation: where is the road? Look at the predicted mask 3 px either side
-      const l = rm.mask[y * W + Math.max(0, px - 3)] ? 1 : 0, r = rm.mask[y * W + Math.min(W - 1, px + 3)] ? 1 : 0;
-      if (l === r) continue; // a corner of the mask or road on both sides: skip
-      const roadLeft = l === 1;
-      // nearest transition in the image: boundary b between pixel b-1 and b
-      let best = null;
-      for (let d = 0; d <= win; d++) {
-        for (const b of d === 0 ? [Math.round(c.x)] : [Math.round(c.x) + d, Math.round(c.x) - d]) {
-          if (b < 2 || b > W - 2) continue;
-          const A = roadLeft ? isRoad(b - 1, y) && isRoad(b - 2, y) : !isRoad(b - 1, y) && !isRoad(b - 2, y);
-          const B = roadLeft ? !isRoad(b, y) && !isRoad(b + 1, y) : isRoad(b, y) && isRoad(b + 1, y);
-          if (A && B) { best = b; break; }
+  const colourAt = (x, y) => { const o = (y * W + x) * 4; return key(img.data[o], img.data[o + 1], img.data[o + 2]); };
+  // samples
+  const samples = [];
+  const lap = track.lap, n = lap.length;
+  for (let i = 0; i < n; i++) {
+    const s = lap[i], t = lap[(i + 1) % n];
+    if (!s || !t) continue;
+    for (const side of ['left', 'right']) {
+      let a = cam3.toCam(s[side], s.z), b = cam3.toCam(t[side], t.z);
+      if ((a[1] < NEAR && b[1] < NEAR) || (a[1] > maxDepth && b[1] > maxDepth)) continue;
+      if (a[1] < NEAR) { const k = (NEAR - a[1]) / (b[1] - a[1]); a = [a[0] + (b[0] - a[0]) * k, NEAR, a[2] + (b[2] - a[2]) * k]; }
+      if (b[1] < NEAR) { const k = (NEAR - b[1]) / (a[1] - b[1]); b = [b[0] + (a[0] - b[0]) * k, NEAR, b[2] + (a[2] - b[2]) * k]; }
+      const A = cam3.toScreen(a), B = cam3.toScreen(b);
+      const dx = B[0] - A[0], dy = B[1] - A[1], len = Math.hypot(dx, dy);
+      if (len < 0.5) continue;
+      const steep = Math.abs(dy) >= Math.abs(dx);
+      if (steep) {
+        const ya = Math.min(A[1], B[1]), yb = Math.max(A[1], B[1]);
+        for (let y = Math.ceil((ya - 0.5) / rowStep) * rowStep; y + 0.5 <= yb; y += rowStep) {
+          if (y + 0.5 < ya) continue;
+          const tt = (y + 0.5 - A[1]) / dy;
+          samples.push({ axis: 'x', q: y, p: A[0] + dx * tt, depth: A[2] + (B[2] - A[2]) * tt, f: Math.abs(dy) / len, side, index: s.index });
         }
-        if (best !== null) break;
+      } else {
+        const xa = Math.min(A[0], B[0]), xb = Math.max(A[0], B[0]);
+        for (let x = Math.ceil((xa - 0.5) / colStep) * colStep; x + 0.5 <= xb; x += colStep) {
+          if (x + 0.5 < xa) continue;
+          const tt = (x + 0.5 - A[0]) / dx;
+          samples.push({ axis: 'y', q: x, p: A[1] + dy * tt, depth: A[2] + (B[2] - A[2]) * tt, f: Math.abs(dx) / len, side, index: s.index });
+        }
       }
-      meas.push({ y, side: c.side, predicted: +c.x.toFixed(2), depth: Math.round(c.depth), index: c.index, roadLeft,
-        found: best, err: best === null ? null : +(best - c.x).toFixed(2) });
     }
   }
-  const errs = meas.filter((m) => m.err !== null).map((m) => Math.abs(m.err));
+  const meas = [];
+  for (const sm of samples) {
+    const isX = sm.axis === 'x';
+    const at = (t) => (isX ? [t, sm.q] : [sm.q, t]);
+    const pr = Math.round(sm.p - 0.5); // pixel containing the edge point
+    const [px0, py0] = at(Math.max(0, pr));
+    if (!inView(Math.min(W - 1, px0), Math.min(H - 1, py0))) continue;
+    const o = py0 * W + px0;
+    if (rm.depth[o] < sm.depth * 0.9) continue; // hidden by nearer road
+    const lo = at(pr - 3), hi = at(pr + 3);
+    const roadLo = rm.mask[lo[1] * W + lo[0]] ? 1 : 0, roadHi = rm.mask[hi[1] * W + hi[0]] ? 1 : 0;
+    if (roadLo === roadHi) continue;
+    const roadBefore = roadLo === 1; // road at the lower coordinate
+    // class of the pixel at axis position t: 'R', 'G', 'U' (other) or null (not in the 3D view)
+    const cls = (t) => { const [x, y] = at(t); if (!inView(x, y)) return null; const c = colourAt(x, y); return R.has(c) ? 'R' : G.has(c) ? 'G' : 'U'; };
+    const is = (t, c) => cls(t) === c;
+    const not = (t, c) => { const v = cls(t); return v !== null && v !== c; };
+    // boundary b lies between pixel b-1 and b
+    const isInner = (b) => roadBefore
+      ? is(b - 1, 'R') && is(b - 2, 'R') && not(b, 'R') && not(b + 1, 'R')
+      : is(b, 'R') && is(b + 1, 'R') && not(b - 1, 'R') && not(b - 2, 'R');
+    const isOuter = (b) => roadBefore
+      ? not(b - 1, 'G') && not(b - 2, 'G') && is(b, 'G') && is(b + 1, 'G')
+      : not(b, 'G') && not(b + 1, 'G') && is(b - 1, 'G') && is(b - 2, 'G');
+    const nearest = (test) => {
+      const c0 = Math.round(sm.p);
+      for (let d = 0; d <= win; d++) for (const b of d === 0 ? [c0] : [c0 + d, c0 - d]) if (test(b)) return b;
+      return null;
+    };
+    const bi = nearest(isInner), bo = nearest(isOuter);
+    const eIn = bi === null ? null : bi - sm.p, eOut = bo === null ? null : bo - sm.p;
+    let e = null;
+    if (bi !== null && bo !== null && sm.p >= Math.min(bi, bo) && sm.p <= Math.max(bi, bo)) e = 0;
+    else if (bi !== null || bo !== null) e = Math.min(bi === null ? Infinity : Math.abs(eIn), bo === null ? Infinity : Math.abs(eOut));
+    meas.push({ axis: sm.axis, q: sm.q, p: +sm.p.toFixed(2), side: sm.side, index: sm.index, depth: Math.round(sm.depth), roadBefore,
+      inner: bi, outer: bo, errInner: eIn === null ? null : +(eIn * sm.f).toFixed(2), errOuter: eOut === null ? null : +(eOut * sm.f).toFixed(2),
+      err: e === null ? null : +(e * sm.f).toFixed(2) });
+  }
+  const errs = meas.filter((m) => m.err !== null).map((m) => m.err);
+  const abs = (k) => meas.filter((m) => m[k] !== null).map((m) => Math.abs(m[k]));
+  const signed = (k) => meas.filter((m) => m[k] !== null).map((m) => m[k]);
   return {
-    rows, measurements: meas, roadColours: [...roadSet].map(hex),
-    medianAbsErr: errs.length ? median(errs) : null,
-    p90AbsErr: errs.length ? quantile(errs, 0.9) : null,
-    found: errs.length, total: meas.length,
-    within2: errs.filter((e) => e <= 2).length,
-    mask: rm, cam3, quads: quads.length, horizonY: cam3.horizonY, viewport: [vy0, vy1],
+    samples: meas.length, found: errs.length,
+    medianErr: errs.length ? median(errs) : null, p90Err: errs.length ? quantile(errs, 0.9) : null,
+    within1: errs.filter((e) => e <= 1).length, within2: errs.filter((e) => e <= 2).length,
+    medianAbsInner: abs('errInner').length ? median(abs('errInner')) : null,
+    medianAbsOuter: abs('errOuter').length ? median(abs('errOuter')) : null,
+    // signed, in the search axis' direction (+ = right/down), perpendicular distance
+    medianInner: signed('errInner').length ? median(signed('errInner')) : null,
+    medianOuter: signed('errOuter').length ? median(signed('errOuter')) : null,
+    roadColours: [...R].map(hex), vergeColours: [...G].map(hex),
+    measurements: meas, mask: rm, cam3, horizonY: cam3.horizonY, viewport: [vy0, vy1], yTop,
   };
+}
+
+function dilate(bin, W, H, r) {
+  // separable square dilation
+  const tmp = new Uint8Array(W * H), out = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    let last = -1e9;
+    for (let x = 0; x < W; x++) { if (bin[y * W + x]) last = x; if (x - last <= r) tmp[y * W + x] = 1; }
+    last = 1e9;
+    for (let x = W - 1; x >= 0; x--) { if (bin[y * W + x]) last = x; if (last - x <= r) tmp[y * W + x] = 1; }
+  }
+  for (let x = 0; x < W; x++) {
+    let last = -1e9;
+    for (let y = 0; y < H; y++) { if (tmp[y * W + x]) last = y; if (y - last <= r) out[y * W + x] = 1; }
+    last = 1e9;
+    for (let y = H - 1; y >= 0; y--) { if (tmp[y * W + x]) last = y; if (last - y <= r) out[y * W + x] = 1; }
+  }
+  return out;
 }
 
 // Draw the projected edges (lap magenta/cyan, pit yellow) over a copy of img.
@@ -306,7 +379,13 @@ function overlay(img, state, track, { k017c = 0x6e80, maxDepth = 4000, check = n
   }
   if (track.pit) for (let i = 0; i + 1 < track.pit.length; i++) { seg(track.pit[i], track.pit[i + 1], 'left', [255, 255, 0]); seg(track.pit[i], track.pit[i + 1], 'right', [255, 160, 0]); }
   // found boundaries as small green ticks
-  if (check) for (const m of check.measurements) if (m.found !== null) { plot(m.found, m.y - 1, [0, 255, 0]); plot(m.found, m.y + 1, [0, 255, 0]); }
+  // detected boundaries: outer (verge starts) green, inner (road grey ends) orange; short ticks across the search line
+  if (check) for (const m of check.measurements) {
+    for (const [b, rgb] of [[m.outer, [0, 255, 0]], [m.inner, [255, 128, 0]]]) {
+      if (b === null) continue;
+      if (m.axis === 'x') { plot(b, m.q - 1, rgb); plot(b, m.q + 1, rgb); } else { plot(m.q - 1, b, rgb); plot(m.q + 1, b, rgb); }
+    }
+  }
   return out;
 }
 
@@ -321,5 +400,5 @@ const median = (arr) => quantile(arr, 0.5);
 
 module.exports = {
   decodePng, camera, clipNear, roadQuads, fillPoly, roadMask, edgeCrossings, edgeCheck, overlay,
-  histogram, erode, key, hex, rgbOf, quantile, median, NEAR,
+  histogram, erode, dilate, key, hex, rgbOf, quantile, median, NEAR,
 };
