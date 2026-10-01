@@ -21,7 +21,7 @@
 
 import {
   makeReader, makeTrig, decodeShape, shapePoints, polygonLoop, decodeSprite, spriteLodFrame,
-  hazeLevel, assignLayers,
+  hazeLevel, assignLayers, spriteQuads,
 } from './objects.mjs';
 
 const s16 = (v) => (v << 16) >> 16;
@@ -49,10 +49,9 @@ const SS = {
   pitLo: 0x0160, pitHi: 0x0164, spriteSeg: 0x00f8, vscale: 0x017c, spriteVscale: 0x017e,
 };
 // renderer data segment (SS:00F4)
-const R = {
-  nearDepth: 0x58, mirrorLeft: 0x5a, mirrorRight: 0x5c, camAngle: 0x186, polyMode: 0xfa,
-  pitEnd: 0x182, pitMap: 0x18a, pitStart2: 0x18e, pitA: 0x1a8, pitB: 0x1b4, pitSplit: 0x1cc,
-};
+const R = { nearDepth: 0x58, mirrorLeft: 0x5a, mirrorRight: 0x5c, camAngle: 0x186, polyMode: 0xfa };
+// the pit-lane junction pointers A533 reads (game DS)
+const PJ = { pitEnd: 0x182, pitMap: 0x18a, pitStart2: 0x18e, pitA: 0x1a8, pitB: 0x1b4, pitSplit: 0x1cc };
 const PALETTE_BYTES = 0x900;
 const HAZE_SEG_REL = 0x7bce, HAZE_OFF = 0x7bc0;
 
@@ -257,12 +256,12 @@ export function selectCars(cars, states, opt = {}) {
     }
     if (CAR0 + ax === camObj && !(st.f9a & 0x08)) skipped.push({ slot, reason: 'camera object' });
     else {
-      let [sg, off] = mapPitSegment(cars, st, walk, R0);
+      let [sg, off] = mapPitSegment(cars, st, walk);
       let steps = base;
       // the first segment at or after the car's own without an object (A6AF)
       for (let guard = 0; hasObject((sg << 4) + off) && guard < 64; guard++) {
         steps++;
-        [sg, off] = nextSegment(cars, sg, off, walk, R0);
+        [sg, off] = nextSegment(cars, sg, off, walk);
       }
       const lin = (sg << 4) + off;
       taken.add(lin);
@@ -283,24 +282,24 @@ export function selectCars(cars, states, opt = {}) {
 
 // the next segment entry (A6C4-A6EE): in the pit array up to R:182, then
 // on at the far pointer R:18E; in the track array wrapping at the lap end
-function nextSegment(cars, sg, off, walk, R0) {
+function nextSegment(cars, sg, off, walk) {
   const { rd, mem } = cars;
-  const ss = mem.SS << 4;
+  const ss = mem.SS << 4, ds = mem.DS << 4;
   if (sg !== walk.trackSeg) {
     off += SEG_SIZE;
-    if (off >= rd.u16(R0 + R.pitEnd)) return [rd.u16(R0 + R.pitStart2 + 2), rd.u16(R0 + R.pitStart2)];
+    if (off >= rd.u16(ds + PJ.pitEnd)) return [rd.u16(ds + PJ.pitStart2 + 2), rd.u16(ds + PJ.pitStart2)];
     return [sg, off];
   }
   off += SEG_SIZE;
-  if (off > 0xffff || off >= rd.u16(ss + SS.lapEnd)) off -= rd.u16(ss + SS.lapBytes);
+  if ((off > 0xffff || off >= rd.u16(ss + SS.lapEnd)) && sg === rd.u16(ss + SS.trackSegVal)) off -= rd.u16(ss + SS.lapBytes);
   return [sg, off & 0xffff];
 }
 
 // A5DD-A6AB: which segment a car is filed on when it is near the pit lane:
 // pit-array cars at the two ends of the pit lane are moved onto the parallel
 // track segments; track cars at a pit junction onto the pit array; read from
-// the renderer's junction pointers.
-function mapPitSegment(cars, st, walk, R0) {
+// the junction pointers DS:0182/018A/018E/01A8/01B4/01CC and SS:0160/0164/0170.
+function mapPitSegment(cars, st, walk) {
   const { rd, mem } = cars;
   const ds = mem.DS << 4, ss = mem.SS << 4;
   const p = ds + st.ptr;
@@ -310,12 +309,12 @@ function mapPitSegment(cars, st, walk, R0) {
   const keep = [seg, di];
   const toTrack = () => {
     if (splice) return keep;
-    if (di < rd.u16(R0 + R.pitSplit)) return [tSeg, (di - rd.u16(ds + DS.pit) + rd.u16(R0 + R.pitMap)) & 0xffff];
-    return [tSeg, (di - rd.u16(R0 + R.pitSplit) + rd.u16(ds + DS.track)) & 0xffff];
+    if (di < rd.u16(ds + PJ.pitSplit)) return [tSeg, (di - rd.u16(ds + DS.pit) + rd.u16(ds + PJ.pitMap)) & 0xffff];
+    return [tSeg, (di - rd.u16(ds + PJ.pitSplit) + rd.u16(ds + DS.track)) & 0xffff];
   };
   if (!(rd.u16(ss + SS.pitWalk) & 0x8000)) {
     if (seg !== tSeg) {
-      if (di < rd.u16(R0 + R.pitA) || di >= rd.u16(R0 + R.pitB)) return toTrack();
+      if (di < rd.u16(ds + PJ.pitA) || di >= rd.u16(ds + PJ.pitB)) return toTrack();
       return keep;
     }
     if (splice) return keep;
@@ -323,18 +322,18 @@ function mapPitSegment(cars, st, walk, R0) {
     if (f === 0 || f === 3) return keep;
     let ax;
     if (f === 2) {
-      ax = (rd.u16(R0 + R.pitStart2) - di) & 0xffff;
+      ax = (rd.u16(ds + PJ.pitStart2) - di) & 0xffff;
       if (ax >= 0x8fc) return keep;
       ax = (-ax) & 0xffff;
       if (!(ax & 0x8000)) return keep;
-      ax = (ax + rd.u16(R0 + R.pitEnd)) & 0xffff;
-      if (ax > rd.u16(R0 + R.pitB)) return keep;
+      ax = (ax + rd.u16(ds + PJ.pitEnd)) & 0xffff;
+      if (ax > rd.u16(ds + PJ.pitB)) return keep;
       if (!(ax < rd.u16(ss + SS.pitHi)) && !(rd.u8(p + 0x19) & 0x80)) return keep;
     } else {
-      ax = (di - rd.u16(R0 + R.pitMap)) & 0xffff;
+      ax = (di - rd.u16(ds + PJ.pitMap)) & 0xffff;
       if (ax >= 0x8fc) return keep;
       ax = (ax + 0xd7ae) & 0xffff;
-      if (ax < rd.u16(R0 + R.pitA)) return keep;
+      if (ax < rd.u16(ds + PJ.pitA)) return keep;
       if (!(ax < rd.u16(ss + SS.pitLo)) && !(rd.u8(p + 0x19) & 0x80)) return keep;
     }
     return [pSeg, ax];
@@ -768,27 +767,34 @@ export function mirrorClip(cars) {
  * the formats of objects.mjs: buildSectorMesh's mesh (x, y, z, r, g, b per
  * vertex relative to `origin`; with opt.indexed colours are (palette index,
  * -1, 0)) holding only this frame's chosen faces, and frameObjects' result
- * (vertex indices by decal layer, sprites with their frame and mirroring)
- * for spriteQuads(mesh.sprites, atlas, cam, cars, mesh.origin, frame.sprites, mesh.placements).
+ * (vertex indices by decal layer, sprites with their frame and mirroring).
+ * Draw the triangles like the objects (one-sided: gl.CULL_FACE, front faces
+ * counter-clockwise; layer k > 0 with polygonOffset), and the bitmaps with
+ * carSpriteQuads() and the objects' sprite shader.
  *
  * @param {object} cars   readCars(mem)
- * @param {object} st     readState(mem) (the poses; use the state of the frame on screen)
+ * @param {object} st     readState(mem) (the poses; use the state of the frame shown)
  * @param {object} cam    { x, y (fine), z, heading, mode ('cockpit'|'chase'|'tv'|...) }
  * @param {object} [opt]  { origin: [x, y], indexed (default true), palette (RGB, if not indexed),
- *                          wide: true for the true ray angle (wide views), all: draw every
- *                          car record, not only the game's selection, wheelBias: depth bias of
- *                          wheel bitmaps as a fraction of their width (default 0.25) }
+ *   states: carStates() entries to draw instead of reading them (for example
+ *   lerpCarStates() between two frames), drawn: selectCars().drawn taken at the same
+ *   consistent read as the states (the selection and order to use), wide: true to take the true ray angle for
+ *   sectors and wheel frames (views wider than the game's), all: draw every car record
+ *   (not only the game's selection), wheelBias: depth bias of wheel bitmaps as a fraction
+ *   of their width (default 0.25) }
  * @returns {{ mesh, frame, list, mirrors }}
  *   list: per drawn car { slot, key, parts } (shapeParts results); mirrors: mirrorImage() results
+ *   (cars the cockpit mirrors show; the game draws them as bitmaps into its own cockpit image)
  */
 export function frameCars(cars, st, cam, opt = {}) {
   const origin = opt.origin ?? [cam.x, cam.y];
   const indexed = opt.indexed ?? true;
   const pal = opt.palette;
   const rgb = indexed ? (i) => [i, -1, 0] : (i) => [pal[i * 3] / 255, pal[i * 3 + 1] / 255, pal[i * 3 + 2] / 255];
-  const states = carStates(cars, st);
+  const states = opt.states ?? carStates(cars, st);
   let chosen;
-  if (opt.all) chosen = states.filter((c) => c.pos !== 'none' && !(c.f96 & 0x80)).map((c) => ({ slot: c.slot, state: c, key: 0 }));
+  if (opt.drawn) chosen = opt.drawn.map((e) => ({ ...e, state: states[e.slot] ?? e.state }));
+  else if (opt.all) chosen = states.filter((c) => c.pos !== 'none' && !(c.f96 & 0x80)).map((c) => ({ slot: c.slot, state: c, key: 0 }));
   else chosen = selectCars(cars, states).drawn;
   const camObjSlot = st.view && st.view.mode === 'cockpit' ? st.view.viewedSlot : null;
   const data = [], vobj = [], lines = [], lineObj = [], sprites = [], objects = [], placements = [];
@@ -801,9 +807,13 @@ export function frameCars(cars, st, cam, opt = {}) {
     if (opt.all && c.slot === camObjSlot && !(c.f9a & 0x08)) continue;
     const cp = carParts(cars, c, cam, { wide: opt.wide, cameraObject: c.slot === camObjSlot });
     list.push({ slot: c.slot, key: e.key, parts: cp.parts });
+    // parts painted after the car (broken wings over its own wings) go on higher decal layers
+    let layerBase = 0, carTop = 0, carSeen = false;
     for (const part of cp.parts) {
-      if (part.kind === 'mirror') { const m = mirrorImage(cars, c, cam, opt.game); if (m) mirrors.push({ slot: c.slot, ...m }); continue; }
+      if (part.kind === 'mirror') { const m = mirrorImage(cars, c, cam); if (m) mirrors.push({ slot: c.slot, ...m }); continue; }
+      if (part.what === 'car') carSeen = true;
       if (part.kind === 'none') continue;
+      layerBase = part.what !== 'car' && carSeen ? carTop + 1 : 0;
       const oi = objects.length;
       const ref = part.ref;
       objects.push({ x: ref[0] - origin[0], y: ref[1] - origin[1], z: ref[2], size: part.shape ? part.shape.size : 0, slot: c.slot, what: part.what, haze: part.haze ?? 0 });
@@ -828,8 +838,10 @@ export function frameCars(cars, st, cam, opt = {}) {
       for (const poly of polys) {
         const P = [...poly.pts].reverse();
         const col = rgb(poly.colour);
-        while (layers.length <= poly.layer) layers.push([]);
-        for (const t of fan(P)) for (const k of t) { layers[poly.layer].push(data.length / 6); vtx(P[k], col, oi); }
+        const layer = layerBase + poly.layer;
+        if (part.what === 'car') carTop = Math.max(carTop, layer);
+        while (layers.length <= layer) layers.push([]);
+        for (const t of triangulate(P)) for (const k of t) { layers[layer].push(data.length / 6); vtx(P[k], col, oi); }
       }
       placements.push({ centre: [ref[0] - origin[0], ref[1] - origin[1], ref[2]], yaw: part.pose.yaw, object: oi, palette: part.pose.palette, slot: c.slot, what: part.what });
     }
@@ -843,6 +855,51 @@ export function frameCars(cars, st, cam, opt = {}) {
   return { mesh, frame, list, mirrors };
 }
 
+/**
+ * Camera-facing quads for frameCars' bitmaps (wheels, helmets, far cars,
+ * effects), in the vertex format of objects.mjs spriteQuads (x, y, z relative
+ * to the mesh origin, atlas u, v, palette offset, depth bias; 7 floats per
+ * vertex, 6 vertices per bitmap), with each bitmap's own depth bias: a wheel
+ * is pulled a quarter of its width towards the camera, a helmet half its
+ * width, a far car none.
+ * @param {object} fc     frameCars() result
+ * @param {object} atlas  objects.mjs buildSpriteAtlas(objs or cars, ids including carSpriteIds(cars))
+ * @param {object} cam    { x, y (fine), heading }
+ * @param {object} cars   readCars() (scale constants)
+ */
+export function carSpriteQuads(fc, atlas, cam, cars) {
+  const parts = [];
+  let n = 0;
+  for (const f of fc.frame.sprites) {
+    const s = fc.mesh.sprites[f.sprite];
+    const q = spriteQuads([s], atlas, cam, cars, fc.mesh.origin, [{ sprite: 0, id: f.id, mirrored: f.mirrored }]);
+    for (let k = 6; k < q.length; k += 7) q[k] = s.bias;
+    parts.push(q);
+    n += q.length;
+  }
+  const out = new Float32Array(n);
+  let o = 0;
+  for (const q of parts) { out.set(q, o); o += q.length; }
+  return out;
+}
+
+/**
+ * Car states between two frames (t = 0 .. 1), for drawing between the game's
+ * frames: position, height, yaw (the short way round), pitch and steering
+ * eased; everything else from b. Cars that jump more than 64 ft are not eased.
+ */
+export function lerpCarStates(a, b, t) {
+  const ang = (u, v) => (u + Math.round(s16((v - u) & 0xffff) * t)) & 0xffff;
+  return b.map((cb, i) => {
+    const ca = a[i];
+    if (!ca || Math.abs(cb.x - ca.x) + Math.abs(cb.y - ca.y) > 64 * 64) return cb;
+    return {
+      ...cb, x: ca.x + (cb.x - ca.x) * t, y: ca.y + (cb.y - ca.y) * t, z: ca.z + (cb.z - ca.z) * t,
+      yaw: ang(ca.yaw, cb.yaw), pitch: ang(ca.pitch, cb.pitch), steer: Math.round(ca.steer + (cb.steer - ca.steer) * t),
+    };
+  });
+}
+
 function normalOf(P) {
   let nx = 0, ny = 0, nz = 0;
   for (let i = 0; i < P.length; i++) {
@@ -852,11 +909,37 @@ function normalOf(P) {
   return [nx, ny, nz];
 }
 
-// the car's polygons are convex (triangles and quads); a fan keeps the winding
-function fan(P) {
-  const t = [];
-  for (let k = 1; k + 1 < P.length; k++) t.push([0, k, k + 1]);
-  return t;
+// ear clipping in the polygon's plane (keeps the winding); a fan when that fails
+function triangulate(P) {
+  const m = P.length;
+  if (m < 3) return [];
+  if (m === 3) return [[0, 1, 2]];
+  const n = normalOf(P);
+  const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+  const [i0, i1, flip] = az >= ax && az >= ay ? [0, 1, n[2] < 0] : ax >= ay ? [1, 2, n[0] < 0] : [2, 0, n[1] < 0];
+  const Q = P.map((p) => [p[i0], p[i1]]);
+  const cross = (o, a, b) => (Q[a][0] - Q[o][0]) * (Q[b][1] - Q[o][1]) - (Q[a][1] - Q[o][1]) * (Q[b][0] - Q[o][0]);
+  const sign = flip ? -1 : 1;
+  const idx = [...Array(m).keys()], tris = [];
+  for (let guard = 0; idx.length > 3 && guard < 200; guard++) {
+    let cut = false;
+    for (let k = 0; k < idx.length; k++) {
+      const a = idx[(k + idx.length - 1) % idx.length], b = idx[k], c = idx[(k + 1) % idx.length];
+      if (sign * cross(a, b, c) <= 0) continue;
+      let inside = false;
+      for (const o of idx) {
+        if (o === a || o === b || o === c) continue;
+        if (sign * cross(a, b, o) > 0 && sign * cross(b, c, o) > 0 && sign * cross(c, a, o) > 0) { inside = true; break; }
+      }
+      if (inside) continue;
+      tris.push([a, b, c]); idx.splice(k, 1); cut = true;
+      break;
+    }
+    if (!cut) break;
+  }
+  if (idx.length === 3) tris.push([idx[0], idx[1], idx[2]]);
+  else for (let k = 1; k + 1 < idx.length; k++) tris.push([idx[0], idx[k], idx[k + 1]]);
+  return tris;
 }
 
 /**

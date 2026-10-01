@@ -28,6 +28,7 @@ import { readCars, carStates, selectCars, carParts, frameCars, mirrorImage, mirr
 import { W, HGT, NEAR, toCam, projGame, clipNear, fillPoly, screenArea, drawSprite, walkOf } from './p2-objects-lib.mjs';
 
 const K = ((0x6e80 * 2) / 65536) * 32;
+const camYawX = (st) => st.camera.x >> 8, camYawY = (st) => st.camera.y >> 8;
 
 function trackDepth(data, origin, cam, first = 0, count = data.length / 6) {
   const depth = new Float32Array(W * HGT).fill(Infinity);
@@ -109,7 +110,13 @@ export function drawFrame(a) {
   });
   const sel = selectCars(cars, states);
   const camC = { x: st.camera.x >> 8, y: st.camera.y >> 8, z: st.camera.z, heading: camYaw, mode: st.view.mode };
-  if (carMode !== 'none') for (const e of sel.drawn) items.push({ kind: 'car', e, key: e.key, list: 0 });
+  let drawnList = sel.drawn;
+  if (a.ablate === 'all') {
+    // every car not hidden (car+96 bit 80h) and not the cockpit's own car, ordered by distance
+    drawnList = states.filter((c) => c.pos !== 'none' && !(c.f96 & 0x80) && !(st.view.mode === 'cockpit' && c.slot === st.view.viewedSlot))
+      .map((c) => { const d = Math.hypot(c.x - camYawX(st), c.y - camYawY(st)) / 1024; return { slot: c.slot, state: c, key: d, ahead: d }; });
+  }
+  if (carMode !== 'none') for (const e of drawnList) items.push({ kind: 'car', e, key: e.key, list: 0 });
   // far to near; at equal keys the "later" list (cars, objects with setting +1 bit 7) first
   if (a.ablate === 'order') items.sort((u, v) => (u.kind === 'car' ? 1 : 0) - (v.kind === 'car' ? 1 : 0) || v.key - u.key);
   else items.sort((u, v) => v.key - u.key || u.list - v.list || (v.e?.ahead ?? 0) - (u.e?.ahead ?? 0));
@@ -208,6 +215,7 @@ export function drawFrame(a) {
 
   // one car (and its effect shapes), game rules: painter's order inside the car
   const gc = gameCamera(cars);
+  const hazedCar = a.ablate === 'nohaze' ? (c) => c : hazed;
   const drawCarGame = (e) => {
     const c = e.state;
     const cp = carParts(cars, c, camC, { game: a.ablate === 'float' ? null : gc, cameraObject: st.view.mode === 'cockpit' && c.slot === st.view.viewedSlot });
@@ -221,7 +229,7 @@ export function drawFrame(a) {
         mirrors.push({ slot: c.slot, ...m });
         // the far bitmap, anchor at row 123, clipped to the mirror outlines
         const spr = cars.sprite(m.id), lvl = hazeLevel(m.depth8);
-        drawSprite(cars, spr, m.id, m.x, 123, m.depth8, m.mirrored, (k) => hazed(cars.palettes[(m.palette + k) & 0xffff], lvl), (x, y, col) => {
+        drawSprite(cars, spr, m.id, m.x, 123, m.depth8, m.mirrored, (k) => hazedCar(cars.palettes[(m.palette + k) & 0xffff], lvl), (x, y, col) => {
           const cl = clip[y - 116];
           if (!cl || !cl.active || x < cl.left || x >= cl.right || (x >= cl.gapLeft && x < cl.gapRight)) return;
           tmp.set(y * W + x, [col, 0, 4]);
@@ -249,7 +257,7 @@ export function drawFrame(a) {
             scr = out.map((p) => { const [x, y] = gameProject(gc, { lat: Math.trunc(p.lat), dep: p.dep, dz: Math.trunc(p.dz) }, near); return [x, y + cam.top, k / p.dep]; });
           }
           if (screenArea(scr) <= 0) continue;
-          const col = hazed(el.colour, part.haze);
+          const col = hazedCar(el.colour, part.haze);
           fillPoly(scr, cam.top, cam.top + cam.rows, (x, y, d) => tmp.set(y * W + x, [col, d, kindCode]));
         } else if (el.kind === 'bitmap') {
           const g = el.g;
@@ -259,7 +267,7 @@ export function drawFrame(a) {
           const spr = cars.sprite(el.id);
           const D8 = Math.floor(g.dep / k);
           const lvl = hazeLevel(D8);
-          drawSprite(cars, spr, el.id, sx, sy, D8, el.mirrored, (kk) => hazed(cars.palettes[(el.palette + kk) & 0xffff], lvl), (x, y, col) => put(x, y, col, g.dep / k), cam.rows);
+          drawSprite(cars, spr, el.id, sx, sy, D8, el.mirrored, (kk) => hazedCar(cars.palettes[(el.palette + kk) & 0xffff], lvl), (x, y, col) => put(x, y, col, g.dep / k), cam.rows);
         }
       }
     }
