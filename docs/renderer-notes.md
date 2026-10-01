@@ -109,6 +109,17 @@ byte means "an object is in this segment". SC 0F47:343A, 354F, 3306. DT: in
 21 captures every one of 280 cross-sections was at a segment flagged this
 way; the running set was not modelled, so the flags alone over-predict.
 
+Between cross-sections the road is a straight polygon, so on a hill it
+follows the chord, not the segments' heights. Near the camera this shows: in
+a TV view on the Imola hill (segment 757) no road-edge cross-section lies
+between segment 746 (behind the camera) and 757, and the chord passes up to
+101/64 ft (1.6 ft) from the true height; projected, the game's road edge sits
+1–12 px lower on the screen than the true edge, most at the nearest segments.
+A Magny-Cours hill frame shows the same (segments 653–661, up to 37/64 ft,
+1–6 px). These are the two frames that were 4–5 px off in the alignment
+check. Our renderer keeps the true heights. DT (`hillsegs.py`, `hillpx.py`
+on RAM captures from `probes/p2-capture.cjs --ram`).
+
 The colour rows also change with distance: kerbs and white lines use a "far"
 row beyond 9 segments, a "near" row at 5–9 and a "nearest" row at 0–4. SC
 0F47:367E; DT (all kerb records beyond 9 segments carried the plain white

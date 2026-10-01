@@ -2,7 +2,7 @@
 // with the exact game state, at points spread round the lap of one circuit.
 //
 //   node build-bundle.mjs --autoexec "gp /g" --cycles 25000 --out dist/p2-capture-25000.jsdos
-//   timeout 300 node probes/p2-capture.cjs --circuit Italy [--warp 2] [--wall 280]
+//   timeout 300 node probes/p2-capture.cjs --circuit Italy [--warp 2] [--wall 280] [--ram] [--out DIR]
 //   node probes/p2-capture-check.cjs            # overlays, index.json, colours.json
 //
 // Method (from probes/p2-proto.cjs): route.toTrack to "Practise any
@@ -57,6 +57,7 @@ const TEX_STOPS = (opt('tex-stops', '2,7') || '').split(',').filter(Boolean).map
 const MOVING_AFTER = (opt('moving', '0,1,2,3,4,5,6,7,8,9,10,11') || '').split(',').filter(Boolean).map(Number);
 const BUNDLE = opt('bundle', path.join(__dirname, '..', 'dist', 'p2-capture-25000.jsdos'));
 const FIND_TEX = args.includes('--find-tex');
+const SAVE_RAM = args.includes('--ram');   // also save <k>.ram (1 MB of guest RAM) with each frame
 const ALAT = +opt('alat', 55), BRAKE = +opt('brake', 70), LAG = +opt('lag', 0.25), DEADBAND = +opt('deadband', 300);
 const BSTOP = +opt('bstop', 45);            // ft/s^2 used to plan a stop at a target
 
@@ -73,7 +74,7 @@ const FILE_OF = { 'United States': 1, Brazil: 2, 'San Marino': 3, Monaco: 4, Can
   Germany: 9, Hungary: 10, Belgium: 11, Italy: 12, Portugal: 13, Spain: 14, Japan: 15, Australia: 16 };
 if (!FILE_OF[CIRCUIT]) throw new Error(`unknown circuit ${CIRCUIT}; one of ${CIRCUIT_ROUTE.join(', ')}`);
 const NN = String(FILE_OF[CIRCUIT]).padStart(2, '0');
-const OUT = path.join(__dirname, '..', 'out', 'p2-ref', NN);
+const OUT = opt('out') ? path.resolve(opt('out'), NN) : path.join(__dirname, '..', 'out', 'p2-ref', NN);
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -124,6 +125,7 @@ function bannerOn(img) {
   try {
     meta.route = await route.toTrack(drv, { circuit: CIRCUIT, log });
     const mem = attach(emu.ci, { requireGame: true });
+    meta.imageSeg = mem.imageSeg;
     const reader = createReader(mem);
     const readTex = () => {
       if (!TEXTURE_ADDR) return null;
@@ -301,6 +303,7 @@ function bannerOn(img) {
       };
       fs.writeFileSync(path.join(OUT, `${name}.png`), encodePng(img.width, img.height, img.data, 4));
       fs.writeFileSync(path.join(OUT, `${name}.json`), JSON.stringify(rec));
+      if (SAVE_RAM) fs.writeFileSync(path.join(OUT, `${name}.ram`), mem.snapshot(0, 0x100000));
       meta.captures.push({ k, label, view: rec.view, tick: state.tick, banner: rec.banner, moving: rec.moving, texture: rec.texture.raw, detail: set.detail,
         trackIndex: state.cars[player].trackIndex, speed: state.cars[player].speed, camStatic: sameCam });
       log(`capture ${name} ${label} view=${rec.view} tick=${state.tick} idx=${state.cars[player].trackIndex} v=${state.cars[player].speedMph} banner=${rec.banner} static=${sameCam} paused ${Date.now() - pausedAt} ms`);

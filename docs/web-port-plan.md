@@ -195,8 +195,10 @@ Progress:
   Projected from the game's camera, the track edges land on the game's road
   edges with a median error of 0–0.3 px on every circuit, and 97% of edge
   samples within 2 px (`spike/tests/p2-alignment.test.mjs`). Two TV frames
-  on hills (Imola, Magny-Cours) are 4–5 px off near the camera; the cause is
-  not known yet.
+  on hills (Imola, Magny-Cours) are 4–5 px off near the camera. The cause is
+  the game's, not ours: it builds cross-sections only at flagged segments,
+  so on a hill its road runs as a straight chord over up to 11 segments,
+  up to 1.6 ft from the track's true height. We keep the true heights.
 - **What the game draws for the track is decoded** (`docs/renderer-notes.md`):
   road edges, white lines, kerbs with their stripes and end ramps, fences,
   road markings, colours, sky and horizon image. 3,657 of 3,664 points the
@@ -213,8 +215,9 @@ Progress:
   rules at 320×200, 95.6% of pixels inside objects have the game's colour
   over 576 frames on all 16 circuits (97.5% at Monza). The WebGL view draws
   them too; there one-pixel edge rounding brings the figure to about 88%.
-- **Still to do:** the game's crowd pattern in the stands (now flat colour),
-  distance haze (optional), and the two TV frames on hills.
+- **Crowd in the stands: done.** The WebGL view fills the crowd colour with
+  the game's crowd strip, row by row, as the game does in races.
+- **Still to do:** distance haze (optional).
 
 Main risk: the scenery. How the game builds walls, fences, verges and
 buildings from the track file's commands and objects is only partly
