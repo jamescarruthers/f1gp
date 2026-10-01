@@ -41,7 +41,7 @@ const WALL = +opt('wall', 280);             // stop and save after this many rea
 const NSTOPS = +opt('stops', 12);
 const TEX_STOPS = (opt('tex-stops', '2,7') || '').split(',').filter(Boolean).map(Number);
 // moving frames: one per stretch between stops (index = stops done so far), taken in a turn
-// (heading change >= 120 units = 0.66 deg per frame) so the frame-to-frame camera change is visible
+// above 70 mph (heading change >= 150 units = 0.8 deg per frame) so the frame-to-frame camera change is visible
 const MOVING_AFTER = (opt('moving', '0,1,2,3,4,5,6,7,8,9,10,11') || '').split(',').filter(Boolean).map(Number);
 const BUNDLE = opt('bundle', path.join(__dirname, '..', 'dist', 'p2-capture-25000.jsdos'));
 const FIND_TEX = args.includes('--find-tex');
@@ -275,11 +275,14 @@ function bannerOn(img) {
         texture: { on: set.textureRaw === null ? null : (set.textureRaw & 0x80) !== 0, raw: set.textureRaw, address: TEXTURE_ADDR, ss00C0: set.texture2, toggledFromDefault: !!extra.texToggled },
         detail: { level: set.detail, address: `DS:${DETAIL_DS.toString(16).padStart(4, '0')}` },
         banner: bannerOn(img),
-        moving: state.cars[state.view.viewedSlot ?? player].speed !== 0,
+        // at a stop the speed field jitters at 8-20 (< 0.3 ft/s) with no keys held
+        moving: Math.abs(state.cars[state.view.viewedSlot ?? player].speed) >= 40,
         stateUnchangedWhilePaused: state2.tick === state.tick && JSON.stringify(state2.camera) === JSON.stringify(state.camera),
         historyCameraStatic: sameCam,
         history: h,
         extra: { ss017C: mem.ss.u16(0x017c), viewportRows: mem.ss.s16(0x0132), horizonRow: mem.ss.s16(0x0130), trackSameAsTrackJson: tKey === trackKey,
+          // frame phase at the pause: 300 Hz ticks since the last flip (SS:05C8), ticks the last frame's work took (DS:2C63)
+          ticksSinceFlip: mem.ss.u16(0x05c8), ticksUsed: mem.ds.u16(0x2c63), ticksPerFrame: mem.ss.u16(0x1230),
           wallSeconds: +wall().toFixed(1) },
         ...extra,
         state,
@@ -369,7 +372,7 @@ function bannerOn(img) {
         if (stoppedFrames >= 5) { phase = 'capture'; }
         // moving captures, once per listed stop, at speed
         const turn = hist.length >= 2 ? Math.abs(wrap16(hist[hist.length - 1].camera.heading - hist[hist.length - 2].camera.heading)) : 0;
-        if (MOVING_AFTER.includes(stopCount) && !movingDone.has(stopCount) && c.speedMph > 40 && turn >= 120 && s.tick - lastViewSwitch > 3600 && hist.length >= 3 && hist[hist.length - 1].tick - hist[hist.length - 3].tick < 200) {
+        if (MOVING_AFTER.includes(stopCount) && !movingDone.has(stopCount) && c.speedMph > 70 && turn >= 150 && s.tick - lastViewSwitch > 3600 && hist.length >= 3 && hist[hist.length - 1].tick - hist[hist.length - 3].tick < 200) {
           movingDone.add(stopCount);
           await capture(`moving after stop ${stopCount}`, { stop: null });
         }

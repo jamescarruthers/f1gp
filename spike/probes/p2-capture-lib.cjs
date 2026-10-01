@@ -83,9 +83,17 @@ function clipNear(poly) {
   return out;
 }
 
+// Lap segments near the viewed car: [centre - behind, centre + ahead] (null = all).
+// Parts of the lap that pass close by but are far along the track (Monaco)
+// are not drawn by the game, so they are left out of the check.
+function segWindow(n, centre, { behind = 40, ahead = 100 } = {}) {
+  if (centre === null || centre === undefined) return () => true;
+  return (i) => { let d = (i - centre + n) % n; if (d > n / 2) d -= n; return d >= -behind && d <= ahead; };
+}
+
 // Road quads of the lap (and the pit lane) as camera-space polygons.
 // Each quad: segment i to i+1, corners left_i, right_i, right_i+1, left_i+1.
-function roadQuads(track, cam3, { maxDepth = 4000, pit = true } = {}) {
+function roadQuads(track, cam3, { maxDepth = 4000, pit = true, inWindow = () => true } = {}) {
   const quads = [];
   const add = (s, t, kind, index) => {
     if (!s || !t) return;
@@ -98,7 +106,7 @@ function roadQuads(track, cam3, { maxDepth = 4000, pit = true } = {}) {
     quads.push({ kind, index, poly: c.map((v) => cam3.toScreen(v)), depth: (minD + maxD) / 2, minD, maxD });
   };
   const lap = track.lap, n = lap.length;
-  for (let i = 0; i < n; i++) add(lap[i], lap[(i + 1) % n], 1, i);
+  for (let i = 0; i < n; i++) if (inWindow(i)) add(lap[i], lap[(i + 1) % n], 1, i);
   if (pit && track.pit) for (let i = 0; i + 1 < track.pit.length; i++) add(track.pit[i], track.pit[i + 1], 2, track.pit[i].index);
   return quads;
 }
@@ -210,17 +218,22 @@ function erode(bin, W, H, r) {
 // 4. Along the search line find, nearest to the projected edge within
 //    +-win px: the inner boundary (2 R pixels on the road side, then 2 non-R)
 //    and the outer boundary (2 non-G on the road side, then 2 G).
-// 5. Error of a sample = 0 when the projected edge lies between the two
-//    boundaries (in the painted line or kerb band), else the distance to the
-//    nearer one; converted to the distance perpendicular to the edge.
-function edgeCheck(img, state, track, { k017c = 0x6e80, maxDepth = 4000, win = 10, rowStep = 3, colStep = 4, minBelowHorizon = 2, ignore = null } = {}) {
+//    Also a painted edge line: a run of 1-4 near-white pixels next to one of
+//    the main road colours (those making up 90% of the interior) (needed where the verge has the road's colours, as at Monaco).
+// 5. Error of a sample = 0 when the projected edge lies between the inner
+//    and outer boundary (the painted line or kerb band) or on the line, else
+//    the distance to the nearest of them; converted to the distance
+//    perpendicular to the edge.
+function edgeCheck(img, state, track, { k017c = 0x6e80, maxDepth = 4000, win = 10, rowStep = 3, colStep = 4, ignore = null, centre = null, window = undefined } = {}) {
   const W = img.width, H = img.height;
   const view = state.view.mode;
   const cam3 = camera(state.camera, view, k017c);
   const vy0 = cam3.Y0, vy1 = view === 'cockpit' ? 103 : 180;
-  const quads = roadQuads(track, cam3, { maxDepth, pit: true });
+  const inWindow = segWindow(track.lap.length, centre, window);
+  const quads = roadQuads(track, cam3, { maxDepth, pit: true, inWindow });
   const rm = roadMask(quads, { W, H, vy0, vy1 });
-  const yTop = Math.max(vy0, Math.ceil(cam3.horizonY) + minBelowHorizon);
+  // the whole viewport: uphill road can lie above the horizon row (Monaco, cockpit pitched up)
+  const yTop = vy0;
   const inView = (x, y) => x >= 0 && x < W && y >= yTop && y < vy1 && !(ignore && ignore[y * W + x]);
   const inBin = new Uint8Array(W * H), outBin = new Uint8Array(W * H);
   for (let y = yTop; y < vy1; y++) for (let x = 0; x < W; x++) {
@@ -244,12 +257,21 @@ function edgeCheck(img, state, track, { k017c = 0x6e80, maxDepth = 4000, win = 1
     if (fb >= 0.02 && fb > 3 * fi) G.add(k);
   }
   const colourAt = (x, y) => { const o = (y * W + x) * 4; return key(img.data[o], img.data[o + 1], img.data[o + 2]); };
+  // how much of the band just outside the road has the road's own colours
+  // (the most common inside colours that make up 90% of the interior)
+  const top = [...hIn.entries()].sort((a, b) => b[1] - a[1]);
+  const roadMain = new Set();
+  let acc = 0;
+  for (const [k, v] of top) { if (acc >= 0.9 * nIn) break; roadMain.add(k); acc += v; }
+  let bandRoad = 0;
+  for (const [k, v] of hBand) if (roadMain.has(k)) bandRoad += v;
+  const vergeLikeRoad = nBand ? bandRoad / nBand : null;
   // samples
   const samples = [];
   const lap = track.lap, n = lap.length;
   for (let i = 0; i < n; i++) {
     const s = lap[i], t = lap[(i + 1) % n];
-    if (!s || !t) continue;
+    if (!s || !t || !inWindow(i)) continue;
     for (const side of ['left', 'right']) {
       let a = cam3.toCam(s[side], s.z), b = cam3.toCam(t[side], t.z);
       if ((a[1] < NEAR && b[1] < NEAR) || (a[1] > maxDepth && b[1] > maxDepth)) continue;
@@ -307,26 +329,54 @@ function edgeCheck(img, state, track, { k017c = 0x6e80, maxDepth = 4000, win = 1
     };
     const bi = nearest(isInner), bo = nearest(isOuter);
     const eIn = bi === null ? null : bi - sm.p, eOut = bo === null ? null : bo - sm.p;
-    let e = null;
-    if (bi !== null && bo !== null && sm.p >= Math.min(bi, bo) && sm.p <= Math.max(bi, bo)) e = 0;
-    else if (bi !== null || bo !== null) e = Math.min(bi === null ? Infinity : Math.abs(eIn), bo === null ? Infinity : Math.abs(eOut));
+    // painted edge line: a run of 1-4 near-white pixels with road colour within 2 px on the road side
+    // (where the verge has the road's colour, e.g. Monaco's pavements, the line is the only sign of the edge)
+    const bright = (t) => { const [x, y] = at(t); if (!inView(x, y)) return false; const o = (y * W + x) * 4; return img.data[o] + img.data[o + 1] + img.data[o + 2] >= 600; };
+    let line = null;
+    {
+      const c0 = Math.round(sm.p - 0.5);
+      for (let d = 0; d <= win && !line; d++) {
+        for (const t of d === 0 ? [c0] : [c0 + d, c0 - d]) {
+          if (!bright(t)) continue;
+          let a = t, b = t;
+          while (b - a < 5 && bright(a - 1)) a--;
+          while (b - a < 5 && bright(b + 1)) b++;
+          if (b - a > 3) continue; // a wall or a big white area, not a line
+          const roadSide = roadBefore ? [a - 1, a - 2] : [b + 1, b + 2];
+          if (!roadSide.some((u) => { const [x, y] = at(u); return inView(x, y) && roadMain.has(colourAt(x, y)); })) continue;
+          line = [a, b + 1]; // boundaries: from the line's first pixel to after its last
+          break;
+        }
+      }
+    }
+    const eLine = line === null ? null : sm.p >= line[0] - 0.5 && sm.p <= line[1] + 0.5 ? 0 : Math.min(Math.abs(line[0] - sm.p), Math.abs(line[1] - sm.p));
+    let e = null, by = null;
+    if (bi !== null && bo !== null && sm.p >= Math.min(bi, bo) && sm.p <= Math.max(bi, bo)) { e = 0; by = 'band'; }
+    else if (bi !== null || bo !== null) {
+      const a = bi === null ? Infinity : Math.abs(eIn), b = bo === null ? Infinity : Math.abs(eOut);
+      e = Math.min(a, b); by = a <= b ? 'inner' : 'outer';
+    }
+    if (eLine !== null && (e === null || eLine < e)) { e = eLine; by = 'line'; }
     meas.push({ axis: sm.axis, q: sm.q, p: +sm.p.toFixed(2), side: sm.side, index: sm.index, depth: Math.round(sm.depth), roadBefore,
-      inner: bi, outer: bo, errInner: eIn === null ? null : +(eIn * sm.f).toFixed(2), errOuter: eOut === null ? null : +(eOut * sm.f).toFixed(2),
-      err: e === null ? null : +(e * sm.f).toFixed(2) });
+      inner: bi, outer: bo, line, errInner: eIn === null ? null : +(eIn * sm.f).toFixed(2), errOuter: eOut === null ? null : +(eOut * sm.f).toFixed(2),
+      err: e === null ? null : +(e * sm.f).toFixed(2), by });
   }
   const errs = meas.filter((m) => m.err !== null).map((m) => m.err);
   const abs = (k) => meas.filter((m) => m[k] !== null).map((m) => Math.abs(m[k]));
   const signed = (k) => meas.filter((m) => m[k] !== null).map((m) => m[k]);
+  const byEvidence = {};
+  for (const m of meas) if (m.by) byEvidence[m.by] = (byEvidence[m.by] || 0) + 1;
   return {
-    samples: meas.length, found: errs.length,
+    samples: meas.length, found: errs.length, byEvidence,
     medianErr: errs.length ? median(errs) : null, p90Err: errs.length ? quantile(errs, 0.9) : null,
+    meanErr: errs.length ? +(errs.reduce((a, b) => a + b, 0) / errs.length).toFixed(3) : null,
     within1: errs.filter((e) => e <= 1).length, within2: errs.filter((e) => e <= 2).length,
     medianAbsInner: abs('errInner').length ? median(abs('errInner')) : null,
     medianAbsOuter: abs('errOuter').length ? median(abs('errOuter')) : null,
     // signed, in the search axis' direction (+ = right/down), perpendicular distance
     medianInner: signed('errInner').length ? median(signed('errInner')) : null,
     medianOuter: signed('errOuter').length ? median(signed('errOuter')) : null,
-    roadColours: [...R].map(hex), vergeColours: [...G].map(hex),
+    roadColours: [...R].map(hex), vergeColours: [...G].map(hex), vergeLikeRoad: vergeLikeRoad === null ? null : +vergeLikeRoad.toFixed(3),
     measurements: meas, mask: rm, cam3, horizonY: cam3.horizonY, viewport: [vy0, vy1], yTop,
   };
 }
@@ -350,7 +400,8 @@ function dilate(bin, W, H, r) {
 }
 
 // Draw the projected edges (lap magenta/cyan, pit yellow) over a copy of img.
-function overlay(img, state, track, { k017c = 0x6e80, maxDepth = 4000, check = null } = {}) {
+function overlay(img, state, track, { k017c = 0x6e80, maxDepth = 4000, check = null, centre = null, window = undefined } = {}) {
+  const inWindow = segWindow(track.lap.length, centre, window);
   const out = { width: img.width, height: img.height, data: Uint8Array.from(img.data) };
   const cam3 = camera(state.camera, state.view.mode, k017c);
   const plot = (x, y, rgb) => {
@@ -375,13 +426,14 @@ function overlay(img, state, track, { k017c = 0x6e80, maxDepth = 4000, check = n
   for (let i = 0; i < n; i++) {
     const s = lap[i], t = lap[(i + 1) % n];
     if (!s || !t) continue;
-    seg(s, t, 'left', [255, 0, 255]); seg(s, t, 'right', [0, 255, 255]);
+    // lap parts far along the track from the viewed car: dark grey
+    if (inWindow(i)) { seg(s, t, 'left', [255, 0, 255]); seg(s, t, 'right', [0, 255, 255]); } else { seg(s, t, 'left', [90, 90, 90]); seg(s, t, 'right', [60, 60, 60]); }
   }
   if (track.pit) for (let i = 0; i + 1 < track.pit.length; i++) { seg(track.pit[i], track.pit[i + 1], 'left', [255, 255, 0]); seg(track.pit[i], track.pit[i + 1], 'right', [255, 160, 0]); }
   // found boundaries as small green ticks
   // detected boundaries: outer (verge starts) green, inner (road grey ends) orange; short ticks across the search line
   if (check) for (const m of check.measurements) {
-    for (const [b, rgb] of [[m.outer, [0, 255, 0]], [m.inner, [255, 128, 0]]]) {
+    for (const [b, rgb] of [[m.outer, [0, 255, 0]], [m.inner, [255, 128, 0]], [m.line ? (m.line[0] + m.line[1]) / 2 : null, [255, 255, 255]]]) {
       if (b === null) continue;
       if (m.axis === 'x') { plot(b, m.q - 1, rgb); plot(b, m.q + 1, rgb); } else { plot(m.q - 1, b, rgb); plot(m.q + 1, b, rgb); }
     }
@@ -399,6 +451,6 @@ function quantile(arr, q) {
 const median = (arr) => quantile(arr, 0.5);
 
 module.exports = {
-  decodePng, camera, clipNear, roadQuads, fillPoly, roadMask, edgeCrossings, edgeCheck, overlay,
+  decodePng, camera, segWindow, clipNear, roadQuads, fillPoly, roadMask, edgeCrossings, edgeCheck, overlay,
   histogram, erode, dilate, key, hex, rgbOf, quantile, median, NEAR,
 };
