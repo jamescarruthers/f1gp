@@ -285,7 +285,7 @@ for (const name of names) {
     let lod = shape.lods[lodIdx];
     const spriteAt = (sid, mirrored, palOff, v, depthTag) => {
       if (v[1] < NEAR) return;
-      const [sx0, sy0] = projGame(cam, v, hi); const sx = sx0 + (+process.env.SDX || 0), sy = sy0 + (+process.env.SDY || 0);
+      const [sx, sy] = projGame(cam, v, hi);
       const spr = objs.sprite(sid);
       if (!spr) return;
       const D8 = Math.floor(v[1]);
