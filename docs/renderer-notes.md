@@ -1033,6 +1033,16 @@ stored code of those segments is 3, grey).
   middle a tenth larger, the corners as they are) with a faint ripple; over it
   the renderer lays a glass effect, through the same stencil: a sheen from the
   top left, a fainter streak, a light blue-grey tint and edges a little darker.
+- Shadows (`shadows=on`, the modern style; gl-track.mjs `updateShadows`): the
+  depth, seen from a fixed sun, of the trackside shapes (every side of each,
+  since the game keeps one display list per view sector) and the track's raised
+  parts, on a map 2,000 ft across centred 600 ft ahead of the camera, snapped to
+  its texels and drawn again when that point has moved 200 ft. Faces turned to
+  the sun look themselves up in it (nine taps) and keep 62 % of their light in a
+  shadow; the ground beyond the track does the same from its plane. The cars keep
+  their soft shadows and the bitmaps cast none. In the cockpit the page dims the
+  game's overlay to 70 % when the driver's head and four points round it are in
+  a shadow, by rays toward the sun against the same shapes (sun-ray.mjs), eased.
 
 ### What a WebGL renderer can take from this
 
