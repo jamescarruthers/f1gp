@@ -70,6 +70,11 @@
     sleep=timer|spin      how the emulator waits out the rest of each millisecond: on a
                           timer (default, lib/dos-sleep.mjs), or as js-dos does, passing
                           messages to itself until the time comes (the main thread busy)
+    saves=on|off          on (default): the files the game writes (C:\GPSAVES, F1PREFS.DAT)
+                          are kept in this browser and laid over the bundle on the next
+                          visit (lib/saves.mjs; the Saves button lists them and forgets
+                          them). The menu choices (screen, sound, shape, style, cockpit)
+                          are kept too; an option in the address wins.
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
@@ -95,6 +100,8 @@
   #keys table { border-collapse: collapse; break-inside: avoid; width: 100%; }
   #keys td { padding: 2px 8px 2px 0; vertical-align: top; }
   #keys td:first-child { white-space: nowrap; width: 7.5em; }
+  #saves { margin: 0 16px 12px; padding: 4px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; max-width: 70ch; }
+  #saves p { margin: 8px 0; }
   #keys kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
@@ -131,8 +138,10 @@
   <label>Shape <select id="shape"><option value="wide">Wide</option><option value="original">4:3, as the game</option></select></label>
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
   <button id="keysbtn" type="button" aria-expanded="false" aria-controls="keys">Keys</button>
+  <button id="savesbtn" type="button" aria-expanded="false" aria-controls="saves">Saves</button>
   <span id="status">loading...</span><span id="notice"></span></header>
 <div id="keys" hidden></div>
+<div id="saves" hidden><p id="savesinfo"></p><p><button id="forget" type="button">Forget them and restart</button> <span id="forgetask" hidden>Forget every saved game, name, track record, car setup and option in this browser? <button id="forgetyes" type="button">Yes, forget</button> <button id="forgetno" type="button">Keep them</button></span></p></div>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
@@ -154,10 +163,14 @@ import { manualHelper } from './lib/manual.mjs';
 import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
 import { timerSleep } from './lib/dos-sleep.mjs';
+import { changeStore, keeper, menuChoices } from './lib/saves.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
+// the menu choices from the last visit; the address wins
+const choices = menuChoices(['screen', 'sound', 'framing', 'style', 'cockpit']);
+choices.apply(q);
 const opts = {
   bundle: q.get('bundle') ?? 'dist/f1gp.jsdos',
   framing: q.get('framing') ?? 'wide',
@@ -184,6 +197,8 @@ const opts = {
   cycles: q.get('cycles') ?? 'auto',
   // timer: the emulator's idle time spent idle, not passing messages (lib/dos-sleep.mjs)
   sleep: q.get('sleep') === 'spin' ? 'spin' : 'timer',
+  // keep the game's saved files in the browser between visits (lib/saves.mjs)
+  saves: (q.get('saves') ?? 'on') !== 'off',
 };
 // the style sets the defaults; explicit haze= and framing= win
 function applyStyle(style) {
@@ -208,9 +223,7 @@ applyStyle(opts.style);
   sel.addEventListener('change', () => {
     opts.framing = opts.framingParam = sel.value;
     showShape();
-    const u = new URL(location.href);
-    u.searchParams.set('framing', sel.value);
-    history.replaceState(null, '', u);
+    choices.set('framing', sel.value);
     sel.blur();
   });
 }
@@ -219,9 +232,7 @@ applyStyle(opts.style);
   sel.value = opts.style;
   sel.addEventListener('change', () => {
     applyStyle(sel.value);
-    const u = new URL(location.href);
-    u.searchParams.set('style', sel.value);
-    history.replaceState(null, '', u);
+    choices.set('style', sel.value);
     sel.blur(); // keys go back to the game
   });
 }
@@ -246,9 +257,7 @@ if (opts.layout === 'single') {
   sel.value = opts.screen;
   sel.addEventListener('change', () => {
     opts.screen = sel.value;
-    const u = new URL(location.href);
-    u.searchParams.set('screen', sel.value);
-    history.replaceState(null, '', u);
+    choices.set('screen', sel.value);
     sel.blur();
   });
 }
@@ -261,6 +270,33 @@ if (opts.layout === 'single') {
     btn.setAttribute('aria-expanded', String(!panel.hidden));
     btn.blur(); // keys go back to the game
   });
+}
+// the game's saved files, kept in this browser (lib/saves.mjs)
+const changes = changeStore();
+let saves = null;
+function showSaves(record) {
+  const files = record ? record.files : (saves ? saves.files : []);
+  const names = files.map((f) => f.replace(/^GPSAVES\//, ''));
+  $('savesinfo').textContent = !opts.saves ? 'Saving is off (saves=off): the game\'s files last until the page closes.'
+    : files.length ? `Kept in this browser: ${names.join(', ')}${record?.savedAt ? `, last at ${new Date(record.savedAt).toLocaleTimeString()}` : ''}. They come back on your next visit.`
+    : 'Nothing kept yet. Saved games, names, track records, car setups (Load/Save Game in the main menu) and the game\'s options are kept in this browser and come back on your next visit.';
+  $('forget').disabled = !files.length;
+}
+{
+  const panel = $('saves'), btn = $('savesbtn');
+  btn.addEventListener('click', () => {
+    panel.hidden = !panel.hidden;
+    btn.setAttribute('aria-expanded', String(!panel.hidden));
+    btn.blur();
+  });
+  $('forget').addEventListener('click', () => { $('forgetask').hidden = false; $('forget').hidden = true; });
+  $('forgetno').addEventListener('click', () => { $('forgetask').hidden = true; $('forget').hidden = false; });
+  $('forgetyes').addEventListener('click', async () => {
+    if (saves) saves.stop();
+    await changes.forget(opts.bundle);
+    location.reload();
+  });
+  showSaves(null);
 }
 // the sound: the game's AdLib, or the Amiga version's (made when first chosen)
 let amiga = null, amigaLoading = null;
@@ -284,9 +320,7 @@ function setSound(v) {
   if (opts.audio === 'off') sel.disabled = true;
   sel.addEventListener('change', () => {
     setSound(sel.value);
-    const u = new URL(location.href);
-    u.searchParams.set('sound', sel.value);
-    history.replaceState(null, '', u);
+    choices.set('sound', sel.value);
     sel.blur();
   });
 }
@@ -355,6 +389,7 @@ function sizeCanvas() {
 
 const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
+let lastGameFrameAt = -1e9;   // when the last new game frame arrived (the game is racing)
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
 const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
 let governor = null;          // the emulated CPU speed (cycles=auto)
@@ -450,6 +485,7 @@ function frame(now) {
         }
         pacer.add(cur);
         perf.kept++;
+        lastGameFrameAt = now;
         // the emulated CPU speed: low while the fill draws nothing, raised when the game's load climbs
         if (governor) governor.update({ racing: drawing, work: readWorkTicks(mem), ticks: readFrameTicks(mem), now });
       }
@@ -543,8 +579,19 @@ requestAnimationFrame(frameLoop);
   for (const [n, b] of Object.entries(unzipSync(bundle, { filter: (f) => /^F1CT\d\d\.DAT$/i.test(f.name) }))) trackFiles[n.toUpperCase()] = b;
   const ownAudio = opts.audio === 'own' ? await makeOwnAudio().catch((e) => { log('audio-failed', { error: String(e) }); return null; }) : null;
   window.renderApp.audio = ownAudio;
-  ci = await emulators.dosboxDirect(bundle.slice(), { audioWorklet: false });
+  // the game's files kept from the last visit, laid over the bundle's
+  const kept = opts.saves ? await changes.load(opts.bundle) : null;
+  if (kept) log('saves-loaded', { files: kept.files });
+  ci = await emulators.dosboxDirect(kept ? [bundle.slice(), kept.zip.slice()] : bundle.slice(), { audioWorklet: false });
   if (opts.sleep === 'timer') log('sleep', { timer: timerSleep(ci) });
+  if (opts.saves) {
+    // checked while the game is in its menus, not while it races
+    saves = keeper(ci, { key: opts.bundle, store: changes, unzip: unzipSync, start: kept,
+      busy: () => performance.now() - lastGameFrameAt < 1000,
+      onStore: (r) => { log('saves-stored', { files: r.files }); showSaves(r); } });
+    window.renderApp.saves = saves;
+  }
+  showSaves(kept);
   // the game's own sound, unless the Amiga's plays instead
   if (ownAudio) ci.events().onSoundPush((samples) => { if (opts.sound === 'adlib') ownAudio.push(samples, ci.soundFrequency()); });
   if (opts.audio === 'own' && opts.sound !== 'adlib') setSound(opts.sound);

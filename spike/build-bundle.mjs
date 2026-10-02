@@ -85,6 +85,8 @@ export function buildBundle(opts) {
   const conf = readFileSync(opts.conf, "utf8")
     .replace("@CYCLES@", opts.cycles)
     .replace("@AUTOEXEC@", opts.autoexec.split(";").join("\r\n"));
+  // the game saves into C:\GPSAVES and refuses when the folder is missing
+  files["GPSAVES/"] = new Uint8Array(0);
   files[".jsdos/dosbox.conf"] = new TextEncoder().encode(conf);
   files[".jsdos/jsdos.json"] = new TextEncoder().encode(JSON.stringify({ version: "8" }));
 
