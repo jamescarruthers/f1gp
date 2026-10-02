@@ -61,6 +61,9 @@
                           to the screen as the game draws it
     poles=solid|pixel     flag poles and posts six inches wide, at least one game pixel
                           (modern), or one game pixel wide as the game draws them (classic)
+    cockpit=smooth|pixels the game's cockpit, dash and messages over our view: drawn larger
+                          through xBR, a filter made for pixel art (lib/pixel-smooth.mjs;
+                          modern), or as square pixels (classic). Also a menu.
     mirrors=real|game     the cockpit mirrors: real rear views from our renderer (modern),
                           or the game's (classic): its fixed backdrop with the cars behind
                           as its bitmaps
@@ -126,10 +129,11 @@
   body.single main { display: block; padding: 0 16px 12px; }
   #stage { position: relative; width: 100%; height: calc(100vh - 72px); min-height: 240px; background: #000; overflow: hidden; border-radius: 6px; }
   #stage canvas { position: absolute; top: 0; height: 100%; display: block; image-rendering: pixelated; }
-  #stage #screen, #stage #hud { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
+  #stage #screen, #stage #hud, #stage #hudsmooth { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
   #stage #gl { left: 0; width: 100%; aspect-ratio: auto; image-rendering: auto; }
   body.narrow #stage #gl { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
-  #stage #hud { pointer-events: none; }
+  #stage #hud, #stage #hudsmooth { pointer-events: none; }
+  #stage #hudsmooth { image-rendering: auto; }
   #stage [hidden] { display: none; }
   body.single #perf { margin: 6px 0 0; }
 </style>
@@ -139,6 +143,7 @@
   <label>Screen <select id="screenmode"><option value="new">New view</option><option value="original">Original game</option></select></label>
   <label>Sound <select id="sound"><option value="amiga">Amiga</option><option value="amiga-clean">Amiga, no filter</option><option value="adlib">PC: AdLib</option></select></label>
   <label>Shape <select id="shape"><option value="wide">Wide</option><option value="original">4:3, as the game</option></select></label>
+  <label>Cockpit <select id="cockpit"><option value="smooth">Smoothed</option><option value="pixels">Pixels, as the game</option></select></label>
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
   <button id="keysbtn" type="button" aria-expanded="false" aria-controls="keys">Keys</button>
   <button id="savesbtn" type="button" aria-expanded="false" aria-controls="saves">Saves</button>
@@ -166,6 +171,7 @@ import { manualHelper } from './lib/manual.mjs';
 import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
 import { timerSleep } from './lib/dos-sleep.mjs';
+import { makeSmoother } from './lib/pixel-smooth.mjs';
 import { changeStore, keeper, menuChoices } from './lib/saves.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
@@ -190,6 +196,7 @@ const opts = {
   crowdParam: q.get('crowd'),
   polesParam: q.get('poles'),
   mirrorsParam: ['real', 'game'].includes(q.get('mirrors')) ? q.get('mirrors') : null,
+  cockpitParam: ['smooth', 'pixels'].includes(q.get('cockpit')) ? q.get('cockpit') : null,
   audio: q.get('audio') ?? 'own',
   // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
@@ -212,6 +219,9 @@ function applyStyle(style) {
   opts.crowd = opts.crowdParam ?? (style === 'classic' ? 'sharp' : 'stands');
   opts.poles = opts.polesParam ?? (style === 'classic' ? 'pixel' : 'solid');
   opts.mirrors = opts.mirrorsParam ?? (style === 'classic' ? 'game' : 'real');
+  opts.cockpit = opts.cockpitParam ?? (style === 'classic' ? 'pixels' : 'smooth');
+  const ck = document.getElementById('cockpit');
+  if (ck) ck.value = opts.cockpit;
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
   document.body.classList.toggle('classic', style === 'classic');
   showShape();
@@ -233,6 +243,15 @@ applyStyle(opts.style);
   });
 }
 {
+  const sel = $('cockpit');
+  sel.value = opts.cockpit;
+  sel.addEventListener('change', () => {
+    opts.cockpit = opts.cockpitParam = sel.value;
+    choices.set('cockpit', sel.value);
+    sel.blur();
+  });
+}
+{
   const sel = $('style');
   sel.value = opts.style;
   sel.addEventListener('change', () => {
@@ -249,9 +268,12 @@ if (opts.layout === 'single') {
   stage.id = 'stage';
   const hudCanvas = document.createElement('canvas');
   hudCanvas.id = 'hud'; hudCanvas.width = 320; hudCanvas.height = 200; hudCanvas.hidden = true;
+  // the same, smoothed for pixel art (cockpit=smooth, lib/pixel-smooth.mjs)
+  const hudSmooth = document.createElement('canvas');
+  hudSmooth.id = 'hudsmooth'; hudSmooth.hidden = true;
   const gl = $('gl'), scr = $('screen'), perfEl = $('perf');
   document.querySelector('main').prepend(stage);
-  stage.append(gl, hudCanvas, scr);
+  stage.append(gl, hudCanvas, hudSmooth, scr);
   gl.hidden = true;
   stage.after(perfEl);
   document.querySelector('.origpane').remove();
@@ -352,6 +374,8 @@ const CODE_TO_KEY = (() => {
 const screen = $('screen'), g = screen.getContext('2d');
 let image = g.createImageData(320, 200), pending = null;
 let hud = null; // { ctx, image } of the overlay canvas (single layout)
+let smoother = null, smootherFailed = false; // the overlay drawn through xBR (cockpit=smooth)
+let hudSmoothed = false;      // the overlay shown is the smoothed one
 function blitScreen(hudView) {
   if (!pending) return;
   const src = pending; pending = null;
@@ -374,7 +398,11 @@ function blitScreen(hudView) {
       const pal = shown.brightness < 0.99 ? hudView.palette.map((v) => Math.round(v * shown.brightness)) : hudView.palette;
       paintMirrors(hud.image.data, mirrorCars, carData, pal);
     }
-    hud.ctx.putImageData(hud.image, 0, 0);
+    if (opts.cockpit === 'smooth' && !smoother && !smootherFailed) {
+      try { smoother = makeSmoother($('hudsmooth')); } catch (e) { smootherFailed = true; log('smooth-failed', { error: String(e) }); }
+    }
+    hudSmoothed = opts.cockpit === 'smooth' && !!smoother;
+    if (hudSmoothed) smoother.draw(hud.image.data); else hud.ctx.putImageData(hud.image, 0, 0);
   }
 }
 
@@ -474,8 +502,14 @@ function frame(now) {
   if (ci) blitScreen(hudView);
   if (opts.layout === 'single' && swap !== swapped) {
     swapped = swap;
-    $('gl').hidden = !swap; $('hud').hidden = !swap; $('screen').hidden = swap;
+    $('gl').hidden = !swap; $('screen').hidden = swap;
     log(swap ? 'swap-new-view' : 'swap-game-screen');
+  }
+  if (opts.layout === 'single') {
+    // the overlay: square pixels or smoothed, while our view shows
+    const px = swapped && !hudSmoothed, sm = swapped && hudSmoothed;
+    if ($('hud').hidden !== !px) $('hud').hidden = !px;
+    if ($('hudsmooth').hidden !== !sm) $('hudsmooth').hidden = !sm;
   }
   sizeCanvas();
   if (amiga && opts.sound !== 'adlib') amiga.update(mem);
