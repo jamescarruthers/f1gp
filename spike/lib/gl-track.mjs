@@ -335,6 +335,28 @@ void main() {
   outColour = vec4(0.0, 0.0, 0.0, k);
 }`;
 
+// the mirrors' glass over their rear views: a sheen from the top left, a fainter streak
+// below it, a light blue-grey tint and edges a little darker (premultiplied: the colour
+// is added, the view behind dimmed by the alpha)
+const SHEEN_VS = `#version 300 es
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUv;
+out vec2 vUv;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); vUv = aUv; }`;
+const SHEEN_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;           // 0-1 across the glass, left to right and top to bottom
+out vec4 outColour;
+void main() {
+  float d = vUv.x * 0.55 + vUv.y;     // 0 at the top left, along the light's slant
+  float sheen = 0.28 * (1.0 - smoothstep(0.0, 0.62, d))
+              + 0.12 * (smoothstep(0.74, 0.8, d) - smoothstep(0.86, 0.96, d));
+  vec2 e = abs(vUv - 0.5) * 2.0;
+  float edge = 0.16 * smoothstep(0.6, 1.0, max(e.x, e.y));
+  float tint = 0.07;
+  outColour = vec4(vec3(1.0) * sheen + vec3(0.55, 0.66, 0.78) * tint, sheen + tint + edge);
+}`;
+
 // flat shapes in clip space: the mirrors' glass into the stencil
 const FLAT_VS = `#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -396,6 +418,14 @@ export class TrackRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowVbo);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
+    // the mirrors' glass effect: x, y (clip space), u, v
+    this.sheenProg = program(gl, SHEEN_VS, SHEEN_FS);
+    this.sheenVao = gl.createVertexArray();
+    gl.bindVertexArray(this.sheenVao);
+    this.sheenVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.sheenVbo);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
     // flat shapes in the canvas's clip space, for the stencil (the mirrors' glass)
     this.flatProg = program(gl, FLAT_VS, FLAT_FS);
     this.flatVao = gl.createVertexArray();
@@ -935,7 +965,9 @@ TrackRenderer.prototype.front = function front(winding) {
  * R:005A 9000h left, R:005C 7000h right), mirrored left to right, at a quarter
  * of the main view's scale, with the horizon on row 123 and the mirror's centre
  * on column 160 -/+ 140 (cars.mjs mirrorImage), drawn only on its glass (the
- * game's outline rows 116-137, cars.mjs mirrorClip) through the stencil.
+ * game's outline rows 116-137, cars.mjs mirrorClip) through the stencil, with
+ * a glass effect over it (a sheen, a light tint, darker edges; m.glassEffect
+ * false leaves it out).
  * @param {object} cam   the main view's camera
  * @param {object} opt   draw()'s options
  * @param {{ glass: object[], sides: { side: 'left'|'right', angle: number, frame?: object }[], cars?: object }} m
@@ -993,6 +1025,20 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
       this.flip = false;
       this.cull = null;
       this.carFrame = saved;
+    }
+    // the glass over the view: the same box, still only where the stencil holds the glass
+    if (m.glassEffect !== false) {
+      const [l, b] = ndc(box.x, box.y), [r, t] = ndc(box.x + box.w, box.y + box.h);
+      gl.viewport(0, 0, W, H);
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(this.sheenProg);
+      gl.bindVertexArray(this.sheenVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.sheenVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([l, b, 0, 1, r, b, 1, 1, l, t, 0, 0, r, b, 1, 1, r, t, 1, 0, l, t, 0, 0]), gl.DYNAMIC_DRAW);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.disable(gl.BLEND);
     }
   }
   gl.disable(gl.STENCIL_TEST);
