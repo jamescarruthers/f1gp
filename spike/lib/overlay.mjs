@@ -213,10 +213,12 @@ export function shownMarker(src, markerRgb, view) {
  * backdrop (19ED:3AFA copies 48 by 22 pixels, black beside each mirror's
  * rounded end): the game draws it before the 3D view, which covers them,
  * and the fill after; black there that touches the marker is our 3D view.
+ * With view.glass (cars.mjs mirrorClip) the mirrors' glass is see-through
+ * too, for real rear views drawn under it (gl-track.mjs drawMirrors).
  * @param {Uint8Array|Uint8ClampedArray} src  the emulator's frame, RGB or RGBA, 320x200
  * @param {Uint8ClampedArray} dst             RGBA, 320x200
  * @param {number[]} markerRgb                [r, g, b]
- * @param {{ top, rows, cockpit }} view
+ * @param {{ top, rows, cockpit, glass? }} view
  */
 export function keyFrame(src, dst, markerRgb, view) {
   const n = 320 * 200, step = src.length >= n * 4 ? 4 : 3;
@@ -248,6 +250,17 @@ export function keyFrame(src, dst, markerRgb, view) {
       for (const [u, v] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
         const e = (v * 320 + u) * 4;
         if (inBackdrop(u, v) && dst[e + 3] !== 0 && black(e)) queue.push(u, v);
+      }
+    }
+    // real rear views: the mirrors' glass is ours too (after the fill, so the black
+    // round the glass stays the housing's)
+    if (view.glass) {
+      for (const r of view.glass) {
+        if (!r.active) continue;
+        const row = r.row * 320;
+        for (const [a, b] of [[r.left, r.gapLeft], [r.gapRight, r.right]]) {
+          for (let x = Math.max(0, a); x < Math.min(320, b); x++) dst[(row + x) * 4 + 3] = 0;
+        }
       }
     }
     return;

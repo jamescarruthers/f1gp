@@ -118,6 +118,30 @@ test('the cockpit: black beside a mirror is our view, black inside its housing s
   assert.equal(a(5, 190), 255, 'the cockpit below');
 });
 
+test('real rear views: the glass is see-through, the housing round it stays', () => {
+  const K = [10, 200, 30], sky = [100, 180, 255], housing = [200, 200, 200];
+  // the left mirror: glass x 0-35 on rows 116-137 (narrower on the first row), a black
+  // outline at x 36 inside the housing (rows 117-136), the housing x 36-47; the marker from x 48
+  const glass = Array.from({ length: 22 }, (_, i) => ({ row: 116 + i, active: true, left: 0, right: 320, gapLeft: i === 0 ? 30 : 36, gapRight: 284 }));
+  const src = frame((x, y) => {
+    if (y >= 116 && y < 138 && x < 48) return x < 36 ? sky : x === 36 && y > 116 && y < 137 ? [0, 0, 0] : housing;
+    return K;
+  });
+  const dst = new Uint8ClampedArray(64000 * 4);
+  const a = (x, y) => dst[(y * 320 + x) * 4 + 3];
+  keyFrame(src, dst, K, { top: 0, rows: 103, cockpit: true, glass });
+  assert.equal(a(10, 125), 0, 'the glass');
+  assert.equal(a(35, 125), 0, 'to its edge');
+  assert.equal(a(32, 116), 255, 'not past its outline on a narrow row');
+  assert.equal(a(36, 125), 255, 'the black outline round the glass stays');
+  assert.equal(a(40, 125), 255, 'the housing');
+  assert.equal(a(10, 115), 0, 'the marker above');
+  assert.equal(a(10, 140), 0, 'and below');
+  // without the glass, the game's backdrop stays
+  keyFrame(src, dst, K, { top: 0, rows: 103, cockpit: true });
+  assert.equal(a(10, 125), 255);
+});
+
 test('the marker as shown: exact, or faded with the screen', () => {
   const K = [100, 200, 40];
   const view = { top: 16, rows: 164 };

@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { steerAngle, wheelFrame, helmetFrame, lerpCarStates } from '../lib/cars.mjs';
+import { steerAngle, wheelFrame, helmetFrame, lerpCarStates, mirrorCars } from '../lib/cars.mjs';
 
 const HERE = import.meta.dirname;
 const OUT = path.join(HERE, '..', 'out');
@@ -126,7 +126,7 @@ test('Monza (RAM capture): frameCars gives one-sided triangles, layers and sprit
 });
 
 test('Monza (RAM capture): modern style draws every car as polygons with 3D wheels and helmets', { skip: !haveS2 && 'no RAM captures in out/' }, async () => {
-  const { readCars, frameCars } = await import('../lib/cars.mjs');
+  const { readCars, frameCars, carStates: carStatesOf } = await import('../lib/cars.mjs');
   const { mem, st } = await load(path.join(S2, 'grid-chase.ram'));
   const cars = readCars(mem);
   const H = mem.heap(), p = mem.memBase + (mem.SS << 4) + 0x05da;
@@ -163,6 +163,16 @@ test('Monza (RAM capture): modern style draws every car as polygons with 3D whee
   }
   // hub and sidewall triangles face along the axle, so a few test against the centre at 0
   assert.ok(outward / n > 0.95, `${outward} of ${n} outward`);
+  // turned wheels: the same triangles, the wheels' points moved round their hubs, the helmets not;
+  // one shadow a car drawn
+  const { spinWheels } = await import('../lib/cars.mjs');
+  const spun = spinWheels(new Map(), carStatesOf(cars, st).map((c) => ({ ...c, speed: 64 * 77 })), 0.4);
+  const turned = frameCars(cars, st, cam, { indexed: true, modern: true, all: true, paletteRgb: rgb, wide: true, states: spun });
+  assert.equal(turned.solid.length, modern.solid.length);
+  let moved = 0;
+  for (let k = 0; k < modern.solid.length; k += 6) if (Math.abs(turned.solid[k] - modern.solid[k]) + Math.abs(turned.solid[k + 2] - modern.solid[k + 2]) > 1) moved++;
+  assert.ok(moved > 0 && moved < modern.solid.length / 6, `${moved} vertices moved`);
+  assert.equal(modern.shadows.length / 30, drawn.length);
 });
 
 // pixel agreement with the game's frames inside the pixels our cars cover
@@ -195,4 +205,55 @@ test('Monza (p3 captures, emulator paused: the screen shows the previous frame)'
     if (r.far.px) assert.ok(r.far.pct >= 97, `${d} far ${JSON.stringify(r.far)}`);
     if (r.mirror.px) assert.ok(r.mirror.pct >= 90, `${d} mirror ${JSON.stringify(r.mirror)}`);
   }
+});
+
+test('the cars a rear view can show: behind, within its view, not too far, not our own', () => {
+  // the camera at the origin heading 0 (looking along +y); the left mirror turned by 9000h
+  const ft = 64;
+  const car = (slot, x, y, extra = {}) => ({ slot, x, y, pos: 'live', f96: 0, ...extra });
+  // the mirror's axis: 202.5 degrees from +y, i.e. behind and to the left (-x)
+  const a = (0x9000 / 65536) * 2 * Math.PI;
+  const along = (d, off = 0) => [d * Math.sin(a) + off * Math.cos(a), d * Math.cos(a) - off * Math.sin(a)];
+  const states = [
+    car(0, 0, 0),                                   // ours
+    car(1, ...along(100 * ft)),                     // on the axis, 100 ft
+    car(2, 0, 100 * ft),                            // ahead
+    car(3, ...along(700 * ft)),                     // too far
+    car(4, ...along(100 * ft, 80 * ft)),            // 39 degrees off the axis
+    car(5, ...along(100 * ft, 35 * ft)),            // 19 degrees: inside with the margin
+    car(6, ...along(100 * ft), { pos: 'none' }),    // not on the circuit
+    car(7, ...along(100 * ft), { f96: 0x80 }),      // not drawn
+  ];
+  const got = mirrorCars(states, { x: 0, y: 0, heading: 0, viewedSlot: 0 }, 0x9000).map((e) => e.slot);
+  assert.deepEqual(got, [1, 5]);
+  // the right mirror (7000h) sees neither
+  assert.deepEqual(mirrorCars(states, { x: 0, y: 0, heading: 0, viewedSlot: 0 }, 0x7000).map((e) => e.slot), []);
+});
+
+test('the wheels roll by the distance covered, and blur when they turn too far between frames', async () => {
+  const { spinWheels } = await import('../lib/cars.mjs');
+  const spins = new Map();
+  // 77 fine units (the wheel's radius) a second: one radian a second
+  let [a, b, c] = spinWheels(spins, [{ slot: 0, speed: 77 }, { slot: 1, speed: 0 }, { slot: 2, speed: -77 * 40 }], 0.5);
+  assert.ok(Math.abs(a.spin - 0.5) < 1e-9);
+  assert.ok(Math.abs(a.wheelContrast - (1 - 0.5 / (Math.PI / 5))) < 1e-9);
+  assert.equal(b.spin, 0);
+  assert.equal(b.wheelContrast, 1);
+  assert.ok(c.spin < 0, 'backwards');
+  assert.equal(c.wheelContrast, 0, 'blurred');
+  [a] = spinWheels(spins, [{ slot: 0, speed: 77 }], 0.25);
+  assert.ok(Math.abs(a.spin - 0.75) < 1e-9, 'kept from frame to frame');
+});
+
+test('a shadow is a box round the car, turned with it', async () => {
+  const { shadowQuads } = await import('../lib/cars.mjs');
+  const q = shadowQuads([{ x: 1000, y: 2000, z: 5, yaw: 0 }, { x: 0, y: 0, z: 0, yaw: 0x4000 }], [100, 200]);
+  assert.equal(q.length, 60);
+  const v = (i) => Array.from(q.subarray(i * 5, i * 5 + 5));
+  // heading 0 looks along +y: back right is (x + 340... ) at y - 560
+  assert.deepEqual(v(0), [1000 - 100 - 340, 2000 - 200 - 560, 5, -1, -1]);
+  assert.deepEqual(v(2), [1000 - 100 + 340, 2000 - 200 + 610, 5, 1, 1]);
+  // a quarter turn: forward is +x
+  const [x, y] = v(8);
+  assert.ok(Math.abs(x - (-100 + 610)) < 1e-3 && Math.abs(y - (-200 - 340)) < 1e-3, `${x}, ${y}`);
 });
