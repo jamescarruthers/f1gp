@@ -395,7 +395,11 @@ Progress:
    shades for the classic style and blended for the modern one
    (`texture=classic|smooth|off`); in the modern style, wheels that roll with
    each car's speed (a pattern on the hubs that blurs at speed) and a soft
-   shadow under each car (`spike/lib/cars.mjs` `spinWheels`, `shadowQuads`).
+   shadow under each car (`spike/lib/cars.mjs` `spinWheels`, `shadowQuads`), and
+   the faces of the scene's shapes lit very slightly by a fixed sun
+   (`shade=on|off`: a face looking up keeps the game's colour, sides lose up to
+   11 % and undersides 13 %; the face's direction comes from the change of its
+   position across the screen, so the shapes need no normals).
 
 ## Sound from the Amiga version (done)
 

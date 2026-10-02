@@ -134,9 +134,22 @@ uniform int uCrowdOn;           // 0 off, 1 screen space (the game's), 2 on the 
 uniform sampler2D uObjects;    // RGBA32F, 256 wide: each object's centre x, y and size (fine units)
 uniform vec3 uCam;
 uniform vec2 uSinCos;
+uniform float uShade;          // 0 off, 1: the faces lit, very slightly, by a sun high to one side
 out vec4 outColour;
 ${HAZE}
 ${GROUND_TEXTURE}
+const vec3 SUN = vec3(0.45, 0.30, 0.84) / 1.0;  // nearly unit length; up is +z
+// a face's light: 1 for a face looking up (the road, roofs: as they are), a little less for
+// sides facing the sun, less again for sides facing away and for undersides
+float faceLight(vec3 dx, vec3 dy) {
+  vec3 n = cross(dx, dy);
+  float l = length(n);
+  if (l < 1e-6) return 1.0;
+  n /= l;
+  if (dot(n, vWorld - uCam) > 0.0) n = -n;    // the side seen (the mirrors draw mirrored)
+  vec3 sun = normalize(SUN);
+  return 1.0 + 0.08 * uShade * (dot(n, sun) - sun.z);
+}
 // the crowd strip at texel (uv / 2^lod), each row from its own start offset; each
 // step takes rows further on in the table, so a coarser step is not a copy of the finer one
 int crowdAt(vec2 uv, vec2 lod) {
@@ -145,6 +158,8 @@ int crowdAt(vec2 uv, vec2 lod) {
   return int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
 }
 void main() {
+  // the position's change across the screen, outside any branch (derivatives need every pixel)
+  vec3 dpx = dFdx(vWorld), dpy = dFdy(vWorld);
   if (vColour.y < 0.0) {
     int idx = int(vColour.x + 0.5);
     // the road only (it alone has u, v; a car part in the road's colour has none)
@@ -159,7 +174,7 @@ void main() {
       idx = int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
     } else if (uCrowdOn == 2 && idx == 27) {
       // the stand's face from the position's derivatives: an axis along it (level) and one up it
-      vec3 n = cross(dFdx(vWorld), dFdy(vWorld));
+      vec3 n = cross(dpx, dpy);
       vec2 th = vec2(-n.y, n.x);
       vec3 t = dot(th, th) > 1e-6 ? vec3(normalize(th), 0.0) : vec3(1.0, 0.0, 0.0);
       vec3 b = normalize(cross(n, t));
@@ -182,6 +197,7 @@ void main() {
     }
     vec3 colour = hazeColour(uPalette, idx, level);
     if (idx2 >= 0) colour = mix(colour, hazeColour(uPalette, idx2, level), blend);
+    if (uShade > 0.0) colour *= faceLight(dpx, dpy);
     outColour = vec4(colour, 1.0);
   } else outColour = vec4(vColour, 1.0);
 }`;
@@ -357,6 +373,26 @@ void main() {
   outColour = vec4(vec3(1.0) * sheen + vec3(0.55, 0.66, 0.78) * tint, sheen + tint + edge);
 }`;
 
+// the rear view on the glass, bowed as a convex mirror bows it: the middle a little larger,
+// the corners as they are, and a faint ripple in the glass
+const WARP_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;               // 0-1 across the glass, left to right and top to bottom
+uniform sampler2D uView;   // the rear view (drawMirrors), rows from the bottom
+uniform vec2 uShape;       // the box's width and height over the larger of them
+uniform float uBow;        // the middle magnified by 1 + uBow
+uniform float uRipple;     // the ripple's size, as a share of the half-width
+out vec4 outColour;
+void main() {
+  vec2 d = vUv * 2.0 - 1.0;
+  vec2 q = d * uShape;
+  float r2 = dot(q, q) / dot(uShape, uShape);       // 0 in the middle, 1 at the corners
+  vec2 s = d * (1.0 + uBow * r2) / (1.0 + uBow);
+  s += uRipple * vec2(sin(vUv.y * 23.0 + vUv.x * 4.0), sin(vUv.x * 19.0 - vUv.y * 5.0));
+  vec2 uv = clamp(s * 0.5 + 0.5, 0.0, 1.0);
+  outColour = vec4(texture(uView, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0);
+}`;
+
 // flat shapes in clip space: the mirrors' glass into the stencil
 const FLAT_VS = `#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -392,7 +428,7 @@ export class TrackRenderer {
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
     this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn',
-      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp', 'uPole']
+      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp', 'uPole', 'uShade']
       .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
@@ -418,8 +454,10 @@ export class TrackRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowVbo);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
-    // the mirrors' glass effect: x, y (clip space), u, v
+    // the mirrors' glass effect: x, y (clip space), u, v; and the bowed rear view, the same quads
     this.sheenProg = program(gl, SHEEN_VS, SHEEN_FS);
+    this.warpProg = program(gl, SHEEN_VS, WARP_FS);
+    this.warpU = Object.fromEntries(['uView', 'uShape', 'uBow', 'uRipple'].map((n) => [n, gl.getUniformLocation(this.warpProg, n)]));
     this.sheenVao = gl.createVertexArray();
     gl.bindVertexArray(this.sheenVao);
     this.sheenVbo = gl.createBuffer();
@@ -811,7 +849,8 @@ export class TrackRenderer {
    *   ground texture, with setScene), crowd: 'stands' (default: on the stands, coarser texels far
    *   away) | 'sharp' (on the stands, every texel) | 'screen' (the game's, fixed to the screen),
    *   poles: 'solid' (default: six inches wide, at least one game pixel) | 'pixel' (one game pixel
-   *   wide, as the game draws them), pitLane: true when the camera is in the pit lane }
+   *   wide, as the game draws them), pitLane: true when the camera is in the pit lane,
+   *   shade: 'on' to light the faces very slightly by a fixed sun (faces looking up stay as they are) }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
@@ -921,6 +960,7 @@ export class TrackRenderer {
     gl.uniform1i(this.u.uNoise, 7);
     gl.uniform1i(this.u.uTexMode, texMode);
     gl.uniform1i(this.u.uRoadIdx, this.scene ? this.scene.road : -1);
+    gl.uniform1f(this.u.uShade, opt.shade === 'on' ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform3f(this.u.uCam, cam.x - o[0], cam.y - o[1], cam.z);
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
@@ -967,7 +1007,10 @@ TrackRenderer.prototype.front = function front(winding) {
  * on column 160 -/+ 140 (cars.mjs mirrorImage), drawn only on its glass (the
  * game's outline rows 116-137, cars.mjs mirrorClip) through the stencil, with
  * a glass effect over it (a sheen, a light tint, darker edges; m.glassEffect
- * false leaves it out).
+ * false leaves it out). The view is drawn into a picture of its own at twice
+ * the glass's size and laid on the glass bowed as a convex mirror bows it
+ * (m.bow, default 0.1: the middle a tenth larger, the corners as they are) with
+ * a faint ripple (m.ripple, default 0.004 of the half-width).
  * @param {object} cam   the main view's camera
  * @param {object} opt   draw()'s options
  * @param {{ glass: object[], sides: { side: 'left'|'right', angle: number, frame?: object }[], cars?: object }} m
@@ -986,10 +1029,7 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
     const box = { x: Math.round(X(c0)), y: Math.round(Y(138)) };
     box.w = Math.round(X(c0 + 40)) - box.x; box.h = Math.round(Y(116)) - box.y;
     if (box.w < 1 || box.h < 1) continue;
-    gl.scissor(box.x, box.y, box.w, box.h);
-    gl.clearStencil(0);
-    gl.clear(gl.STENCIL_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    // the glass, row by row, into the stencil
+    // the glass, row by row
     const tris = [];
     for (const r of m.glass) {
       if (!r.active) continue;
@@ -999,6 +1039,32 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
       tris.push(ax, ay, bx, ay, ax, by, bx, ay, bx, by, ax, by);
     }
     if (!tris.length) continue;
+    // the rear view, into a picture of its own at twice the box's size (its edges smoothed when
+    // it is drawn on the glass): 22 rows at a quarter scale are 88 of the main view's, the horizon
+    // (row 123) 28 down; 40 columns at a quarter scale are 160, mirrored
+    const target = this.mirrorTarget(sd.side, box.w * 2, box.h * 2);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    const saved = this.carFrame;
+    if (sd.frame && m.cars) this.setCarFrame(sd.frame, m.cars, sd.side); else this.carFrame = null;
+    this.flip = true;
+    // the objects near the mirror's view: 17 degrees either side, a margin for big stands, 4,000 ft
+    this.cull = { half: 20 / 64, margin: 400 * 64, far: 4000 * 64 };
+    try {
+      this.pass({ ...cam, heading: (cam.heading + sd.angle) & 0xffff }, opt, { x: 0, y: 0, w: target.w, h: target.h, rows: 88, horizon: 28, xScale: -2 });
+    } finally {
+      this.flip = false;
+      this.cull = null;
+      this.carFrame = saved;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    // the glass into the stencil
+    gl.enable(gl.SCISSOR_TEST);
+    gl.enable(gl.STENCIL_TEST);
+    gl.scissor(box.x, box.y, box.w, box.h);
+    gl.clearStencil(0);
+    gl.clear(gl.STENCIL_BUFFER_BIT);
     gl.viewport(0, 0, W, H);
     gl.disable(gl.DEPTH_TEST);
     gl.colorMask(false, false, false, false);
@@ -1012,29 +1078,25 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
     gl.colorMask(true, true, true, true);
     gl.stencilFunc(gl.EQUAL, 1, 0xff);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    // the rear view: 22 rows at a quarter scale are 88 of the main view's, the horizon (row 123) 28 down;
-    // 40 columns at a quarter scale are 160, mirrored
-    const saved = this.carFrame;
-    if (sd.frame && m.cars) this.setCarFrame(sd.frame, m.cars, sd.side); else this.carFrame = null;
-    this.flip = true;
-    // the objects near the mirror's view: 17 degrees either side, a margin for big stands, 4,000 ft
-    this.cull = { half: 20 / 64, margin: 400 * 64, far: 4000 * 64 };
-    try {
-      this.pass({ ...cam, heading: (cam.heading + sd.angle) & 0xffff }, opt, { ...box, rows: 88, horizon: 28, xScale: -2 });
-    } finally {
-      this.flip = false;
-      this.cull = null;
-      this.carFrame = saved;
-    }
-    // the glass over the view: the same box, still only where the stencil holds the glass
+    // the view on the glass, bowed (m.bow, default 0.1: the middle a tenth larger; m.ripple), then the
+    // glass effect over it, both on the box's quad
+    const [l, b] = ndc(box.x, box.y), [r, t] = ndc(box.x + box.w, box.y + box.h);
+    gl.bindVertexArray(this.sheenVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.sheenVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([l, b, 0, 1, r, b, 1, 1, l, t, 0, 0, r, b, 1, 1, r, t, 1, 0, l, t, 0, 0]), gl.DYNAMIC_DRAW);
+    gl.useProgram(this.warpProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, target.tex);
+    const big = Math.max(box.w, box.h);
+    gl.uniform1i(this.warpU.uView, 0);
+    gl.uniform2f(this.warpU.uShape, box.w / big, box.h / big);
+    gl.uniform1f(this.warpU.uBow, m.bow ?? 0.1);
+    gl.uniform1f(this.warpU.uRipple, m.ripple ?? 0.004);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    // the picture is drawn into again next frame: not left on a texture unit
+    gl.bindTexture(gl.TEXTURE_2D, null);
     if (m.glassEffect !== false) {
-      const [l, b] = ndc(box.x, box.y), [r, t] = ndc(box.x + box.w, box.y + box.h);
-      gl.viewport(0, 0, W, H);
-      gl.disable(gl.DEPTH_TEST);
       gl.useProgram(this.sheenProg);
-      gl.bindVertexArray(this.sheenVao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.sheenVbo);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([l, b, 0, 1, r, b, 1, 1, l, t, 0, 0, r, b, 1, 1, r, t, 1, 0, l, t, 0, 0]), gl.DYNAMIC_DRAW);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -1044,6 +1106,28 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
   gl.disable(gl.STENCIL_TEST);
   gl.disable(gl.SCISSOR_TEST);
   gl.viewport(0, 0, W, H);
+};
+
+/** A mirror's own picture (drawMirrors): a colour texture and a depth buffer, w x h, kept per side. */
+TrackRenderer.prototype.mirrorTarget = function mirrorTarget(side, w, h) {
+  const gl = this.gl;
+  this.mirrorTargets ??= {};
+  let t = this.mirrorTargets[side];
+  if (t && t.w === w && t.h === h) return t;
+  if (!t) t = this.mirrorTargets[side] = { fb: gl.createFramebuffer(), tex: gl.createTexture(), depth: gl.createRenderbuffer() };
+  t.w = w; t.h = h;
+  gl.bindTexture(gl.TEXTURE_2D, t.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
+  for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, t.depth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.tex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, t.depth);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return t;
 };
 
 /** The cars' shadows (frameCars().shadows, modern style): on the road, under the cars, blended. */
