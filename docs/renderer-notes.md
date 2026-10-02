@@ -1028,7 +1028,9 @@ stored code of those segments is 3, grey).
   are the same; the mirrored pass winds the other way), for the cars in its
   view nearer than 600 ft (`mirrorCars`); the trackside objects are those near
   its view cone. In headless Chromium the two passes added about 2 ms a frame
-  to the page's own work.
+  to the page's own work. Over each view the renderer lays a glass effect,
+  through the same stencil: a sheen from the top left, a fainter streak, a
+  light blue-grey tint and edges a little darker.
 
 ### What a WebGL renderer can take from this
 
