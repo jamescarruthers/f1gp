@@ -369,10 +369,16 @@ Progress:
 - **Cockpit and dash from the game's frame:** in the one-screen page the
   game's cockpit, dash, mirrors and start lights are laid over our view at
   the game's resolution (Phase 2, "One screen").
-- **Still to do:** the cockpit and dash in high resolution, and real rear
-  views in the mirrors (they now show the game's backdrop and its bitmap
-  cars); pit-lane cars are unchecked (79% in the one pit capture, where the
-  pit-lane scene is missing); wet races and other frame rates are unchecked.
+- **Real rear views in the mirrors (done, modern style):** the renderer draws
+  the scene behind into each mirror's glass, as the game projects its mirror
+  cars (`docs/renderer-notes.md`, "Cockpit and mirrors"); `mirrors=game`
+  (classic) keeps the game's backdrop and bitmap cars.
+- **A smoothed cockpit and dash (done, an option):** the game's overlay drawn
+  through xBR, a filter made for pixel art (`spike/lib/pixel-smooth.mjs`, the
+  Cockpit menu, `cockpit=smooth|pixels`).
+- **Still to do:** the cockpit and dash redrawn in high resolution; pit-lane
+  cars are unchecked (79% in the one pit capture, where the pit-lane scene is
+  missing); wet races and other frame rates are unchecked.
 
 ## Phase 4: better graphics (3–6 weeks)
 
@@ -387,7 +393,9 @@ Progress:
    draw distance. Each is a separate choice; keep the original look available.
    Done so far: the ground texture (the game's T option), in the game's whole
    shades for the classic style and blended for the modern one
-   (`texture=classic|smooth|off`).
+   (`texture=classic|smooth|off`); in the modern style, wheels that roll with
+   each car's speed (a pattern on the hubs that blurs at speed) and a soft
+   shadow under each car (`spike/lib/cars.mjs` `spinWheels`, `shadowQuads`).
 
 ## Sound from the Amiga version (done)
 
@@ -418,6 +426,11 @@ them without emulating the Amiga (`render.html?sound=amiga`, the Sound menu;
    browser (OPFS).
 2. **Saves:** copy `GPSAVES\` and `F1PREFS.DAT` out of the emulator after each
    save, store them, and restore them on start. Offer export and import.
+   Done, but for export and import (`spike/lib/saves.mjs`): the bundle now
+   holds the `GPSAVES` folder (without it the game refused to save), the page
+   keeps the files the game changed (js-dos `persist`) in IndexedDB and lays
+   them over the bundle on the next start, and a Saves panel lists and forgets
+   them. `spike/probes/p5-saves.mjs` checks the whole path.
 3. **Controls:** keyboard, mouse, gamepad (needs the emulator change for
    analogue input), touch.
 4. **Offline:** a service worker caches the page and emulator.

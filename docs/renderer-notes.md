@@ -933,8 +933,11 @@ yaw   = car+1A + hi16((car+4A * DS:0156) << 3)
   id = base + ((a + 100h) >> 9)       ; 00h-20h rear, 21h-41h front
   ```
   So the front wheels turn with the steering (car+48, ± about 25° at full lock
-  for the player); nothing makes the wheels spin. Computer cars have car+48 = 0
-  most of the time. SC; DT (without the steering term the near-car agreement
+  for the player); nothing makes the wheels spin. Computer cars steer too, less:
+  in a minute of a Monza Quick Race (sampled 20 times a second) their car+48 was
+  zero 70–90 % of the time and otherwise rose and fell smoothly in short spells
+  to about ±1,100–1,600 (12–14° of wheel); two cars in contact reached 6,372
+  (27°). SC; DT (without the steering term the near-car agreement
   fell by 0.6–1.1 points; a reverse-chase frame at full lock matches).
 - Helmet: one bitmap element, id 42h at (0, 42, 166), type bit 4 (drawn only
   with a driver), 9 frames over 180°:
@@ -1012,9 +1015,20 @@ stored code of those segments is 3, grey).
   frames taken at different places (the rest are cars); drawing every car
   instead of the window put about 85 pixels into the mirrors that the game
   leaves empty.
-- A later cockpit renderer can draw real rear views; for the original look it
-  needs this list (`mirrorImage` in cars.mjs) and the backdrop from the
-  game's frame.
+- For the original look a renderer needs this list (`mirrorImage` in
+  cars.mjs) and the backdrop from the game's frame (`mirrors=game`).
+- Real rear views (`mirrors=real`, the modern style; gl-track.mjs
+  `drawMirrors`): the same projection with the whole scene. Each mirror is the
+  camera turned by R:005A or R:005C, mirrored left to right, at a quarter of the
+  main view's scale (22 rows are 88 of the main view's, 40 columns 160), with
+  the horizon on row 123 and the centre on column 160 ∓ 140. The page makes the
+  glass see-through in the game's overlay (`keyFrame` with the outline,
+  `mirrorClip`) and the renderer draws only there, through the stencil. The
+  cars are built for each mirror's turned camera, not mirrored (the faces seen
+  are the same; the mirrored pass winds the other way), for the cars in its
+  view nearer than 600 ft (`mirrorCars`); the trackside objects are those near
+  its view cone. In headless Chromium the two passes added about 2 ms a frame
+  to the page's own work.
 
 ### What a WebGL renderer can take from this
 
