@@ -37,7 +37,7 @@ void main() {
     // a pole is a strip facing the camera, widened sideways on the screen
     vec3 d0 = aPos - uCam;
     float depth0 = max(d0.x * uSinCos.x + d0.y * uSinCos.y, uDepth.x);
-    float hw = max(uPole.x, uPole.y * depth0 / uProj.x);
+    float hw = max(uPole.x, uPole.y * depth0 / abs(uProj.x));
     p.xy += aSide * hw * vec2(uSinCos.y, -uSinCos.x);
   }
   vec3 d = p - uCam;
@@ -242,6 +242,7 @@ precision highp float;
 in float vY;
 uniform vec4 uView;      // horizon row, viewport rows, x scale (wide framing), yaw/32 (image columns)
 uniform vec2 uCanvas;    // canvas width, height in pixels (of the viewport)
+uniform vec2 uOrigin;    // the viewport's lower left corner in the canvas (pixels)
 uniform vec3 uGround;
 uniform int uUseScene;   // 1: sky and horizon from the game's tables
 uniform int uImage;      // 1: draw the horizon image
@@ -263,7 +264,7 @@ void main() {
   if (above <= 0.0) {
     if (uTexMode == 0 || uUseScene == 0) { outColour = vec4(uGround, 1.0); return; }
     // the ground plane under the camera: where this pixel's ray meets it (the track's projection inverted)
-    float xn = (gl_FragCoord.x / uCanvas.x) * 2.0 - 1.0;
+    float xn = ((gl_FragCoord.x - uOrigin.x) / uCanvas.x) * 2.0 - 1.0;
     float depth = uProj.y * uCamH / max(uProj.z - vY, 1e-4);
     float lat = xn * depth / uProj.x;
     vec2 w = uCam.xy + vec2(lat * uSinCos.y + depth * uSinCos.x, -lat * uSinCos.x + depth * uSinCos.y);
@@ -275,7 +276,7 @@ void main() {
     outColour = vec4(mix(uSkyHorizon, uSkyTop, t), 1.0);
     return;
   }
-  float xn = (gl_FragCoord.x / uCanvas.x) * 2.0 - 1.0;
+  float xn = ((gl_FragCoord.x - uOrigin.x) / uCanvas.x) * 2.0 - 1.0;
   float col = 160.0 + xn * 160.0 / uView.z;          // game screen column
   if (uImage == 1 && above <= 8.0) {
     vec2 uv = vec2((uView.w + col) / 512.0, (8.0 - above) / 8.0);
@@ -301,6 +302,15 @@ export const COLOURS = {
 
 const VSCALE = (0x6e80 * 2) / 65536 * 32 * 8; // rows per (Z unit / fine depth unit)
 
+// flat shapes in clip space: the mirrors' glass into the stencil
+const FLAT_VS = `#version 300 es
+layout(location = 0) in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+const FLAT_FS = `#version 300 es
+precision mediump float;
+out vec4 outColour;
+void main() { outColour = vec4(0.0); }`;
+
 function compile(gl, type, src) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
@@ -319,7 +329,8 @@ function program(gl, vs, fs) {
 
 export class TrackRenderer {
   constructor(canvas) {
-    const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+    // the stencil holds the mirrors' glass (drawMirrors)
+    const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, stencil: true });
     if (!gl) throw new Error('WebGL2 is not available');
     this.gl = gl;
     this.canvas = canvas;
@@ -332,7 +343,7 @@ export class TrackRenderer {
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
     this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette', 'uHazeMode', 'uHaze'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
     this.objects = null;
-    this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon',
+    this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uOrigin', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon',
       'uPalette', 'uGroundIdx', 'uRoadIdx', 'uCam', 'uSinCos', 'uProj', 'uCamH', 'uNoise', 'uTexMode']
       .map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
     this.sceneTex = null;
@@ -343,6 +354,16 @@ export class TrackRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    // flat shapes in the canvas's clip space, for the stencil (the mirrors' glass)
+    this.flatProg = program(gl, FLAT_VS, FLAT_FS);
+    this.flatVao = gl.createVertexArray();
+    gl.bindVertexArray(this.flatVao);
+    this.flatVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.flatVbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    this.flip = false;   // the projection mirrored left to right (drawMirrors): faces wind the other way
+    this.cull = null;    // { half, margin, far }: draw only the objects near a narrow view (drawMirrors)
     this.track = null;
     this.cars = { vao: gl.createVertexArray(), buf: gl.createBuffer(), count: 0 };
     this.ground = COLOURS.ground;
@@ -637,10 +658,12 @@ export class TrackRenderer {
    * Replaces the boxes of setCars().
    * @param {object} fc    frameCars() result
    * @param {object} cars  readCars(mem)
+   * @param {string} [set] the buffers to use: 'main', or one per mirror (drawMirrors)
    */
-  setCarFrame(fc, cars) {
+  setCarFrame(fc, cars, set = 'main') {
     const gl = this.gl;
-    if (!this.carGl) {
+    this.carGls ??= {};
+    if (!this.carGls[set]) {
       const vao = gl.createVertexArray();
       gl.bindVertexArray(vao);
       const vbo = gl.createBuffer();
@@ -665,9 +688,9 @@ export class TrackRenderer {
       gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
       gl.bindVertexArray(null);
-      this.carGl = { vao, vbo, ebo, lineVao, lvbo, lebo, solidVao, svbo, objTex: gl.createTexture() };
+      this.carGls[set] = { vao, vbo, ebo, lineVao, lvbo, lebo, solidVao, svbo, objTex: gl.createTexture() };
     }
-    const G = this.carGl, m = fc.mesh;
+    const G = this.carGls[set], m = fc.mesh;
     // the haze channel: 2 + the car part the vertex belongs to (hazed as a whole, like objects)
     for (let k = 0; k < m.vertexObject.length; k++) m.data[k * 6 + 5] = 2 + m.vertexObject[k];
     for (let k = 0; k < m.lineObject.length; k++) m.lines[k * 6 + 5] = 2 + m.lineObject[k];
@@ -686,7 +709,7 @@ export class TrackRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 256, rows, 0, gl.RGBA, gl.FLOAT, centres);
     for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
     for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
-    this.carFrame = { fc, cars };
+    this.carFrame = { fc, cars, G };
   }
 
   /**
@@ -730,7 +753,6 @@ export class TrackRenderer {
       y0 = Math.round((200 - cam.top - cam.rows) * rowPx);
       h = Math.round(cam.rows * rowPx);
     }
-    gl.viewport(0, y0, w, h);
     // The game's viewport is 320 columns by cam.rows rows, shown at 4:3 (each
     // row 1.2 columns tall). In 'wide' framing the canvas keeps the vertical
     // scale and shows more to the sides. In 'stage' framing the canvas height
@@ -744,6 +766,19 @@ export class TrackRenderer {
     const nativeAspect = 320 / (rows * 1.2);
     const aspect = w / h;
     const xScale = opt.framing === 'wide' || stage ? nativeAspect / aspect : 1;
+    this.pass(cam, opt, { x: 0, y: y0, w, h, rows, horizon, xScale });
+  }
+
+  /**
+   * Draw the scene into a viewport of the canvas.
+   * @param {object} v  { x, y, w, h: the viewport (canvas pixels, from the lower left), rows, horizon:
+   *   the game rows it shows and the horizon's row in them, xScale: the game's columns across it
+   *   (1: 320 columns; negative: mirrored left to right) }
+   */
+  pass(cam, opt, v) {
+    const gl = this.gl;
+    const { w, h, rows, horizon, xScale } = v;
+    gl.viewport(v.x, v.y, w, h);
     const sx = (256 / 160) * xScale;
     const sy = (2 * VSCALE) / rows;
     const cy = 1 - (2 * horizon) / rows;
@@ -770,6 +805,7 @@ export class TrackRenderer {
     }
     gl.uniform4f(this.bgU.uView, horizon, rows, xScale, (cam.heading >> 5) & 511);
     gl.uniform2f(this.bgU.uCanvas, w, h);
+    gl.uniform2f(this.bgU.uOrigin, v.x, v.y);
     gl.uniform3fv(this.bgU.uGround, this.ground.map((k) => k / 255));
     gl.uniform3fv(this.bgU.uSkyTop, COLOURS.skyTop.map((k) => k / 255));
     gl.uniform3fv(this.bgU.uSkyHorizon, COLOURS.skyHorizon.map((k) => k / 255));
@@ -800,10 +836,11 @@ export class TrackRenderer {
       gl.uniform1i(this.u.uCrowd, 0); gl.uniform1i(this.u.uCrowdRows, 0);
       gl.uniform1i(this.u.uCrowdOn, 0);
     }
-    gl.uniform2f(this.u.uCell, (w * xScale) / 320, h / rows);
+    gl.uniform2f(this.u.uCell, Math.abs(w * xScale) / 320, h / rows);
     // a pole's half-width: one game pixel wide (xScale / 160 of the screen across), or 6 inches
     // wide and at least one game pixel (and two canvas pixels)
-    this.poleWidth = opt.poles === 'pixel' ? [0, xScale / 320] : [16, Math.max(xScale / 320, 2 / w)];
+    const xs = Math.abs(xScale);
+    this.poleWidth = opt.poles === 'pixel' ? [0, xs / 320] : [16, Math.max(xs / 320, 2 / w)];
     const hazeMode = { classic: 1, smooth: 2 }[opt.haze] ?? 0;
     this.hazeMode = hazeMode;
     gl.uniform1i(this.u.uHazeMode, hazeMode);
@@ -843,6 +880,84 @@ export class TrackRenderer {
   }
 }
 
+/** The front-face winding for this pass: mirrored passes wind the other way. */
+TrackRenderer.prototype.front = function front(winding) {
+  const gl = this.gl;
+  return this.flip ? (winding === gl.CCW ? gl.CW : gl.CCW) : winding;
+};
+
+/**
+ * The cockpit mirrors as real rear views, after draw() in the 'stage' framing
+ * (the game's 320 x 200 screen is the middle 4:3 of the canvas). Each mirror is
+ * the scene seen from the camera turned by the game's mirror angle (0F47:8A09:
+ * R:005A 9000h left, R:005C 7000h right), mirrored left to right, at a quarter
+ * of the main view's scale, with the horizon on row 123 and the mirror's centre
+ * on column 160 -/+ 140 (cars.mjs mirrorImage), drawn only on its glass (the
+ * game's outline rows 116-137, cars.mjs mirrorClip) through the stencil.
+ * @param {object} cam   the main view's camera
+ * @param {object} opt   draw()'s options
+ * @param {{ glass: object[], sides: { side: 'left'|'right', angle: number, frame?: object }[], cars?: object }} m
+ *   glass: mirrorClip(); per side its angle and the cars seen from it (frameCars with the turned camera)
+ */
+TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
+  const gl = this.gl, cv = this.canvas, W = cv.width, H = cv.height;
+  const w43 = Math.min(W, (H * 4) / 3), x0 = (W - w43) / 2, colPx = w43 / 320, rowPx = H / 200;
+  const X = (col) => x0 + col * colPx, Y = (row) => H - row * rowPx;   // canvas pixels from the lower left
+  const ndc = (x, y) => [(2 * x) / W - 1, (2 * y) / H - 1];
+  gl.enable(gl.SCISSOR_TEST);
+  gl.enable(gl.STENCIL_TEST);
+  for (const sd of m.sides) {
+    const left = sd.side === 'left';
+    const c0 = left ? 0 : 280;
+    const box = { x: Math.round(X(c0)), y: Math.round(Y(138)) };
+    box.w = Math.round(X(c0 + 40)) - box.x; box.h = Math.round(Y(116)) - box.y;
+    if (box.w < 1 || box.h < 1) continue;
+    gl.scissor(box.x, box.y, box.w, box.h);
+    gl.clearStencil(0);
+    gl.clear(gl.STENCIL_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    // the glass, row by row, into the stencil
+    const tris = [];
+    for (const r of m.glass) {
+      if (!r.active) continue;
+      const a = left ? r.left : r.gapRight, b = left ? r.gapLeft : r.right;
+      if (b <= a) continue;
+      const [ax, ay] = ndc(X(a), Y(r.row + 1)), [bx, by] = ndc(X(b), Y(r.row));
+      tris.push(ax, ay, bx, ay, ax, by, bx, ay, bx, by, ax, by);
+    }
+    if (!tris.length) continue;
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.DEPTH_TEST);
+    gl.colorMask(false, false, false, false);
+    gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    gl.useProgram(this.flatProg);
+    gl.bindVertexArray(this.flatVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.flatVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tris), gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, tris.length / 2);
+    gl.colorMask(true, true, true, true);
+    gl.stencilFunc(gl.EQUAL, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    // the rear view: 22 rows at a quarter scale are 88 of the main view's, the horizon (row 123) 28 down;
+    // 40 columns at a quarter scale are 160, mirrored
+    const saved = this.carFrame;
+    if (sd.frame && m.cars) this.setCarFrame(sd.frame, m.cars, sd.side); else this.carFrame = null;
+    this.flip = true;
+    // the objects near the mirror's view: 17 degrees either side, a margin for big stands, 4,000 ft
+    this.cull = { half: 20 / 64, margin: 400 * 64, far: 4000 * 64 };
+    try {
+      this.pass({ ...cam, heading: (cam.heading + sd.angle) & 0xffff }, opt, { ...box, rows: 88, horizon: 28, xScale: -2 });
+    } finally {
+      this.flip = false;
+      this.cull = null;
+      this.carFrame = saved;
+    }
+  }
+  gl.disable(gl.STENCIL_TEST);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.viewport(0, 0, W, H);
+};
+
 /** Bitmap quads (7 floats per vertex) with the sprite program and the shared atlas. */
 TrackRenderer.prototype.drawSprites = function drawSprites(quads) {
   const gl = this.gl, S = this.sprites;
@@ -867,12 +982,12 @@ TrackRenderer.prototype.drawSprites = function drawSprites(quads) {
 
 /** The cars of setCarFrame(): one-sided polygons by layer, lines, then bitmaps. */
 TrackRenderer.prototype.drawCars = function drawCars(cam) {
-  const gl = this.gl, G = this.carGl, { fc, cars } = this.carFrame;
+  const gl = this.gl, { fc, cars, G } = this.carFrame;
   gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, G.objTex);
   gl.activeTexture(gl.TEXTURE0);
   gl.enable(gl.CULL_FACE);
   gl.cullFace(gl.BACK);
-  gl.frontFace(this.objectFrontFace ?? gl.CCW);
+  gl.frontFace(this.front(this.objectFrontFace ?? gl.CCW));
   gl.bindVertexArray(G.vao);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, G.ebo);
   fc.frame.layers.forEach((idx, k) => {
@@ -885,7 +1000,7 @@ TrackRenderer.prototype.drawCars = function drawCars(cam) {
   gl.depthFunc(gl.LESS);
   if (fc.solid && fc.solid.length) {
     // modern style: wheels and helmets, counter-clockwise seen from outside
-    gl.frontFace(gl.CCW);
+    gl.frontFace(this.front(gl.CCW));
     gl.bindVertexArray(G.solidVao);
     gl.drawArrays(gl.TRIANGLES, 0, fc.solid.length / 6);
   }
@@ -903,13 +1018,24 @@ TrackRenderer.prototype.drawCars = function drawCars(cam) {
 TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   const gl = this.gl, O = this.objects;
   const set = opt.pitLane ? O.pit : O.track;
-  const fr = frameObjects(set.mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: true });
+  // a narrow view (the mirrors) takes only the objects near its view cone
+  const C = this.cull, mesh = set.mesh;
+  let filter;
+  if (C) {
+    const h = (cam.heading / 65536) * 2 * Math.PI, si = Math.sin(h), co = Math.cos(h);
+    filter = (i) => {
+      const c = mesh.placements[i].centre, dx = c[0] + mesh.origin[0] - cam.x, dy = c[1] + mesh.origin[1] - cam.y;
+      const dep = dx * si + dy * co, lat = dx * co - dy * si;
+      return dep > -C.margin && dep < C.far && Math.abs(lat) < Math.max(dep, 0) * C.half + C.margin;
+    };
+  }
+  const fr = frameObjects(mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: true, filter });
   gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, set.objTex);
   gl.activeTexture(gl.TEXTURE0);
   // one-sided polygons, layer by layer (later layers are coplanar details on top)
   gl.enable(gl.CULL_FACE);
   gl.cullFace(gl.BACK);
-  gl.frontFace(this.objectFrontFace ?? gl.CCW);
+  gl.frontFace(this.front(this.objectFrontFace ?? gl.CCW));
   gl.bindVertexArray(set.vao);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, set.ebo);
   fr.layers.forEach((idx, k) => {

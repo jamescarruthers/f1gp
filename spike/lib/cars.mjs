@@ -763,6 +763,32 @@ export function mirrorImage(cars, c, cam, gc = null) {
 }
 
 /**
+ * The cars a real rear view can show (gl-track.mjs drawMirrors), for
+ * frameCars' opt.drawn: in front of the camera turned by the mirror's angle,
+ * within its view (the glass is 20 columns either side of its centre at 64
+ * columns per unit of lateral over depth, 17 degrees; with a margin of
+ * `margin` fine units for the car's size) and nearer than `far` (at a quarter
+ * of the main view's scale a car 600 ft away is under a pixel wide). Not the
+ * car the camera sits in.
+ * @param {object[]} states  carStates()
+ * @param {object} cam       { x, y (fine), heading, viewedSlot? }
+ * @param {number} angle     the mirror's angle (consts.mirrorLeft / mirrorRight)
+ */
+export function mirrorCars(states, cam, angle, { far = 600 * 64, margin = 12 * 64 } = {}) {
+  const a = (((cam.heading + angle) & 0xffff) / 65536) * 2 * Math.PI, si = Math.sin(a), co = Math.cos(a);
+  const half = 20 / 64;
+  const out = [];
+  for (const c of states) {
+    if (c.pos === 'none' || c.f96 & 0x80 || c.slot === cam.viewedSlot) continue;
+    const dx = c.x - cam.x, dy = c.y - cam.y;
+    const dep = dx * si + dy * co, lat = dx * co - dy * si;
+    if (dep < 64 || dep > far || Math.abs(lat) > dep * half + margin) continue;
+    out.push({ slot: c.slot, state: c, key: 0 });
+  }
+  return out;
+}
+
+/**
  * The mirror outlines (0F47:1C01, 1D6A): screen rows 116-137, each with a span
  * [left, right) and a gap [gapLeft, gapRight) between the two mirrors, read from
  * the tables at SS:63DE (+1F2h left, +298h right, +A6h / +14Ch the gap).

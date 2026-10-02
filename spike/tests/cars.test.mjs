@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { steerAngle, wheelFrame, helmetFrame, lerpCarStates } from '../lib/cars.mjs';
+import { steerAngle, wheelFrame, helmetFrame, lerpCarStates, mirrorCars } from '../lib/cars.mjs';
 
 const HERE = import.meta.dirname;
 const OUT = path.join(HERE, '..', 'out');
@@ -195,4 +195,27 @@ test('Monza (p3 captures, emulator paused: the screen shows the previous frame)'
     if (r.far.px) assert.ok(r.far.pct >= 97, `${d} far ${JSON.stringify(r.far)}`);
     if (r.mirror.px) assert.ok(r.mirror.pct >= 90, `${d} mirror ${JSON.stringify(r.mirror)}`);
   }
+});
+
+test('the cars a rear view can show: behind, within its view, not too far, not our own', () => {
+  // the camera at the origin heading 0 (looking along +y); the left mirror turned by 9000h
+  const ft = 64;
+  const car = (slot, x, y, extra = {}) => ({ slot, x, y, pos: 'live', f96: 0, ...extra });
+  // the mirror's axis: 202.5 degrees from +y, i.e. behind and to the left (-x)
+  const a = (0x9000 / 65536) * 2 * Math.PI;
+  const along = (d, off = 0) => [d * Math.sin(a) + off * Math.cos(a), d * Math.cos(a) - off * Math.sin(a)];
+  const states = [
+    car(0, 0, 0),                                   // ours
+    car(1, ...along(100 * ft)),                     // on the axis, 100 ft
+    car(2, 0, 100 * ft),                            // ahead
+    car(3, ...along(700 * ft)),                     // too far
+    car(4, ...along(100 * ft, 80 * ft)),            // 39 degrees off the axis
+    car(5, ...along(100 * ft, 35 * ft)),            // 19 degrees: inside with the margin
+    car(6, ...along(100 * ft), { pos: 'none' }),    // not on the circuit
+    car(7, ...along(100 * ft), { f96: 0x80 }),      // not drawn
+  ];
+  const got = mirrorCars(states, { x: 0, y: 0, heading: 0, viewedSlot: 0 }, 0x9000).map((e) => e.slot);
+  assert.deepEqual(got, [1, 5]);
+  // the right mirror (7000h) sees neither
+  assert.deepEqual(mirrorCars(states, { x: 0, y: 0, heading: 0, viewedSlot: 0 }, 0x7000).map((e) => e.slot), []);
 });

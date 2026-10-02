@@ -61,6 +61,9 @@
                           to the screen as the game draws it
     poles=solid|pixel     flag poles and posts six inches wide, at least one game pixel
                           (modern), or one game pixel wide as the game draws them (classic)
+    mirrors=real|game     the cockpit mirrors: real rear views from our renderer (modern),
+                          or the game's (classic): its fixed backdrop with the cars behind
+                          as its bitmaps
     fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
                           (30, the default, is the most the game's physics allows; game
                           keeps the game's own setting, 15 in the Quick Race)
@@ -155,7 +158,7 @@ import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { readScene, readPalette, horizonOff, textureOn, markingsKey } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
-import { readCars, carStates, selectCars, frameCars, lerpCarStates } from './lib/cars.mjs';
+import { readCars, carStates, selectCars, frameCars, lerpCarStates, mirrorClip, mirrorCars as mirrorCarList } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
 import { makeAmigaSound } from './lib/amiga-sound.mjs';
 import { keysHtml } from './lib/keys.mjs';
@@ -186,6 +189,7 @@ const opts = {
   textureParam: q.get('texture'),
   crowdParam: q.get('crowd'),
   polesParam: q.get('poles'),
+  mirrorsParam: ['real', 'game'].includes(q.get('mirrors')) ? q.get('mirrors') : null,
   audio: q.get('audio') ?? 'own',
   // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
@@ -207,6 +211,7 @@ function applyStyle(style) {
   opts.texture = opts.textureParam ?? (style === 'classic' ? 'classic' : 'smooth');
   opts.crowd = opts.crowdParam ?? (style === 'classic' ? 'sharp' : 'stands');
   opts.poles = opts.polesParam ?? (style === 'classic' ? 'pixel' : 'solid');
+  opts.mirrors = opts.mirrorsParam ?? (style === 'classic' ? 'game' : 'real');
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
   document.body.classList.toggle('classic', style === 'classic');
   showShape();
@@ -365,7 +370,7 @@ function blitScreen(hudView) {
     const filter = shown.brightness < 0.99 ? `brightness(${shown.brightness.toFixed(3)})` : '';
     if (glCanvas.style.filter !== filter) glCanvas.style.filter = filter;
     // the cars in the cockpit mirrors: the game draws them in the step the fill replaces
-    if (hudView.cockpit && carData && mirrorCars.length) {
+    if (hudView.cockpit && carData && mirrorCars.length && !hudView.glass) {
       const pal = shown.brightness < 0.99 ? hudView.palette.map((v) => Math.round(v * shown.brightness)) : hudView.palette;
       paintMirrors(hud.image.data, mirrorCars, carData, pal);
     }
@@ -390,6 +395,7 @@ function sizeCanvas() {
 const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
 let lastGameFrameAt = -1e9;   // when the last new game frame arrived (the game is racing)
+let realMirrors = false;      // this frame draws real rear views in the cockpit mirrors
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
 const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
 let governor = null;          // the emulated CPU speed (cycles=auto)
@@ -458,9 +464,12 @@ function frame(now) {
   const drawing = !!routine && routine.installed && (now - routineSeen.at < 500 || (!!cur && cur.st.paused));
   const swap = opts.layout === 'single' && opts.screen === 'new' && !!cur && drawing;
   let hudView = null;
+  // real rear views in the cockpit mirrors (drawn under the game's glass, made see-through)
+  realMirrors = swap && cur.st.view.mode === 'cockpit' && opts.mirrors === 'real' && !!carData;
   if (swap) {
     const v = viewportFill(cur.st.view.mode), pal = readPalette(mem), k = routine.k;
-    hudView = { top: v.top, rows: v.rows, cockpit: cur.st.view.mode === 'cockpit', marker: [pal[k * 3], pal[k * 3 + 1], pal[k * 3 + 2]], palette: pal };
+    hudView = { top: v.top, rows: v.rows, cockpit: cur.st.view.mode === 'cockpit', marker: [pal[k * 3], pal[k * 3 + 1], pal[k * 3 + 2]], palette: pal,
+      glass: realMirrors ? mirrorClip(carData) : null };
   }
   if (ci) blitScreen(hudView);
   if (opts.layout === 'single' && swap !== swapped) {
@@ -507,10 +516,11 @@ function frame(now) {
       (a, b) => a.cam.rows !== b.cam.rows || Math.hypot(a.cam.x - b.cam.x, a.cam.y - b.cam.y) > 64 * 200);
     const cam = alpha < 1 ? lerpCamera(prev.cam, shown.cam, alpha) : { ...shown.cam };
     const st = shown.st;
+    let states = null;
+    const modern = opts.style === 'modern';
     if (opts.cars && carData && shown.cars) {
       const smoothCars = alpha < 1 && prev.cars;
-      const states = smoothCars ? lerpCarStates(prev.cars.states, shown.cars.states, alpha) : shown.cars.states;
-      const modern = opts.style === 'modern';
+      states = smoothCars ? lerpCarStates(prev.cars.states, shown.cars.states, alpha) : shown.cars.states;
       // classic: the game's choice of cars; modern: every car on the circuit, 3D at any distance
       const fc = frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
         { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : shown.cars.drawn, all: modern,
@@ -548,7 +558,19 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      renderer.draw(cam, { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, pitLane: renderer.objects ? cameraInPitLane(mem) : false });
+      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
+      renderer.draw(cam, drawOpts);
+      if (realMirrors && swapped && st.view.mode === 'cockpit') {
+        // each mirror: the cars in its view, seen from the camera turned by the mirror's angle (not
+        // mirrored: the faces seen are the same), drawn mirrored by the renderer
+        const sides = [['left', carData.consts.mirrorLeft], ['right', carData.consts.mirrorRight]].map(([side, angle]) => ({
+          side, angle,
+          frame: states ? frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: (cam.heading + angle) & 0xffff, mode: st.view.mode },
+            { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, modern, paletteRgb: renderer.lastPalette, wide: true,
+              drawn: mirrorCarList(states, { x: cam.x, y: cam.y, heading: cam.heading, viewedSlot: st.view.viewedSlot }, angle) }) : null,
+        }));
+        renderer.drawMirrors(cam, drawOpts, { glass: mirrorClip(carData), sides, cars: carData });
+      }
     }
     perf.frames++;
   }
