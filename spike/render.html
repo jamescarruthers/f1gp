@@ -163,7 +163,7 @@ import { fromCompiled } from './lib/track-mesh.mjs';
 import { TrackRenderer, cameraFromState, lerpCamera } from './lib/gl-track.mjs';
 import { readScene, readPalette, horizonOff, textureOn, markingsKey } from './lib/scene.mjs';
 import { readObjects, readCrowd, cameraInPitLane } from './lib/objects.mjs';
-import { readCars, carStates, selectCars, frameCars, lerpCarStates, mirrorClip, mirrorCars as mirrorCarList } from './lib/cars.mjs';
+import { readCars, carStates, selectCars, frameCars, lerpCarStates, mirrorClip, mirrorCars as mirrorCarList, spinWheels } from './lib/cars.mjs';
 import { makeOwnAudio } from './lib/audio.mjs';
 import { makeAmigaSound } from './lib/amiga-sound.mjs';
 import { keysHtml } from './lib/keys.mjs';
@@ -424,6 +424,8 @@ const trackFiles = {};
 let ci = null, mem = null, reader = null, circuit = -1;
 let lastGameFrameAt = -1e9;   // when the last new game frame arrived (the game is racing)
 let realMirrors = false;      // this frame draws real rear views in the cockpit mirrors
+let pageDt = 0;               // seconds since the last page frame
+const wheelSpins = new Map(); // each car's wheels' turn (modern style), by slot
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
 const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
 let governor = null;          // the emulated CPU speed (cycles=auto)
@@ -479,6 +481,7 @@ function frameLoop(now) {
 }
 
 function frame(now) {
+  pageDt = perf.last !== null ? Math.min(0.25, (now - perf.last) / 1000) : 0;
   if (perf.last !== null) perf.raf.push(now - perf.last);
   perf.last = now;
   // the game's own 3D drawing: replaced by the fill for the new view, put back for the original
@@ -555,6 +558,8 @@ function frame(now) {
     if (opts.cars && carData && shown.cars) {
       const smoothCars = alpha < 1 && prev.cars;
       states = smoothCars ? lerpCarStates(prev.cars.states, shown.cars.states, alpha) : shown.cars.states;
+      // modern style: the wheels roll (not while the game is paused)
+      if (modern) states = spinWheels(wheelSpins, states, st.paused ? 0 : pageDt);
       // classic: the game's choice of cars; modern: every car on the circuit, 3D at any distance
       const fc = frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: cam.heading, mode: st.view.mode },
         { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, drawn: modern ? undefined : shown.cars.drawn, all: modern,

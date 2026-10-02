@@ -302,6 +302,39 @@ export const COLOURS = {
 
 const VSCALE = (0x6e80 * 2) / 65536 * 32 * 8; // rows per (Z unit / fine depth unit)
 
+// the cars' shadows (modern style): soft, dark, on the ground, fading with distance
+const SHADOW_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUv;
+uniform vec3 uCam;
+uniform vec2 uSinCos;
+uniform vec4 uProj;
+uniform vec2 uDepth;
+out vec2 vUv;
+out float vDepth;
+void main() {
+  vec3 d = aPos - uCam;
+  float lat = d.x * uSinCos.y - d.y * uSinCos.x;
+  float depth = d.x * uSinCos.x + d.y * uSinCos.y;
+  float n = uDepth.x, f = uDepth.y;
+  gl_Position = vec4(uProj.x * lat, uProj.y * d.z + uProj.z * depth, (depth * (f + n) - 2.0 * f * n) / (f - n), depth);
+  vUv = aUv;
+  vDepth = depth;
+}`;
+const SHADOW_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+in float vDepth;
+out vec4 outColour;
+void main() {
+  // a rounded box, dark to near its edge, soft there; gone by 1,500 ft
+  vec2 a = abs(vUv);
+  float r = pow(pow(a.x, 4.0) + pow(a.y, 4.0), 0.25);
+  float k = 0.55 * (1.0 - smoothstep(0.7, 1.0, r)) * (1.0 - smoothstep(800.0 * 64.0, 1500.0 * 64.0, vDepth));
+  outColour = vec4(0.0, 0.0, 0.0, k);
+}`;
+
 // flat shapes in clip space: the mirrors' glass into the stencil
 const FLAT_VS = `#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -354,6 +387,15 @@ export class TrackRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    // the cars' shadows: x, y, z, u, v
+    this.shadowProg = program(gl, SHADOW_VS, SHADOW_FS);
+    this.shU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth'].map((n) => [n, gl.getUniformLocation(this.shadowProg, n)]));
+    this.shadowVao = gl.createVertexArray();
+    gl.bindVertexArray(this.shadowVao);
+    this.shadowVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowVbo);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
     // flat shapes in the canvas's clip space, for the stencil (the mirrors' glass)
     this.flatProg = program(gl, FLAT_VS, FLAT_FS);
     this.flatVao = gl.createVertexArray();
@@ -958,6 +1000,31 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
   gl.viewport(0, 0, W, H);
 };
 
+/** The cars' shadows (frameCars().shadows, modern style): on the road, under the cars, blended. */
+TrackRenderer.prototype.drawShadows = function drawShadows(quads) {
+  const gl = this.gl, u = this.shU, k = this.lastUniforms;
+  gl.useProgram(this.shadowProg);
+  gl.uniform3f(u.uCam, ...k.cam);
+  gl.uniform2f(u.uSinCos, ...k.sinCos);
+  gl.uniform4f(u.uProj, ...k.proj);
+  gl.uniform2f(u.uDepth, ...k.depth);
+  gl.bindVertexArray(this.shadowVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, this.shadowVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.depthMask(false);
+  gl.depthFunc(gl.LEQUAL);
+  gl.enable(gl.POLYGON_OFFSET_FILL);
+  gl.polygonOffset(-4, -16);
+  gl.drawArrays(gl.TRIANGLES, 0, quads.length / 5);
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.depthFunc(gl.LESS);
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.useProgram(this.prog);
+};
+
 /** Bitmap quads (7 floats per vertex) with the sprite program and the shared atlas. */
 TrackRenderer.prototype.drawSprites = function drawSprites(quads) {
   const gl = this.gl, S = this.sprites;
@@ -983,6 +1050,7 @@ TrackRenderer.prototype.drawSprites = function drawSprites(quads) {
 /** The cars of setCarFrame(): one-sided polygons by layer, lines, then bitmaps. */
 TrackRenderer.prototype.drawCars = function drawCars(cam) {
   const gl = this.gl, { fc, cars, G } = this.carFrame;
+  if (fc.shadows && fc.shadows.length) this.drawShadows(fc.shadows);
   gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, G.objTex);
   gl.activeTexture(gl.TEXTURE0);
   gl.enable(gl.CULL_FACE);

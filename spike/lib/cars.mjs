@@ -160,7 +160,7 @@ export function carStates(cars, st) {
     return {
       slot: c.slot, ptr: c.ptr, number, team, id,
       x: c.x >> 8, y: c.y >> 8, z: c.z, pitch: c.pitch & 0xffff, heading: rd.u16(p + 0x1a), wobble, yaw,
-      steer: rd.s16(p + 0x48), palette: ((team - 1) << 4) & 0xffff,
+      steer: rd.s16(p + 0x48), palette: ((team - 1) << 4) & 0xffff, speed: c.speed ?? 0,
       driver: (f96 & 0x20) === 0, helmet: (f96 & 0x20) === 0 ? ((number - 1) << 4) + cars.consts.helmetBase : null,
       alt: team === 1, f96, f97, f9a, race2: rd.s8(p + 0x66), segLin: (rd.u16(p + 0x14) << 4) + rd.u16(p + 0x12),
       pos: c.pos,
@@ -651,6 +651,7 @@ export function shapeParts(cars, shape, pose, cam, opt = {}) {
       } else {
         const front = el.id >= 0x21;
         out.elements.push({ kind: 'wheel3d', at: W[el.point], front, yaw: (pose.yaw + (front ? steerAngle(pose.steer) : 0)) & 0xffff,
+          spin: pose.spin ?? 0, contrast: pose.wheelContrast ?? 1,
           palette: el.type & 2 ? el.palette : pose.palette, what: front ? 'front wheel' : 'rear wheel' });
       }
     }
@@ -849,12 +850,14 @@ export function frameCars(cars, st, cam, opt = {}) {
   const list = [], mirrors = [];
   const vtx = (p, c, oi) => { data.push(p[0] - origin[0], p[1] - origin[1], p[2], c[0], c[1], c[2]); vobj.push(oi); };
   const wheelBias = opt.wheelBias ?? 0.25;
-  const solids = [];
+  const solids = [], shadows = [];
   for (const e of chosen) {
     const c = e.state;
     if (opt.all && c.slot === camObjSlot && !(c.f9a & 0x08)) continue;
     const cp = carParts(cars, c, cam, { wide: opt.wide, cameraObject: c.slot === camObjSlot, modern: opt.modern });
     list.push({ slot: c.slot, key: e.key, parts: cp.parts });
+    // modern style: a soft shadow on the ground under each car drawn
+    if (opt.modern && cp.parts.some((p) => p.what === 'car' && (p.kind === 'polygons' || p.kind === 'bitmap'))) shadows.push(c);
     // parts painted after the car (broken wings over its own wings) go on higher decal layers
     let layerBase = 0, carTop = 0, carSeen = false;
     for (const part of cp.parts) {
@@ -910,7 +913,54 @@ export function frameCars(cars, st, cam, opt = {}) {
   let o = 0;
   for (const el of solids) o = emitSolid(cars, opt.paletteRgb, el, solid, o, origin);
   mesh.counts.triangles += n / 18;
-  return { mesh, frame, list, mirrors, solid };
+  return { mesh, frame, list, mirrors, solid, shadows: shadowQuads(shadows, origin) };
+}
+
+/**
+ * Turn the wheels: each car's wheels roll by the distance it covered in dt
+ * seconds (speed, car+10h, in 1/64 ft a second, over the wheel's radius), kept
+ * per car in `spins` (a Map). The hub's pattern repeats every fifth of a turn;
+ * when the wheel turns more than half of that between two drawn frames the
+ * pattern would strobe, so it fades (wheelContrast 1 to 0) as a real wheel
+ * blurs.
+ * @returns {object[]} the states with spin (radians) and wheelContrast
+ */
+export function spinWheels(spins, states, dt) {
+  const turn = 2 * Math.PI, half = Math.PI / 5;
+  return states.map((c) => {
+    const w = (c.speed ?? 0) / WHEEL_R;
+    const a = ((spins.get(c.slot) ?? 0) + w * dt) % turn;
+    spins.set(c.slot, a);
+    return { ...c, spin: a, wheelContrast: Math.max(0, Math.min(1, 1 - Math.abs(w * dt) / half)) };
+  });
+}
+
+// the shadow's size about the car's reference point (fine units, forward and right):
+// beyond the rear tyres' backs, the front wing and the tyres' outsides, so that it
+// shows round the car and between its wheels
+const SHADOW = { back: -560, front: 610, side: 340 };
+
+/**
+ * Shadow quads on the ground under cars (their reference point, height z):
+ * two triangles a car, x, y, z (relative to origin), u, v (-1 to 1 across and
+ * along the shadow) per vertex.
+ */
+export function shadowQuads(states, origin) {
+  const out = new Float32Array(states.length * 30);
+  let o = 0;
+  for (const c of states) {
+    const h = (c.yaw / 65536) * 2 * Math.PI, s = Math.sin(h), co = Math.cos(h);
+    // (forward, right) to world as the wheels and helmets (emitSolid)
+    const at = (f, r) => [c.x - origin[0] + s * f + co * r, c.y - origin[1] + co * f - s * r];
+    const corner = (u, v) => {
+      const f = v < 0 ? SHADOW.back : SHADOW.front, r = u * SHADOW.side;
+      const [x, y] = at(f, r);
+      out[o++] = x; out[o++] = y; out[o++] = c.z; out[o++] = u; out[o++] = v;
+    };
+    corner(-1, -1); corner(1, -1); corner(1, 1);
+    corner(-1, -1); corner(1, 1); corner(-1, 1);
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ modern style: 3D wheels and helmets
@@ -930,26 +980,28 @@ function solidTemplates(cars) {
   const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
   const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   // one triangle facing away from `centre` (vertices ordered counter-clockwise seen from outside)
-  const tri = (out, a, b, c, centre, code) => {
+  // pattern: for the wheels' turning, 1 or -1 for the hub's light and dark wedges, 0.5 or -0.5
+  // for the sidewall's faint ones, 0 for none
+  const tri = (out, a, b, c, centre, code, pattern = 0) => {
     let n = cross(sub(b, a), sub(c, a));
     const m = [(a[0] + b[0] + c[0]) / 3 - centre[0], (a[1] + b[1] + c[1]) / 3 - centre[1], (a[2] + b[2] + c[2]) / 3 - centre[2]];
     if (n[0] * m[0] + n[1] * m[1] + n[2] * m[2] < 0) { [b, c] = [c, b]; n = n.map((x) => -x); }
     const l = Math.hypot(...n) || 1;
-    out.push({ p: [a, b, c], n: n.map((x) => x / l), code });
+    out.push({ p: [a, b, c], n: n.map((x) => x / l), code, pattern });
   };
-  const quad = (out, a, b, c, d, centre, code) => { tri(out, a, b, c, centre, code); tri(out, a, c, d, centre, code); };
+  const quad = (out, a, b, c, d, centre, code, pattern = 0) => { tri(out, a, b, c, centre, code, pattern); tri(out, a, c, d, centre, code, pattern); };
   const wheel = (width) => {
     const out = [], hw = width / 2, N = WHEEL_SIDES;
     const ring = (r, side) => Array.from({ length: N }, (_, i) => { const t = (2 * Math.PI * i) / N; return [r * Math.cos(t), side * hw, r * Math.sin(t)]; });
     const oL = ring(WHEEL_R, -1), oR = ring(WHEEL_R, 1), iL = ring(WHEEL_R * HUB_R, -1), iR = ring(WHEEL_R * HUB_R, 1);
     const cL = [0, -hw, 0], cR = [0, hw, 0];
     for (let i = 0; i < N; i++) {
-      const j = (i + 1) % N;
+      const j = (i + 1) % N, w = i & 1 ? -1 : 1;
       quad(out, oL[i], oL[j], oR[j], oR[i], [0, 0, 0], 0);   // tread: tyre, code 0
-      quad(out, oL[i], oL[j], iL[j], iL[i], cR, 0);          // sidewalls face along the axle
-      quad(out, oR[i], oR[j], iR[j], iR[i], cL, 0);
-      tri(out, iL[i], iL[j], cL, cR, 10);                    // hubs: code 10
-      tri(out, iR[i], iR[j], cR, cL, 10);
+      quad(out, oL[i], oL[j], iL[j], iL[i], cR, 0, w / 2);   // sidewalls face along the axle
+      quad(out, oR[i], oR[j], iR[j], iR[i], cL, 0, w / 2);
+      tri(out, iL[i], iL[j], cL, cR, 10, w);                 // hubs: code 10, in light and dark wedges
+      tri(out, iR[i], iR[j], cR, cL, 10, w);
     }
     return out;
   };
@@ -994,17 +1046,25 @@ function emitSolid(cars, rgb, el, out, o, origin) {
   const tris = solidTriangles(cars, el);
   const h = (el.yaw / 65536) * 2 * Math.PI, s = Math.sin(h), c = Math.cos(h);
   const x0 = el.at[0] - origin[0], y0 = el.at[1] - origin[1], z0 = el.at[2];
+  // a wheel rolls about its axle (local y): forward, its top moves forward
+  const wheel = el.kind === 'wheel3d', sp = wheel ? el.spin ?? 0 : 0, ss = Math.sin(sp), cs = Math.cos(sp);
+  const turn = (p) => (sp ? [p[0] * cs + p[2] * ss, p[1], p[2] * cs - p[0] * ss] : p);
+  // the hub's wedges, light and dark, fading to their mean as the wheel blurs
+  const contrast = wheel ? el.contrast ?? 1 : 0;
   for (const t of tris) {
-    const nx = s * t.n[0] + c * t.n[1], ny = c * t.n[0] - s * t.n[1], nz = t.n[2];
+    const tn = turn(t.n);
+    const nx = s * tn[0] + c * tn[1], ny = c * tn[0] - s * tn[1], nz = tn[2];
     const shade = 0.55 + 0.45 * Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+    // the light wedges are lighter (hubs are often black), by their mean when blurred
+    const w = t.pattern ?? 0, lift = (0.13 * Math.abs(w) + 0.13 * contrast * w) * shade;
     const idx = cars.palettes[(el.palette + t.code) & 0xffff] ?? 0;
-    const r = rgb ? Math.min(1, (rgb[idx * 3] / 255) * shade) : 0.38 * shade;
-    const g = rgb ? Math.min(1, (rgb[idx * 3 + 1] / 255) * shade) : 0.38 * shade;
-    const b = rgb ? Math.min(1, (rgb[idx * 3 + 2] / 255) * shade) : 0.38 * shade;
+    const r = Math.min(1, (rgb ? (rgb[idx * 3] / 255) * shade : 0.38 * shade) + lift);
+    const g = Math.min(1, (rgb ? (rgb[idx * 3 + 1] / 255) * shade : 0.38 * shade) + lift);
+    const b = Math.min(1, (rgb ? (rgb[idx * 3 + 2] / 255) * shade : 0.38 * shade) + lift);
     // (forward, right, up) is a mirror image of world (x, y, z): reverse the order to keep
     // the triangle counter-clockwise from outside
     for (let k = 2; k >= 0; k--) {
-      const p = t.p[k];
+      const p = turn(t.p[k]);
       out[o++] = x0 + s * p[0] + c * p[1]; out[o++] = y0 + c * p[0] - s * p[1]; out[o++] = z0 + p[2];
       out[o++] = r; out[o++] = g; out[o++] = b;
     }
