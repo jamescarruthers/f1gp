@@ -1028,7 +1028,9 @@ stored code of those segments is 3, grey).
   are the same; the mirrored pass winds the other way), for the cars in its
   view nearer than 600 ft (`mirrorCars`); the trackside objects are those near
   its view cone. In headless Chromium the two passes added about 2 ms a frame
-  to the page's own work. Each view is drawn into a picture of its own at twice
+  to the page's own work, so the page draws one mirror again each frame, in
+  turn (each 30 times a second at 60 page frames, as often as the game moves
+  the cars), and the other lays its last picture on the glass. Each view is drawn into a picture of its own at twice
   the glass's size and laid on the glass bowed as a convex mirror bows it (the
   middle a tenth larger, the corners as they are) with a faint ripple; over it
   the renderer lays a glass effect, through the same stencil: a sheen from the
@@ -1037,11 +1039,15 @@ stored code of those segments is 3, grey).
   depth, seen from a fixed sun, of the trackside shapes (every side of each,
   since the game keeps one display list per view sector) and the track's raised
   parts, on a map 2,000 ft across centred 600 ft ahead of the camera, snapped to
-  its texels and drawn again when that point has moved 200 ft. Faces turned to
-  the sun look themselves up in it (nine taps) and keep 62 % of their light in a
-  shadow; the ground beyond the track does the same from its plane. The cars keep
+  its texels and drawn again when that point has moved 200 ft: into a second
+  map, a quarter of the shapes a frame, while the first stays in use (drawn
+  whole, the map took 3.5 ms of the GPU's time in one frame in headless
+  Chromium with SwiftShader; a quarter takes 0.6 ms). Faces turned to the sun
+  look themselves up in it (four taps half a texel apart, each comparing four
+  texels) and keep 62 % of their light in a shadow; the ground beyond the track does the same from its plane. The cars keep
   their soft shadows and the bitmaps cast none. In the cockpit the page dims the
-  game's overlay to 70 % when the driver's head and four points round it are in
+  game's overlay to 70 %, in its pixels (`dimPixels` in overlay.mjs; a CSS filter
+  that changes each frame is slow to redraw in some browsers), when the driver's head and four points round it are in
   a shadow, by rays toward the sun against the same shapes (sun-ray.mjs), eased.
 
 ### What a WebGL renderer can take from this
