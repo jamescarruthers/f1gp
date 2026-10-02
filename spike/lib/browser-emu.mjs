@@ -20,6 +20,7 @@
 //               KeyboardEvent.code, e.g. "KeyA"), mouse through page.mouse over the canvas
 //   blockNetwork  abort every request that is not to our 127.0.0.1 server (default false)
 //   viewport    default { width: 1024, height: 790 }
+//   initScript  a script run in the page before its own (Playwright's addInitScript)
 //   readyTimeout  ms to wait for window.emuReady (default 60000)
 //   chromiumArgs  extra Chromium flags
 //   autoplay    pass --autoplay-policy=no-user-gesture-required (default true); false
@@ -133,6 +134,7 @@ export async function launch({
   keyMode,
   blockNetwork = false,
   viewport = { width: 1024, height: 790 },
+  initScript,
   readyTimeout = 60000,
   chromiumArgs = [],
   autoplay = true,
@@ -173,6 +175,8 @@ export async function launch({
       return route.abort("blockedbyclient");
     });
   }
+  // run in the page before its own scripts (a function or { path } as Playwright's addInitScript)
+  if (initScript) await context.addInitScript(initScript);
   const page = await context.newPage();
   page.on("console", (m) => consoleMessages.push({ t: Date.now() - t0, type: m.type(), text: m.text(),
     location: m.location()?.url }));

@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sceneRoutine, viewportFill, chooseMarker, keyFrame, shownMarker, paintMirrors } from '../lib/overlay.mjs';
+import { sceneRoutine, viewportFill, chooseMarker, keyFrame, shownMarker, paintMirrors, dimPixels } from '../lib/overlay.mjs';
 
 const IMAGE_SEG = 0x1a2;
 const lin = (seg, off) => ((seg + IMAGE_SEG) << 4) + off;
@@ -169,4 +169,12 @@ test('mirror cars: painted inside the glass only, far cars first', () => {
   assert.deepEqual(px(39, 123), [255, 0, 0, 255], 'far car, inside the glass');
   assert.deepEqual(px(40, 123), [0, 0, 0, 0], 'clipped at the glass edge');
   assert.deepEqual(px(20, 115), [0, 0, 0, 0], 'above the mirror rows');
+});
+
+test('the overlay dims in its pixels: opaque ones darker, see-through ones as they were', () => {
+  const px = new Uint8ClampedArray([200, 100, 50, 255, 9, 9, 9, 0, 255, 255, 255, 255]);
+  dimPixels(px, 0.7);
+  assert.deepEqual([...px], [140, 70, 35, 255, 9, 9, 9, 0, 179, 179, 179, 255]);
+  dimPixels(px, 1);
+  assert.deepEqual([...px.subarray(0, 4)], [140, 70, 35, 255], 'full light leaves it');
 });

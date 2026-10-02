@@ -329,6 +329,33 @@ frame rate is limited by SwiftShader filling pixels on the CPU in the GPU
 process (the profile does not see it): a fifth of the pixels gives three
 times the frames. A machine with a GPU does not have that limit.
 
+**Frame time after the shadows (done).** With the shadows and the steady
+trackside objects the game stuttered. The page shares the main thread with the
+emulator, so a long page frame holds up the game too. Measured with
+`spike/probes/p5-stutter.mjs`: Monza Quick Race, cockpit view, the autopilot
+driving, 15 seconds, headless Chromium with SwiftShader, 800×500.
+
+| The page's own work a frame | Median | Slowest tenth | Slowest |
+| --- | --- | --- | --- |
+| Modern style, as first merged | 6.3 ms | 9.4 ms | 9.4 ms |
+| Modern style, now | 4.2–5.0 ms | 6.6–6.8 ms | 7.6–7.8 ms |
+| Shadows off, game objects and mirrors | 2.9 ms | 3.9 ms | 7.0 ms |
+
+What changed: the shadow map is drawn again a quarter at a time over four
+frames into a second map, while the first stays in use (whole, it cost 3.5 ms
+of GPU time in one frame; a quarter costs 0.6 ms; frames that draw a quarter
+now take as long as the rest); the mirrors are drawn again in turn, one a
+frame; each sector's object indices are worked out once, and each pass keeps
+its index buffer while the same sides of the same shapes are in view (82 % of
+passes upload nothing); the shadow lookup takes four taps instead of nine; and
+the cockpit is dimmed in its pixels rather than by a CSS filter. Ruled out:
+garbage collection (22 ms in 10 seconds, the longest pause 6.4 ms), long tasks
+(none over 20 ms), the cockpit's sun rays (9 µs a frame) and their grid
+(10 ms, built once per scene). The page's status line shows the slowest frame
+of each second and the page's own work, with the shadows, objects and mirrors
+settings, so a machine where it still stutters can be checked by setting
+`shadows=off`, `objects=game` and `mirrors=game` one at a time.
+
 To do:
 
 - Check that no game logic depends on the drawing: run whole races with and

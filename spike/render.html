@@ -72,6 +72,10 @@
                           slightly by a fixed sun (modern), or as the game colours them
     shadows=on|off        the stands', buildings', bridges' and walls' shadows from the same
                           sun on the road, the ground and each other (modern), or none
+    objects=steady|game   the trackside shapes and bitmaps: the near version at every
+                          distance, turned by the ray's own angle (modern: trees and boards
+                          do not pop or flick), or as the game picks them by depth and
+                          screen column (classic; less to draw)
     fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
                           (30, the default, is the most the game's physics allows; game
                           keeps the game's own setting, 15 in the Quick Race)
@@ -173,7 +177,7 @@ import { makeOwnAudio } from './lib/audio.mjs';
 import { makeAmigaSound } from './lib/amiga-sound.mjs';
 import { keysHtml } from './lib/keys.mjs';
 import { manualHelper } from './lib/manual.mjs';
-import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker } from './lib/overlay.mjs';
+import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shownMarker, dimPixels } from './lib/overlay.mjs';
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
 import { timerSleep } from './lib/dos-sleep.mjs';
 import { makeSmoother } from './lib/pixel-smooth.mjs';
@@ -204,6 +208,7 @@ const opts = {
   cockpitParam: ['smooth', 'pixels'].includes(q.get('cockpit')) ? q.get('cockpit') : null,
   shadeParam: ['on', 'off'].includes(q.get('shade')) ? q.get('shade') : null,
   shadowsParam: ['on', 'off'].includes(q.get('shadows')) ? q.get('shadows') : null,
+  objectsParam: ['steady', 'game'].includes(q.get('objects')) ? q.get('objects') : null,
   audio: q.get('audio') ?? 'own',
   // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
@@ -229,6 +234,7 @@ function applyStyle(style) {
   opts.cockpit = opts.cockpitParam ?? (style === 'classic' ? 'pixels' : 'smooth');
   opts.shade = opts.shadeParam ?? (style === 'classic' ? 'off' : 'on');
   opts.shadows = opts.shadowsParam ?? (style === 'classic' ? 'off' : 'on');
+  opts.objects = opts.objectsParam ?? (style === 'classic' ? 'game' : 'steady');
   const ck = document.getElementById('cockpit');
   if (ck) ck.value = opts.cockpit;
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
@@ -382,11 +388,15 @@ const CODE_TO_KEY = (() => {
 // ------------------------------------------------------------ original screen
 const screen = $('screen'), g = screen.getContext('2d');
 let image = g.createImageData(320, 200), pending = null;
-let hud = null; // { ctx, image } of the overlay canvas (single layout)
+let hud = null; // the overlay canvas (single layout): { ctx, image (as keyed), shown (as drawn), shade, keyed }
 let smoother = null, smootherFailed = false; // the overlay drawn through xBR (cockpit=smooth)
 let hudSmoothed = false;      // the overlay shown is the smoothed one
 function blitScreen(hudView) {
-  if (!pending) return;
+  if (!pending) {
+    // no new frame (between the game's frames, or paused): the overlay again only if its light changed
+    if (hud && hud.keyed && hud.shade !== cockpitShade) drawHud();
+    return;
+  }
   const src = pending; pending = null;
   const w = ci.width(), h = ci.height();
   if (w !== screen.width || h !== screen.height) { screen.width = w; screen.height = h; image = g.createImageData(w, h); }
@@ -396,7 +406,7 @@ function blitScreen(hudView) {
   g.putImageData(image, 0, 0);
   // the game's cockpit, dash and messages over our view: its screen with the marker see-through
   if (hudView && w === 320 && h === 200) {
-    if (!hud) { const c = $('hud').getContext('2d'); hud = { ctx: c, image: c.createImageData(320, 200) }; }
+    if (!hud) { const c = $('hud').getContext('2d'); hud = { ctx: c, image: c.createImageData(320, 200), shown: c.createImageData(320, 200), shade: 1, keyed: false }; }
     // the marker as shown (the game fades the screen in and out), and our view faded to match
     const shown = shownMarker(src, hudView.marker, hudView);
     keyFrame(src, hud.image.data, shown.rgb, hudView);
@@ -407,12 +417,20 @@ function blitScreen(hudView) {
       const pal = shown.brightness < 0.99 ? hudView.palette.map((v) => Math.round(v * shown.brightness)) : hudView.palette;
       paintMirrors(hud.image.data, mirrorCars, carData, pal);
     }
+    hud.keyed = true;
     if (opts.cockpit === 'smooth' && !smoother && !smootherFailed) {
       try { smoother = makeSmoother($('hudsmooth')); } catch (e) { smootherFailed = true; log('smooth-failed', { error: String(e) }); }
     }
     hudSmoothed = opts.cockpit === 'smooth' && !!smoother;
-    if (hudSmoothed) smoother.draw(hud.image.data); else hud.ctx.putImageData(hud.image, 0, 0);
+    drawHud();
   }
+}
+// the overlay as keyed, darkened in a shape's shadow (cockpitLight), square pixels or smoothed
+function drawHud() {
+  hud.shade = cockpitShade;
+  let im = hud.image;
+  if (cockpitShade < 1) { hud.shown.data.set(hud.image.data); dimPixels(hud.shown.data, cockpitShade); im = hud.shown; }
+  if (hudSmoothed) smoother.draw(im.data); else hud.ctx.putImageData(im, 0, 0);
 }
 
 // ------------------------------------------------------------ new view
@@ -435,17 +453,15 @@ let lastGameFrameAt = -1e9;   // when the last new game frame arrived (the game 
 let realMirrors = false;      // this frame draws real rear views in the cockpit mirrors
 let pageDt = 0;               // seconds since the last page frame
 let gamePaused = false;       // the game is paused (P), from the latest reading of its state
-// the cockpit overlay's light (1 in the sun), eased: a shape's shadow dims it to 70 %
-let cockpitSun = 1, cockpitFilter = '';
+let mirrorTurn = 0;           // the mirror drawn again this frame (0 left, 1 right)
+// the cockpit overlay's light (1 in the sun), eased: a shape's shadow dims it to 70 %, in its
+// pixels (blitScreen, the next frame)
+let cockpitSun = 1, cockpitShade = 1;
 function cockpitLight(target) {
   cockpitSun += (target - cockpitSun) * (1 - Math.exp(-pageDt * 10));
   window.renderApp.cockpitSun = cockpitSun;
   const b = 1 - 0.3 * (1 - cockpitSun);
-  const f = b < 0.995 ? `brightness(${b.toFixed(3)})` : '';
-  if (f !== cockpitFilter) {
-    cockpitFilter = f;
-    for (const id of ['hud', 'hudsmooth']) { const c = document.getElementById(id); if (c) c.style.filter = f; }
-  }
+  cockpitShade = b < 0.995 ? Math.round(b * 200) / 200 : 1;
 }
 const wheelSpins = new Map(); // each car's wheels' turn (modern style), by slot
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
@@ -457,7 +473,7 @@ let sceneOpts = null, markKey = null; // the scene's options, and its markings w
 let swapped = false;          // single layout: our view is showing
 let mirrorCars = [];          // frameCars().mirrors of the last drawn frame (cockpit)
 const routineSeen = { calls: -1, at: -1e9 }; // when the routine's call counter last moved
-const perf = { raf: [], draw: [], frames: 0, kept: 0, last: null };
+const perf = { raf: [], draw: [], js: [], frames: 0, kept: 0, last: null };
 
 const teamColour = (car) => (car.isPlayer ? [255, 120, 20] : [235, 235, 235]);
 
@@ -496,9 +512,11 @@ function loadCircuit(st) {
 
 let loopErrors = 0, lastPaletteAt = 0;
 function frameLoop(now) {
+  const t0 = performance.now();
   try { frame(now); } catch (e) {
     if (loopErrors++ < 5) { log('frame-error', { error: String(e?.stack ?? e) }); console.error(e); }
   }
+  perf.js.push(performance.now() - t0);
   requestAnimationFrame(frameLoop);
 }
 
@@ -621,17 +639,23 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, shadows: opts.shadows, objects: opts.style === 'modern' ? 'steady' : 'game', pitLane: renderer.objects ? cameraInPitLane(mem) : false };
+      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, shadows: opts.shadows, objects: opts.objects, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
       renderer.draw(cam, drawOpts);
       if (realMirrors && swapped && st.view.mode === 'cockpit') {
         // each mirror: the cars in its view, seen from the camera turned by the mirror's angle (not
-        // mirrored: the faces seen are the same), drawn mirrored by the renderer
-        const sides = [['left', carData.consts.mirrorLeft], ['right', carData.consts.mirrorRight]].map(([side, angle]) => ({
-          side, angle,
-          frame: states ? frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: (cam.heading + angle) & 0xffff, mode: st.view.mode },
-            { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, modern, paletteRgb: renderer.lastPalette, wide: true,
-              drawn: mirrorCarList(states, { x: cam.x, y: cam.y, heading: cam.heading, viewedSlot: st.view.viewedSlot }, angle) }) : null,
-        }));
+        // mirrored: the faces seen are the same), drawn mirrored by the renderer. One mirror is drawn
+        // again each frame, in turn (each 30 times a second at 60 frames, as often as the game moves
+        // the cars); the other lays its last picture on the glass.
+        mirrorTurn ^= 1;
+        const sides = [['left', carData.consts.mirrorLeft], ['right', carData.consts.mirrorRight]].map(([side, angle], k) => {
+          const refresh = k === mirrorTurn;
+          return {
+            side, angle, refresh,
+            frame: refresh && states ? frameCars(carData, st, { x: cam.x, y: cam.y, z: cam.z, heading: (cam.heading + angle) & 0xffff, mode: st.view.mode },
+              { origin: [renderer.origin[0], renderer.origin[1]], indexed: true, states, modern, paletteRgb: renderer.lastPalette, wide: true,
+                drawn: mirrorCarList(states, { x: cam.x, y: cam.y, heading: cam.heading, viewedSlot: st.view.viewedSlot }, angle) }) : null,
+          };
+        });
         renderer.drawMirrors(cam, drawOpts, { glass: mirrorClip(carData), sides, cars: carData });
       }
       // in the cockpit, the cockpit and dash darken as the car goes into a shape's shadow: the sun
@@ -650,13 +674,16 @@ function frame(now) {
 }
 
 setInterval(() => {
-  const r = perf.raf.splice(0), d = perf.draw.splice(0);
+  const r = perf.raf.splice(0), d = perf.draw.splice(0), js = perf.js.splice(0).sort((a, b) => a - b);
   const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
   const st = cur && cur.st;
   $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
   const gameFps = st ? st.session.fps : null, cycles = governor ? governor.cycles : null;
-  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms · draw ${med(d)} ms · game ${gameFps ?? '-'} fps, frames kept ${perf.kept}/s${cycles ? ` · ${cycles} cycles` : ''} · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}, texture ${opts.texture}`;
-  window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, kept: perf.kept, gameFps, cycles, size: [glCanvas.width, glCanvas.height] };
+  // the page's own work per frame (the emulator shares the thread): median, the slowest tenth, the slowest
+  const jsAt = (p) => (js.length ? +js[Math.min(js.length - 1, Math.floor(p * js.length))].toFixed(2) : null);
+  const slowest = r.length ? Math.max(...r).toFixed(1) : '-';
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms, slowest ${slowest} · page work ${jsAt(0.5) ?? '-'} ms, slowest ${jsAt(1) ?? '-'} · draw ${med(d)} ms · game ${gameFps ?? '-'} fps, frames kept ${perf.kept}/s${cycles ? ` · ${cycles} cycles` : ''} · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}, texture ${opts.texture}, shadows ${opts.shadows}, objects ${opts.objects}, mirrors ${opts.mirrors}`;
+  window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, jsMs: jsAt(0.5), jsP90: jsAt(0.9), jsMax: jsAt(1), kept: perf.kept, gameFps, cycles, size: [glCanvas.width, glCanvas.height] };
   perf.kept = 0;
 }, 1000);
 

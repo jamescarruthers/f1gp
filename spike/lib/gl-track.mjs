@@ -126,15 +126,17 @@ uniform highp sampler2DShadow uShadow;  // the shadow map
 uniform mat4 uLight;                    // relative to the origin, to the map (orthographic)
 uniform int uShadowOn;
 const float SHADE = 0.62;               // the light left in a shape's shadow
-// 1 in the sun, 0 in a shape's shadow (nine taps, so the edge is soft); 1 off the map, fading to it
+// 1 in the sun, 0 in a shape's shadow; 1 off the map, fading to it. Four taps half a texel apart,
+// each comparing the four texels round it (the map filters linearly): a soft edge three texels wide
 float sunAt(vec3 p) {
   if (uShadowOn == 0) return 1.0;
   vec3 c = (uLight * vec4(p, 1.0)).xyz * 0.5 + 0.5;
   if (c.x <= 0.0 || c.x >= 1.0 || c.y <= 0.0 || c.y >= 1.0 || c.z >= 1.0) return 1.0;
-  float t = 1.0 / float(textureSize(uShadow, 0).x), v = 0.0;
-  for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) v += texture(uShadow, vec3(c.xy + vec2(float(i), float(j)) * t, c.z - 0.0002));
+  float h = 0.5 / float(textureSize(uShadow, 0).x), z = c.z - 0.0002;
+  float v = texture(uShadow, vec3(c.xy + vec2(-h, -h), z)) + texture(uShadow, vec3(c.xy + vec2(h, -h), z))
+          + texture(uShadow, vec3(c.xy + vec2(-h, h), z)) + texture(uShadow, vec3(c.xy + vec2(h, h), z));
   vec2 e = abs(c.xy - 0.5) * 2.0;
-  return mix(v / 9.0, 1.0, smoothstep(0.8, 1.0, max(e.x, e.y)));
+  return mix(v / 4.0, 1.0, smoothstep(0.8, 1.0, max(e.x, e.y)));
 }`;
 
 const FS = `#version 300 es
@@ -346,8 +348,8 @@ const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 
 // the sun of the faces' light and the cast shadows (x, y, z; up is +z), toward the sun
 const SUN_DIR = (() => { const v = [0.45, 0.30, 0.84], l = Math.hypot(...v); return v.map((x) => x / l); })();
 // the shadow map: 2048 texels across 2,000 ft centred 600 ft ahead of the camera, drawn again when
-// the camera has gone 200 ft on (the casters do not move)
-const SHADOW = { size: 2048, half: 1000 * 64, depth: 1500 * 64, ahead: 600 * 64, redraw: 200 * 64 };
+// the camera has gone 200 ft on (the casters do not move), a quarter of the casters a frame
+const SHADOW = { size: 2048, half: 1000 * 64, depth: 1500 * 64, ahead: 600 * 64, redraw: 200 * 64, parts: 4 };
 
 // the shadow map: the casters' depth from the sun
 const DEPTH_VS = `#version 300 es
@@ -712,8 +714,7 @@ export class TrackRenderer {
       gl.bufferData(gl.ARRAY_BUFFER, mesh.data, gl.STATIC_DRAW);
       gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-      const ebo = gl.createBuffer();
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+      // (the index buffers are drawObjects' own, one per pass)
       // the poles: strips the vertex shader widens (aSide)
       const lineVao = gl.createVertexArray();
       gl.bindVertexArray(lineVao);
@@ -724,10 +725,8 @@ export class TrackRenderer {
       gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
       gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
       gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
-      const lebo = gl.createBuffer();
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
       gl.bindVertexArray(null);
-      return { mesh, vao, ebo, lineVao, lebo, objTex, count: mesh.data.length / 6 };
+      return { mesh, vao, lineVao, objTex, count: mesh.data.length / 6 };
     };
     const track = meshFor('track'), pit = meshFor('pit');
     const ids = new Set(spriteIdsUsed(objs));
@@ -1077,70 +1076,92 @@ TrackRenderer.prototype.noShadowTex = function noShadowTex() {
  * of the trackside shapes (every side of each: the game keeps one display list per view sector)
  * and the track's raised parts (walls, fences, bridges in the scene), on an area 2,000 ft across
  * centred 600 ft ahead of the camera. Drawn again only when that point has moved 200 ft, when the
- * scene or the object set changes, or when shadows are turned on; the area's centre is snapped
- * to the map's texels so a redraw does not make the edges crawl. The cars keep their own soft
+ * scene or the object set changes, or when shadows are turned on, into a second map a quarter of
+ * the casters a frame (no frame carries the whole redraw) while the first stays in use; the area's
+ * centre is snapped to the map's texels so a redraw does not make the edges crawl. The cars keep their own soft
  * shadows (shadowQuads) and the bitmaps (trees, boards) cast none.
  */
 TrackRenderer.prototype.updateShadows = function updateShadows(cam, opt) {
   this.shadowOn = false;
   if (opt.shadows !== 'on' || !this.track) return;
   const gl = this.gl, o = this.origin || [0, 0, 0];
-  let S = this.shadowMap;
-  if (!S) {
-    S = this.shadowMap = { fb: gl.createFramebuffer(), tex: gl.createTexture(), matrix: new Float32Array(16), key: null, centre: null };
-    gl.bindTexture(gl.TEXTURE_2D, S.tex);
+  const map = () => {
+    const m = { fb: gl.createFramebuffer(), tex: gl.createTexture() };
+    gl.bindTexture(gl.TEXTURE_2D, m.tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SHADOW.size, SHADOW.size, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
     for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
     for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
     gl.bindTexture(gl.TEXTURE_2D, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, S.fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, S.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, m.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, m.tex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  }
+    return m;
+  };
+  // two maps: the one in use (shadowMap) and the next, drawn a part a frame (SHADOW.parts) so that
+  // no frame carries the whole redraw; when it is done the two change places
+  this.shadowNext ??= { ...map(), matrix: new Float32Array(16), key: null, centre: null, part: -1 };
   const a = (cam.heading / 65536) * 2 * Math.PI;
   const ahead = [cam.x - o[0] + Math.sin(a) * SHADOW.ahead, cam.y - o[1] + Math.cos(a) * SHADOW.ahead, cam.z];
   const set = this.objects ? (opt.pitLane ? 'pit' : 'track') : 'none';
   const key = `${this.sceneVersion}:${set}`;
-  this.shadowOn = true;
-  if (S.key === key && S.centre && Math.hypot(ahead[0] - S.centre[0], ahead[1] - S.centre[1]) < SHADOW.redraw) return;
-  // the sun's view: f along the light, r and u across it
-  const f = SUN_DIR.map((x) => -x);
-  const rl = Math.hypot(f[1], f[0]);
-  const r = [f[1] / rl, -f[0] / rl, 0];                                   // f x up, level
-  const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
-  const dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
-  const texel = (2 * SHADOW.half) / SHADOW.size;
-  const cr = Math.round(dot(ahead, r) / texel) * texel, cu = Math.round(dot(ahead, u) / texel) * texel, cf = dot(ahead, f);
-  const H = SHADOW.half, D = SHADOW.depth;
-  // column-major: x = (r.p - cr) / H, y = (u.p - cu) / H, z = (f.p - cf) / D
-  S.matrix.set([r[0] / H, u[0] / H, f[0] / D, 0, r[1] / H, u[1] / H, f[1] / D, 0, r[2] / H, u[2] / H, f[2] / D, 0, -cr / H, -cu / H, -cf / D, 1]);
-  S.centre = ahead; S.key = key;
-  // the casters
-  gl.bindFramebuffer(gl.FRAMEBUFFER, S.fb);
-  gl.viewport(0, 0, SHADOW.size, SHADOW.size);
-  gl.disable(gl.SCISSOR_TEST);
-  gl.disable(gl.STENCIL_TEST);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthFunc(gl.LESS);
-  gl.depthMask(true);
-  gl.clearDepth(1);
-  gl.clear(gl.DEPTH_BUFFER_BIT);
-  gl.disable(gl.CULL_FACE);
-  gl.enable(gl.POLYGON_OFFSET_FILL);
-  gl.polygonOffset(2, 4);
-  gl.useProgram(this.depthProg);
-  gl.uniformMatrix4fv(this.depthU.uLight, false, S.matrix);
-  const R = this.track.ranges;
-  if (R && R.raised.count) { gl.bindVertexArray(this.track.vao); gl.drawArrays(gl.TRIANGLES, R.raised.first, R.raised.count); }
-  if (this.objects) {
-    const os = this.objects[set];
-    if (os && os.count) { gl.bindVertexArray(os.vao); gl.drawArrays(gl.TRIANGLES, 0, os.count); }
+  const S = this.shadowMap, N = this.shadowNext;
+  const stale = !S || S.key !== key || Math.hypot(ahead[0] - S.centre[0], ahead[1] - S.centre[1]) >= SHADOW.redraw;
+  if (stale && N.part < 0) {
+    // start the next map: its area, from where the camera is now
+    const f = SUN_DIR.map((x) => -x);
+    const rl = Math.hypot(f[1], f[0]);
+    const r = [f[1] / rl, -f[0] / rl, 0];                                   // f x up, level
+    const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+    const dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+    const texel = (2 * SHADOW.half) / SHADOW.size;
+    const cr = Math.round(dot(ahead, r) / texel) * texel, cu = Math.round(dot(ahead, u) / texel) * texel, cf = dot(ahead, f);
+    const H = SHADOW.half, D = SHADOW.depth;
+    // column-major: x = (r.p - cr) / H, y = (u.p - cu) / H, z = (f.p - cf) / D
+    N.matrix.set([r[0] / H, u[0] / H, f[0] / D, 0, r[1] / H, u[1] / H, f[1] / D, 0, r[2] / H, u[2] / H, f[2] / D, 0, -cr / H, -cu / H, -cf / D, 1]);
+    N.centre = ahead; N.key = key; N.part = 0;
   }
-  gl.disable(gl.POLYGON_OFFSET_FILL);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  this.shadowDraws = (this.shadowDraws ?? 0) + 1;
+  if (N.part >= 0) {
+    // one part of the casters into the next map: the track's raised parts and the shapes, each in
+    // SHADOW.parts slices of whole triangles
+    gl.bindFramebuffer(gl.FRAMEBUFFER, N.fb);
+    gl.viewport(0, 0, SHADOW.size, SHADOW.size);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.depthMask(true);
+    if (N.part === 0) { gl.clearDepth(1); gl.clear(gl.DEPTH_BUFFER_BIT); }
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(2, 4);
+    gl.useProgram(this.depthProg);
+    gl.uniformMatrix4fv(this.depthU.uLight, false, N.matrix);
+    const slice = (vao, first, count) => {
+      const tris = Math.floor(count / 3), per = Math.ceil(tris / SHADOW.parts);
+      const t0 = Math.min(tris, N.part * per), t1 = Math.min(tris, t0 + per);
+      if (t1 > t0) { gl.bindVertexArray(vao); gl.drawArrays(gl.TRIANGLES, first + t0 * 3, (t1 - t0) * 3); }
+    };
+    const R = this.track.ranges;
+    if (R && R.raised.count) slice(this.track.vao, R.raised.first, R.raised.count);
+    const os = this.objects ? this.objects[N.key.split(':')[1]] : null;
+    if (os && os.count) slice(os.vao, 0, os.count);
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    N.part++;
+    this.shadowParts = (this.shadowParts ?? 0) + 1;
+    if (N.part >= SHADOW.parts) {
+      // done: it takes the place of the map in use
+      N.part = -1;
+      this.shadowNext = S ?? { ...map(), matrix: new Float32Array(16), key: null, centre: null, part: -1 };
+      this.shadowNext.part = -1;
+      this.shadowMap = N;
+      this.shadowDraws = (this.shadowDraws ?? 0) + 1;
+    }
+  }
+  // shadows show once a whole map is there, and while the next is drawn the last one stays in use
+  this.shadowOn = !!this.shadowMap && this.shadowMap.key === key;
 };
 
 /**
@@ -1184,8 +1205,9 @@ TrackRenderer.prototype.front = function front(winding) {
  * a faint ripple (m.ripple, default 0.004 of the half-width).
  * @param {object} cam   the main view's camera
  * @param {object} opt   draw()'s options
- * @param {{ glass: object[], sides: { side: 'left'|'right', angle: number, frame?: object }[], cars?: object }} m
- *   glass: mirrorClip(); per side its angle and the cars seen from it (frameCars with the turned camera)
+ * @param {{ glass: object[], sides: { side: 'left'|'right', angle: number, frame?: object, refresh?: boolean }[], cars?: object }} m
+ *   glass: mirrorClip(); per side its angle, the cars seen from it (frameCars with the turned camera)
+ *   and refresh: false to lay its last picture on the glass again without drawing it
  */
 TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
   const gl = this.gl, cv = this.canvas, W = cv.width, H = cv.height;
@@ -1214,21 +1236,25 @@ TrackRenderer.prototype.drawMirrors = function drawMirrors(cam, opt, m) {
     // it is drawn on the glass): 22 rows at a quarter scale are 88 of the main view's, the horizon
     // (row 123) 28 down; 40 columns at a quarter scale are 160, mirrored
     const target = this.mirrorTarget(sd.side, box.w * 2, box.h * 2);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
-    gl.disable(gl.SCISSOR_TEST);
-    gl.disable(gl.STENCIL_TEST);
-    const saved = this.carFrame;
-    if (sd.frame && m.cars) this.setCarFrame(sd.frame, m.cars, sd.side); else this.carFrame = null;
-    this.flip = true;
-    // the objects near the mirror's view: 17 degrees either side, a margin for big stands, 4,000 ft
-    this.cull = { half: 20 / 64, margin: 400 * 64, far: 4000 * 64 };
-    try {
-      this.pass({ ...cam, heading: (cam.heading + sd.angle) & 0xffff }, opt, { x: 0, y: 0, w: target.w, h: target.h, rows: 88, horizon: 28, xScale: -2 });
-    } finally {
-      this.flip = false;
-      this.cull = null;
-      this.carFrame = saved;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // sd.refresh false keeps the picture drawn last (the page refreshes one mirror a frame)
+    if (sd.refresh !== false || !target.drawn) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.disable(gl.STENCIL_TEST);
+      const saved = this.carFrame;
+      if (sd.frame && m.cars) this.setCarFrame(sd.frame, m.cars, sd.side); else this.carFrame = null;
+      this.flip = true;
+      // the objects near the mirror's view: 17 degrees either side, a margin for big stands, 4,000 ft
+      this.cull = { half: 20 / 64, margin: 400 * 64, far: 4000 * 64 };
+      try {
+        this.pass({ ...cam, heading: (cam.heading + sd.angle) & 0xffff }, opt, { x: 0, y: 0, w: target.w, h: target.h, rows: 88, horizon: 28, xScale: -2 });
+        target.drawn = true;
+      } finally {
+        this.flip = false;
+        this.cull = null;
+        this.carFrame = saved;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      }
     }
     // the glass into the stencil
     gl.enable(gl.SCISSOR_TEST);
@@ -1286,7 +1312,7 @@ TrackRenderer.prototype.mirrorTarget = function mirrorTarget(side, w, h) {
   let t = this.mirrorTargets[side];
   if (t && t.w === w && t.h === h) return t;
   if (!t) t = this.mirrorTargets[side] = { fb: gl.createFramebuffer(), tex: gl.createTexture(), depth: gl.createRenderbuffer() };
-  t.w = w; t.h = h;
+  t.w = w; t.h = h; t.drawn = false;
   gl.bindTexture(gl.TEXTURE_2D, t.tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
@@ -1384,6 +1410,14 @@ TrackRenderer.prototype.drawCars = function drawCars(cam) {
   this.lastCars = { cars: fc.mesh.counts.cars, triangles: fc.mesh.counts.triangles, sprites: fc.frame.sprites.length };
 };
 
+/** Index lists one after the other in one array, and where each starts ([first, count] each). */
+function joinLayers(lists) {
+  const data = new Uint32Array(Math.max(3, lists.reduce((n, l) => n + l.length, 0))), at = [];
+  let o = 0;
+  for (const l of lists) { at.push([o, l.length]); data.set(l, o); o += l.length; }
+  return { data, at };
+}
+
 TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   const gl = this.gl, O = this.objects;
   const set = opt.pitLane ? O.pit : O.track;
@@ -1402,7 +1436,30 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   // distance and the ray's own angle, so trees and boards do not pop between versions, appear from
   // nothing or flick between frames as the camera moves
   const steady = opt.objects === 'steady';
-  const fr = frameObjects(mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: !steady, exactAngle: steady, anyDepth: steady, filter });
+  // the index buffers of the last three passes (the view and the two mirrors), each kept as long as
+  // the same sides of the same shapes are in view: most frames upload nothing
+  const passes = (this.objectPasses ??= []);
+  const fr = frameObjects(mesh, { x: cam.x, y: cam.y, heading: cam.heading },
+    { lod: !steady, exactAngle: steady, anyDepth: steady, filter, prev: passes.filter((p) => p.set === set).map((p) => p.fr) });
+  let slot = fr.same ? passes.find((p) => p.set === set && p.fr.layers === fr.layers) : null;
+  if (!slot) {
+    if (passes.length < 3) passes.push((slot = { ebo: gl.createBuffer(), lebo: gl.createBuffer() }));
+    else slot = passes.reduce((p, q) => (p.used <= q.used ? p : q));
+    slot.set = set; slot.fr = fr;
+    this.objectUploads = (this.objectUploads ?? 0) + 1;
+    // every layer in one buffer, one after the other
+    const all = joinLayers(fr.layers);
+    slot.layers = all.at;
+    gl.bindVertexArray(set.vao);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, slot.ebo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, all.data, gl.DYNAMIC_DRAW);
+    const tris = poleTriangles(fr.lines);
+    slot.poles = tris.length;
+    gl.bindVertexArray(set.lineVao);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, slot.lebo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, tris.length ? tris : new Uint32Array(3), gl.DYNAMIC_DRAW);
+  }
+  slot.used = (this.objectPassCount = (this.objectPassCount ?? 0) + 1);
   gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, set.objTex);
   gl.activeTexture(gl.TEXTURE0);
   // one-sided polygons, layer by layer (later layers are coplanar details on top)
@@ -1410,25 +1467,22 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
   gl.cullFace(gl.BACK);
   gl.frontFace(this.front(this.objectFrontFace ?? gl.CCW));
   gl.bindVertexArray(set.vao);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, set.ebo);
-  fr.layers.forEach((idx, k) => {
-    if (!idx.length) return;
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, slot.ebo);
+  slot.layers.forEach(([first, count], k) => {
+    if (!count) return;
     if (k > 0) { gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1, -4 * k); gl.depthFunc(gl.LEQUAL); }
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW);
-    gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+    gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, first * 4);
   });
   gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.depthFunc(gl.LESS);
   gl.disable(gl.CULL_FACE);
   // poles (flag poles, posts): one-pixel vertical lines in the game; strips here, one game
   // pixel wide in the classic style, six inches (at least two pixels) in the modern one
-  if (fr.lines.length) {
+  if (slot.poles) {
     gl.uniform2f(this.u.uPole, ...this.poleWidth);
     gl.bindVertexArray(set.lineVao);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, set.lebo);
-    const tris = poleTriangles(fr.lines);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, tris, gl.DYNAMIC_DRAW);
-    gl.drawElements(gl.TRIANGLES, tris.length, gl.UNSIGNED_INT, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, slot.lebo);
+    gl.drawElements(gl.TRIANGLES, slot.poles, gl.UNSIGNED_INT, 0);
   }
   // bitmaps
   this.drawSprites(spriteQuads(set.mesh.sprites, O.atlas, { x: cam.x, y: cam.y, heading: cam.heading }, O.objs, set.mesh.origin, fr.sprites, set.mesh.placements));

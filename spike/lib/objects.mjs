@@ -901,14 +901,17 @@ export function buildSectorMesh(objs, opt = {}) {
  *                         angle in place of the game's, rounded to a screen column (frames and
  *                         sides then do not flick back and forth as the camera moves),
  *                         anyDepth: true to draw the bitmaps inside shapes beyond their maximum
- *                         depth too (they do not appear from nothing), filter(placementIndex) -> bool }
+ *                         depth too (they do not appear from nothing), filter(placementIndex) -> bool,
+ *                         prev: earlier results (one or a list), whose index lists are kept when the
+ *                         same sectors are chosen again }
  * @returns {{ layers: Uint32Array[] (vertex indices of triangles, by decal layer 0, 1, ...),
  *             crowd: Uint32Array (indices of crowd triangles, also in layers),
  *             lines: Uint32Array (vertex indices into mesh.lines),
- *             sprites: {sprite (index into mesh.sprites) | centre (placement index, far LOD), id, mirrored}[] }}
+ *             sprites: {sprite (index into mesh.sprites) | centre (placement index, far LOD), id, mirrored}[],
+ *             sectors: the sectors chosen, in order, same: true when the lists are prev's }}
  */
 export function frameObjects(mesh, cam, opt = {}) {
-  const layers = [[]], crowd = [], lines = [], sprites = [];
+  const sectors = [], sprites = [];
   const ox = mesh.origin[0], oy = mesh.origin[1];
   const toAngle = 65536 / (2 * Math.PI);
   const h = (cam.heading / 65536) * 2 * Math.PI, sh = Math.sin(h), ch = Math.cos(h);
@@ -943,11 +946,7 @@ export function frameObjects(mesh, cam, opt = {}) {
     }
     const n = pl.sectors.length;
     const sec = pl.sectors[n > 1 ? (a >> (pl.shift + 1)) % n : 0];
-    for (const [first, count, layer, isCrowd] of sec.tris) {
-      while (layers.length <= layer) layers.push([]);
-      for (let v = first; v < first + count; v++) { layers[layer].push(v); if (isCrowd) crowd.push(v); }
-    }
-    for (const l of sec.lines) lines.push(2 * l, 2 * l + 1);
+    sectors.push(sec);
     for (const k of sec.sprites) {
       const s = mesh.sprites[k];
       if (s.maxDepth && !opt.anyDepth) {
@@ -969,7 +968,48 @@ export function frameObjects(mesh, cam, opt = {}) {
       sprites.push({ sprite: k, id, mirrored });
     }
   });
-  return { layers: layers.map((l) => Uint32Array.from(l)), crowd: Uint32Array.from(crowd), lines: Uint32Array.from(lines), sprites };
+  // the index lists change only when a shape turns to another side (or comes into or out of a
+  // narrow view): otherwise the last ones stand
+  for (const P of [].concat(opt.prev ?? [])) {
+    if (P.sectors.length === sectors.length && P.sectors.every((sec, k) => sec === sectors[k])) {
+      return { layers: P.layers, crowd: P.crowd, lines: P.lines, sprites, sectors, same: true };
+    }
+  }
+  // each sector's vertex indices by layer, worked out once and copied whole
+  const layers = [[]], crowd = [], lines = [];
+  for (const sec of sectors) {
+    const pre = sectorIndices(sec);
+    pre.layers.forEach((idx, layer) => { while (layers.length <= layer) layers.push([]); if (idx.length) layers[layer].push(idx); });
+    if (pre.crowd.length) crowd.push(pre.crowd);
+    if (pre.lines.length) lines.push(pre.lines);
+  }
+  return { layers: layers.map(joinIndices), crowd: joinIndices(crowd), lines: joinIndices(lines), sprites, sectors, same: false };
+}
+
+// a sector's vertex indices (tris: [first, count, layer, crowd]; lines: pairs), by layer, cached on the sector
+const sectorCache = new WeakMap();
+function sectorIndices(sec) {
+  let c = sectorCache.get(sec);
+  if (c) return c;
+  const layers = [], crowd = [];
+  for (const [first, count, layer, isCrowd] of sec.tris) {
+    while (layers.length <= layer) layers.push([]);
+    for (let v = first; v < first + count; v++) { layers[layer].push(v); if (isCrowd) crowd.push(v); }
+  }
+  const lines = [];
+  for (const l of sec.lines) lines.push(2 * l, 2 * l + 1);
+  c = { layers: layers.map((l) => Uint32Array.from(l)), crowd: Uint32Array.from(crowd), lines: Uint32Array.from(lines) };
+  sectorCache.set(sec, c);
+  return c;
+}
+// the arrays of a list joined into one
+function joinIndices(list) {
+  let n = 0;
+  for (const a of list) n += a.length;
+  const out = new Uint32Array(n);
+  let o = 0;
+  for (const a of list) { out.set(a, o); o += a.length; }
+  return out;
 }
 
 // ------------------------------------------------------------------ sprites for WebGL

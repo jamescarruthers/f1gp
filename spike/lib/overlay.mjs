@@ -205,6 +205,23 @@ export function shownMarker(src, markerRgb, view) {
 }
 
 /**
+ * The overlay darkened (the cockpit in a shape's shadow): each opaque pixel's
+ * colour times `light` (0-1), in place. Done in the pixels rather than by a CSS
+ * filter on the canvas, which some browsers redraw slowly while it changes.
+ * @param {Uint8ClampedArray|Uint8Array} rgba  RGBA (keyFrame's output)
+ * @param {number} light
+ */
+export function dimPixels(rgba, light) {
+  if (light >= 1) return;
+  const lut = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) lut[v] = Math.round(v * light);
+  for (let d = 0; d < rgba.length; d += 4) {
+    if (rgba[d + 3] === 0) continue;
+    rgba[d] = lut[rgba[d]]; rgba[d + 1] = lut[rgba[d + 1]]; rgba[d + 2] = lut[rgba[d + 2]];
+  }
+}
+
+/**
  * The game's screen as an overlay: RGBA with alpha 0 where the marker's RGB
  * shows (our 3D view), and, in the outside views, in the game's black bars
  * outside the 3D view's rows: black from either screen edge up to the first
