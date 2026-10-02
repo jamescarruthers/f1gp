@@ -399,7 +399,17 @@ Progress:
    the faces of the scene's shapes lit very slightly by a fixed sun
    (`shade=on|off`: a face looking up keeps the game's colour, sides lose up to
    11 % and undersides 13 %; the face's direction comes from the change of its
-   position across the screen, so the shapes need no normals).
+   position across the screen, so the shapes need no normals); and the shapes'
+   shadows from the same sun (`shadows=on|off`): a shadow map of the trackside
+   shapes and the track's raised parts, 2,000 ft across ahead of the camera,
+   drawn again every 200 ft, on the road, the ground and the shapes, with the
+   cockpit and dash dimmed to 70 % while the car is in a shadow (rays toward the
+   sun on the CPU, `spike/lib/sun-ray.mjs`). Trackside objects are steady in the
+   modern style: their near version at every distance, their bitmaps at any
+   distance and the ray's own view angle, where the game's rules made trees pop
+   or flick (one Monza lap at 2 ft steps: 48 back-and-forth flicks from the
+   angle rounded to a screen column, 13 switches between versions, 64 frame
+   changes of rows of trees, 198 bitmaps appearing at their maximum depth).
 
 ## Sound from the Amiga version (done)
 

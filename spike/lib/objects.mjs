@@ -897,7 +897,11 @@ export function buildSectorMesh(objs, opt = {}) {
  * @param {object} mesh  from buildSectorMesh
  * @param {object} cam   { x, y (fine, absolute), heading }
  * @param {object} [opt] { lod: true to switch to far LODs by depth as the game (rows of trees
- *                         become one bitmap beyond 672 ft), filter(placementIndex) -> bool }
+ *                         become one bitmap beyond 672 ft), exactAngle: true for the ray's own
+ *                         angle in place of the game's, rounded to a screen column (frames and
+ *                         sides then do not flick back and forth as the camera moves),
+ *                         anyDepth: true to draw the bitmaps inside shapes beyond their maximum
+ *                         depth too (they do not appear from nothing), filter(placementIndex) -> bool }
  * @returns {{ layers: Uint32Array[] (vertex indices of triangles, by decal layer 0, 1, ...),
  *             crowd: Uint32Array (indices of crowd triangles, also in layers),
  *             lines: Uint32Array (vertex indices into mesh.lines),
@@ -915,9 +919,17 @@ export function frameObjects(mesh, cam, opt = {}) {
     // centre's screen column, |column - 160| capped at 255; column 0 or 320 when the
     // centre is behind the near plane (R:0042 + R:0044)
     const lat = (dx * ch - dy * sh) / 8, dep = (dx * sh + dy * ch) / 8;
-    const col = dep < 8 ? (lat < 0 ? 0 : 320) : 160 + Math.trunc((256 * lat) / dep);
-    const k = Math.min(Math.abs(col - 160), 255);
-    const corr = Math.round(Math.atan(k / 256) * toAngle) * Math.sign(col - 160);
+    let corr;
+    if (opt.exactAngle && dep >= 8) {
+      // the angle of the ray itself, not rounded to a screen column: as the camera moves the
+      // view angle moves smoothly, and a bitmap's frame or a shape's side does not flick
+      // back and forth across a boundary (capped at 45 degrees as the game's)
+      corr = Math.max(-0x2000, Math.min(0x2000, Math.round(Math.atan2(lat, dep) * toAngle)));
+    } else {
+      const col = dep < 8 ? (lat < 0 ? 0 : 320) : 160 + Math.trunc((256 * lat) / dep);
+      const k = Math.min(Math.abs(col - 160), 255);
+      corr = Math.round(Math.atan(k / 256) * toAngle) * Math.sign(col - 160);
+    }
     const a = (pl.yaw - cam.heading - corr) & 0xffff;
     if (opt.lod && pl.lods) {
       // the game's LOD by depth: a bitmap LOD shows one frame at the centre
@@ -938,7 +950,7 @@ export function frameObjects(mesh, cam, opt = {}) {
     for (const l of sec.lines) lines.push(2 * l, 2 * l + 1);
     for (const k of sec.sprites) {
       const s = mesh.sprites[k];
-      if (s.maxDepth) {
+      if (s.maxDepth && !opt.anyDepth) {
         // bitmaps inside shapes have a maximum depth (element byte 2 x 128, 1/8 ft)
         const h = (cam.heading / 65536) * 2 * Math.PI;
         const d = (s.at[0] + ox - cam.x) * Math.sin(h) + (s.at[1] + oy - cam.y) * Math.cos(h);

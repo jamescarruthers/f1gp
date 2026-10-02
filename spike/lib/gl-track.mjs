@@ -14,6 +14,7 @@
 import { buildMesh } from './track-mesh.mjs';
 import { buildSceneMesh } from './scene.mjs';
 import { buildSectorMesh, frameObjects, buildSpriteAtlas, spriteIdsUsed, spriteQuads } from './objects.mjs';
+import { casterGrid, sunShare } from './sun-ray.mjs';
 import { carSpriteQuads, carSpriteIds } from './cars.mjs';
 
 const VS = `#version 300 es
@@ -118,6 +119,24 @@ vec3 hazeColour(sampler2D pal, int idx, float level) {
 // shrinks along the face only), blending between steps, so a far crowd is
 // still a speckle of people rather than a shimmer; uCrowdSharp keeps every texel.
 // Mode 1 keeps the game's screen-space crowd.
+// Cast shadows (modern style): a depth map of the trackside shapes and the track's raised parts
+// seen from the sun (TrackRenderer updateShadows); a point looks itself up in it.
+const SHADOW_LOOKUP = `
+uniform highp sampler2DShadow uShadow;  // the shadow map
+uniform mat4 uLight;                    // relative to the origin, to the map (orthographic)
+uniform int uShadowOn;
+const float SHADE = 0.62;               // the light left in a shape's shadow
+// 1 in the sun, 0 in a shape's shadow (nine taps, so the edge is soft); 1 off the map, fading to it
+float sunAt(vec3 p) {
+  if (uShadowOn == 0) return 1.0;
+  vec3 c = (uLight * vec4(p, 1.0)).xyz * 0.5 + 0.5;
+  if (c.x <= 0.0 || c.x >= 1.0 || c.y <= 0.0 || c.y >= 1.0 || c.z >= 1.0) return 1.0;
+  float t = 1.0 / float(textureSize(uShadow, 0).x), v = 0.0;
+  for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) v += texture(uShadow, vec3(c.xy + vec2(float(i), float(j)) * t, c.z - 0.0002));
+  vec2 e = abs(c.xy - 0.5) * 2.0;
+  return mix(v / 9.0, 1.0, smoothstep(0.8, 1.0, max(e.x, e.y)));
+}`;
+
 const FS = `#version 300 es
 precision highp float;
 in vec3 vColour;
@@ -138,15 +157,11 @@ uniform float uShade;          // 0 off, 1: the faces lit, very slightly, by a s
 out vec4 outColour;
 ${HAZE}
 ${GROUND_TEXTURE}
-const vec3 SUN = vec3(0.45, 0.30, 0.84) / 1.0;  // nearly unit length; up is +z
+${SHADOW_LOOKUP}
+const vec3 SUN = vec3(0.45, 0.30, 0.84);  // as SUN_DIR (normalized where used); up is +z
 // a face's light: 1 for a face looking up (the road, roofs: as they are), a little less for
 // sides facing the sun, less again for sides facing away and for undersides
-float faceLight(vec3 dx, vec3 dy) {
-  vec3 n = cross(dx, dy);
-  float l = length(n);
-  if (l < 1e-6) return 1.0;
-  n /= l;
-  if (dot(n, vWorld - uCam) > 0.0) n = -n;    // the side seen (the mirrors draw mirrored)
+float faceLight(vec3 n) {
   vec3 sun = normalize(SUN);
   return 1.0 + 0.08 * uShade * (dot(n, sun) - sun.z);
 }
@@ -158,13 +173,21 @@ int crowdAt(vec2 uv, vec2 lod) {
   return int(texelFetch(uCrowd, ivec2((c.x + r) & 511, 0), 0).r * 255.0 + 0.5);
 }
 void main() {
-  // the position's change across the screen, outside any branch (derivatives need every pixel)
+  // the position's change across the screen, outside any branch (derivatives need every pixel),
+  // and the face's direction from it, turned to the side seen (the mirrors draw mirrored)
   vec3 dpx = dFdx(vWorld), dpy = dFdy(vWorld);
+  vec3 n = cross(dpx, dpy);
+  float nlen = length(n);
+  n = nlen > 1e-6 ? n / nlen : vec3(0.0, 0.0, 1.0);
+  if (dot(n, vWorld - uCam) > 0.0) n = -n;
+  // a shape's shadow, on faces turned to the sun (faces turned away are shaded already)
+  float nl = dot(n, normalize(SUN));
+  float shadow = uShadowOn == 1 && nl > 0.0 ? mix(1.0, SHADE, (1.0 - sunAt(vWorld)) * smoothstep(0.0, 0.15, nl)) : 1.0;
   if (vColour.y < 0.0) {
     int idx = int(vColour.x + 0.5);
     // the road only (it alone has u, v; a car part in the road's colour has none)
     if (uTexMode > 0 && idx == uRoadIdx && int(vColour.z + 0.5) == 0 && any(notEqual(vUv, vec2(0.0)))) {
-      outColour = vec4(groundShade(uPalette, idx, groundNoise(vUv / vec2(32.0, 8.0)), -2, 1), 1.0);
+      outColour = vec4(groundShade(uPalette, idx, groundNoise(vUv / vec2(32.0, 8.0)), -2, 1) * shadow, 1.0);
       return;
     }
     int idx2 = -1; float blend = 0.0;  // a second crowd texel to blend in (mode 2, far away)
@@ -197,9 +220,9 @@ void main() {
     }
     vec3 colour = hazeColour(uPalette, idx, level);
     if (idx2 >= 0) colour = mix(colour, hazeColour(uPalette, idx2, level), blend);
-    if (uShade > 0.0) colour *= faceLight(dpx, dpy);
-    outColour = vec4(colour, 1.0);
-  } else outColour = vec4(vColour, 1.0);
+    if (uShade > 0.0) colour *= faceLight(n);
+    outColour = vec4(colour * shadow, 1.0);
+  } else outColour = vec4(vColour * shadow, 1.0);
 }`;
 
 // Bitmaps (trees, boards, marshals): camera-facing quads; each atlas texel is
@@ -274,17 +297,19 @@ uniform vec4 uProj;      // as the track's: sx, sy, cy
 uniform float uCamH;     // camera height over the ground (Z units)
 out vec4 outColour;
 ${GROUND_TEXTURE}
+${SHADOW_LOOKUP}
 void main() {
   float row = (1.0 - vY) * 0.5 * uView.y;          // game viewport row from the top
   float above = uView.x - row;                       // rows above the horizon row
   if (above <= 0.0) {
-    if (uTexMode == 0 || uUseScene == 0) { outColour = vec4(uGround, 1.0); return; }
     // the ground plane under the camera: where this pixel's ray meets it (the track's projection inverted)
     float xn = ((gl_FragCoord.x - uOrigin.x) / uCanvas.x) * 2.0 - 1.0;
     float depth = uProj.y * uCamH / max(uProj.z - vY, 1e-4);
     float lat = xn * depth / uProj.x;
     vec2 w = uCam.xy + vec2(lat * uSinCos.y + depth * uSinCos.x, -lat * uSinCos.x + depth * uSinCos.y);
-    outColour = vec4(groundShade(uPalette, uGroundIdx, groundNoise(w / (64.0 * 16.0)), uGroundIdx == uRoadIdx ? -2 : -1, 1), 1.0);
+    float sun = mix(SHADE, 1.0, sunAt(vec3(w, uCam.z - uCamH)));
+    if (uTexMode == 0 || uUseScene == 0) { outColour = vec4(uGround * sun, 1.0); return; }
+    outColour = vec4(groundShade(uPalette, uGroundIdx, groundNoise(w / (64.0 * 16.0)), uGroundIdx == uRoadIdx ? -2 : -1, 1) * sun, 1.0);
     return;
   }
   if (uUseScene == 0) {
@@ -317,6 +342,21 @@ export const COLOURS = {
 };
 
 const VSCALE = (0x6e80 * 2) / 65536 * 32 * 8; // rows per (Z unit / fine depth unit)
+const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+// the sun of the faces' light and the cast shadows (x, y, z; up is +z), toward the sun
+const SUN_DIR = (() => { const v = [0.45, 0.30, 0.84], l = Math.hypot(...v); return v.map((x) => x / l); })();
+// the shadow map: 2048 texels across 2,000 ft centred 600 ft ahead of the camera, drawn again when
+// the camera has gone 200 ft on (the casters do not move)
+const SHADOW = { size: 2048, half: 1000 * 64, depth: 1500 * 64, ahead: 600 * 64, redraw: 200 * 64 };
+
+// the shadow map: the casters' depth from the sun
+const DEPTH_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+uniform mat4 uLight;
+void main() { gl_Position = uLight * vec4(aPos, 1.0); }`;
+const DEPTH_FS = `#version 300 es
+precision mediump float;
+void main() {}`;
 
 // the cars' shadows (modern style): soft, dark, on the ground, fading with distance
 const SHADOW_VS = `#version 300 es
@@ -428,14 +468,14 @@ export class TrackRenderer {
     this.prog = program(gl, VS, FS);
     this.bgProg = program(gl, BG_VS, BG_FS);
     this.u = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uPalette', 'uCrowd', 'uCrowdRows', 'uCell', 'uCrowdOn',
-      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp', 'uPole', 'uShade']
+      'uHazeMode', 'uHaze', 'uObjects', 'uNoise', 'uTexMode', 'uRoadIdx', 'uCrowdSharp', 'uPole', 'uShade', 'uShadow', 'uLight', 'uShadowOn']
       .map((n) => [n, gl.getUniformLocation(this.prog, n)]));
     this.paletteTex = gl.createTexture();
     this.spriteProg = program(gl, SPRITE_VS, SPRITE_FS);
     this.spU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth', 'uAtlas', 'uPalMap', 'uPalette', 'uHazeMode', 'uHaze'].map((n) => [n, gl.getUniformLocation(this.spriteProg, n)]));
     this.objects = null;
     this.bgU = Object.fromEntries(['uView', 'uCanvas', 'uOrigin', 'uGround', 'uUseScene', 'uImage', 'uSky', 'uHorizon', 'uSkyLen', 'uSkyTop', 'uSkyHorizon',
-      'uPalette', 'uGroundIdx', 'uRoadIdx', 'uCam', 'uSinCos', 'uProj', 'uCamH', 'uNoise', 'uTexMode']
+      'uPalette', 'uGroundIdx', 'uRoadIdx', 'uCam', 'uSinCos', 'uProj', 'uCamH', 'uNoise', 'uTexMode', 'uShadow', 'uLight', 'uShadowOn']
       .map((n) => [n, gl.getUniformLocation(this.bgProg, n)]));
     this.sceneTex = null;
     this.bg = gl.createVertexArray();
@@ -445,6 +485,11 @@ export class TrackRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    // cast shadows: the casters' depth from the sun (updateShadows)
+    this.depthProg = program(gl, DEPTH_VS, DEPTH_FS);
+    this.depthU = { uLight: gl.getUniformLocation(this.depthProg, 'uLight') };
+    this.shadowMap = null;
+    this.sceneVersion = 0;
     // the cars' shadows: x, y, z, u, v
     this.shadowProg = program(gl, SHADOW_VS, SHADOW_FS);
     this.shU = Object.fromEntries(['uCam', 'uSinCos', 'uProj', 'uDepth'].map((n) => [n, gl.getUniformLocation(this.shadowProg, n)]));
@@ -592,7 +637,9 @@ export class TrackRenderer {
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, bytes, 12);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribPointer(2, 2, gl.FLOAT, false, bytes, 24);
-    this.track = { vao, buf, count: mesh.data.length / mesh.stride, parts: mesh.counts, ranges: mesh.ranges };
+    // the vertex data stays for the cockpit's sun (sunAt: the raised parts cast shadows)
+    this.track = { vao, buf, count: mesh.data.length / mesh.stride, parts: mesh.counts, ranges: mesh.ranges, data: mesh.data, stride: mesh.stride };
+    this.sceneVersion++;
     this.lastPalette = null; // the sky and horizon textures belong to the scene
     this.setPalette(scene.palette);
     return this.track;
@@ -680,7 +727,7 @@ export class TrackRenderer {
       const lebo = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, lebo);
       gl.bindVertexArray(null);
-      return { mesh, vao, ebo, lineVao, lebo, objTex };
+      return { mesh, vao, ebo, lineVao, lebo, objTex, count: mesh.data.length / 6 };
     };
     const track = meshFor('track'), pit = meshFor('pit');
     const ids = new Set(spriteIdsUsed(objs));
@@ -706,6 +753,7 @@ export class TrackRenderer {
       crowdRowsTex = r8(64, 1, crowd.rows.subarray(0, 64));
     }
     this.objects = { objs, track, pit, atlas, atlasTex, palMapTex, crowdTex, crowdRowsTex };
+    this.sceneVersion++;
     this.sprites = { atlas, atlasTex, palMapTex };
     this.setHaze(objs.haze);
     return { track: track.mesh.counts, pit: pit.mesh.counts, atlas: [atlas.width, atlas.height] };
@@ -850,7 +898,9 @@ export class TrackRenderer {
    *   away) | 'sharp' (on the stands, every texel) | 'screen' (the game's, fixed to the screen),
    *   poles: 'solid' (default: six inches wide, at least one game pixel) | 'pixel' (one game pixel
    *   wide, as the game draws them), pitLane: true when the camera is in the pit lane,
-   *   shade: 'on' to light the faces very slightly by a fixed sun (faces looking up stay as they are) }
+   *   shade: 'on' to light the faces very slightly by a fixed sun (faces looking up stay as they are),
+   *   objects: 'steady' for the trackside objects' near version at every distance and the ray's own
+   *   view angle (no pops between versions or frames), or 'game' (default: the game's rules) }
    *   'screen' draws into the part of the canvas where the game's 320x200 screen
    *   shows its 3D view (rows top..top+rows), for laying over the original.
    */
@@ -877,6 +927,8 @@ export class TrackRenderer {
     const nativeAspect = 320 / (rows * 1.2);
     const aspect = w / h;
     const xScale = opt.framing === 'wide' || stage ? nativeAspect / aspect : 1;
+    this.updateShadows(cam, opt);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.pass(cam, opt, { x: 0, y: y0, w, h, rows, horizon, xScale });
   }
 
@@ -913,6 +965,19 @@ export class TrackRenderer {
       gl.uniform2f(this.bgU.uSinCos, Math.sin(a), Math.cos(a));
       gl.uniform4f(this.bgU.uProj, sx, sy, cy, 0);
       gl.uniform1f(this.bgU.uCamH, Math.max(8, cam.z - this.groundZ(cam.x, cam.y)));
+    }
+    // the ground beyond the track takes cast shadows too: its plane needs these whether textured or not
+    if (!texMode) {
+      gl.uniform3f(this.bgU.uCam, cam.x - o[0], cam.y - o[1], cam.z);
+      gl.uniform2f(this.bgU.uSinCos, Math.sin(a), Math.cos(a));
+      gl.uniform4f(this.bgU.uProj, sx, sy, cy, 0);
+      gl.uniform1f(this.bgU.uCamH, Math.max(8, cam.z - this.groundZ(cam.x, cam.y)));
+    }
+    const sm = this.shadowOn ? this.shadowMap : null;
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, sm ? sm.tex : this.noShadowTex());
+    for (const [u] of [[this.bgU]]) {
+      gl.uniform1i(u.uShadow, 8); gl.uniform1i(u.uShadowOn, sm ? 1 : 0);
+      gl.uniformMatrix4fv(u.uLight, false, sm ? sm.matrix : IDENTITY);
     }
     gl.uniform4f(this.bgU.uView, horizon, rows, xScale, (cam.heading >> 5) & 511);
     gl.uniform2f(this.bgU.uCanvas, w, h);
@@ -961,6 +1026,8 @@ export class TrackRenderer {
     gl.uniform1i(this.u.uTexMode, texMode);
     gl.uniform1i(this.u.uRoadIdx, this.scene ? this.scene.road : -1);
     gl.uniform1f(this.u.uShade, opt.shade === 'on' ? 1 : 0);
+    gl.uniform1i(this.u.uShadow, 8); gl.uniform1i(this.u.uShadowOn, sm ? 1 : 0);
+    gl.uniformMatrix4fv(this.u.uLight, false, sm ? sm.matrix : IDENTITY);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform3f(this.u.uCam, cam.x - o[0], cam.y - o[1], cam.z);
     gl.uniform2f(this.u.uSinCos, Math.sin(a), Math.cos(a));
@@ -991,6 +1058,110 @@ export class TrackRenderer {
     }
   }
 }
+
+/** A 1 x 1 depth texture for the shadow sampler when there are no shadows (it must hold a compare-mode depth texture). */
+TrackRenderer.prototype.noShadowTex = function noShadowTex() {
+  if (this.noShadow) return this.noShadow;
+  const gl = this.gl, t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, 1, 1, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, new Uint32Array([0xffffffff]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+  this.noShadow = t;
+  return t;
+};
+
+/**
+ * Cast shadows (opt.shadows 'on'): the depth, seen from the sun (SUN_DIR, an orthographic view),
+ * of the trackside shapes (every side of each: the game keeps one display list per view sector)
+ * and the track's raised parts (walls, fences, bridges in the scene), on an area 2,000 ft across
+ * centred 600 ft ahead of the camera. Drawn again only when that point has moved 200 ft, when the
+ * scene or the object set changes, or when shadows are turned on; the area's centre is snapped
+ * to the map's texels so a redraw does not make the edges crawl. The cars keep their own soft
+ * shadows (shadowQuads) and the bitmaps (trees, boards) cast none.
+ */
+TrackRenderer.prototype.updateShadows = function updateShadows(cam, opt) {
+  this.shadowOn = false;
+  if (opt.shadows !== 'on' || !this.track) return;
+  const gl = this.gl, o = this.origin || [0, 0, 0];
+  let S = this.shadowMap;
+  if (!S) {
+    S = this.shadowMap = { fb: gl.createFramebuffer(), tex: gl.createTexture(), matrix: new Float32Array(16), key: null, centre: null };
+    gl.bindTexture(gl.TEXTURE_2D, S.tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SHADOW.size, SHADOW.size, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, S.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, S.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  const a = (cam.heading / 65536) * 2 * Math.PI;
+  const ahead = [cam.x - o[0] + Math.sin(a) * SHADOW.ahead, cam.y - o[1] + Math.cos(a) * SHADOW.ahead, cam.z];
+  const set = this.objects ? (opt.pitLane ? 'pit' : 'track') : 'none';
+  const key = `${this.sceneVersion}:${set}`;
+  this.shadowOn = true;
+  if (S.key === key && S.centre && Math.hypot(ahead[0] - S.centre[0], ahead[1] - S.centre[1]) < SHADOW.redraw) return;
+  // the sun's view: f along the light, r and u across it
+  const f = SUN_DIR.map((x) => -x);
+  const rl = Math.hypot(f[1], f[0]);
+  const r = [f[1] / rl, -f[0] / rl, 0];                                   // f x up, level
+  const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+  const dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+  const texel = (2 * SHADOW.half) / SHADOW.size;
+  const cr = Math.round(dot(ahead, r) / texel) * texel, cu = Math.round(dot(ahead, u) / texel) * texel, cf = dot(ahead, f);
+  const H = SHADOW.half, D = SHADOW.depth;
+  // column-major: x = (r.p - cr) / H, y = (u.p - cu) / H, z = (f.p - cf) / D
+  S.matrix.set([r[0] / H, u[0] / H, f[0] / D, 0, r[1] / H, u[1] / H, f[1] / D, 0, r[2] / H, u[2] / H, f[2] / D, 0, -cr / H, -cu / H, -cf / D, 1]);
+  S.centre = ahead; S.key = key;
+  // the casters
+  gl.bindFramebuffer(gl.FRAMEBUFFER, S.fb);
+  gl.viewport(0, 0, SHADOW.size, SHADOW.size);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.STENCIL_TEST);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LESS);
+  gl.depthMask(true);
+  gl.clearDepth(1);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.disable(gl.CULL_FACE);
+  gl.enable(gl.POLYGON_OFFSET_FILL);
+  gl.polygonOffset(2, 4);
+  gl.useProgram(this.depthProg);
+  gl.uniformMatrix4fv(this.depthU.uLight, false, S.matrix);
+  const R = this.track.ranges;
+  if (R && R.raised.count) { gl.bindVertexArray(this.track.vao); gl.drawArrays(gl.TRIANGLES, R.raised.first, R.raised.count); }
+  if (this.objects) {
+    const os = this.objects[set];
+    if (os && os.count) { gl.bindVertexArray(os.vao); gl.drawArrays(gl.TRIANGLES, 0, os.count); }
+  }
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  this.shadowDraws = (this.shadowDraws ?? 0) + 1;
+};
+
+/**
+ * The share of some points (absolute fine x, y and Z) in the sun (0-1), 1 with no shadows: rays
+ * toward the sun against the same casters as the shadow map, on the CPU (sun-ray.mjs), so the
+ * answer is exact and nothing waits on the GPU.
+ * @param {number[][]} points
+ */
+TrackRenderer.prototype.sunAt = function sunAt(points) {
+  if (!this.shadowOn || !this.shadowMap || !this.track || !points.length) return 1;
+  const key = this.shadowMap.key;
+  if (!this.casters || this.casters.key !== key) {
+    const arrays = [], R = this.track.ranges;
+    if (R && this.track.data && R.raised.count) arrays.push({ data: this.track.data, stride: this.track.stride, first: R.raised.first, count: R.raised.count });
+    const os = this.objects ? this.objects[key.split(':')[1]] : null;
+    if (os && os.count) arrays.push({ data: os.mesh.data, stride: 6, count: os.count });
+    this.casters = { key, grid: casterGrid(arrays) };
+  }
+  const o = this.origin || [0, 0, 0];
+  return sunShare(this.casters.grid, points.map((p) => [p[0] - o[0], p[1] - o[1], p[2]]), SUN_DIR);
+};
 
 /** The front-face winding for this pass: mirrored passes wind the other way. */
 TrackRenderer.prototype.front = function front(winding) {
@@ -1227,7 +1398,11 @@ TrackRenderer.prototype.drawObjects = function drawObjects(cam, opt) {
       return dep > -C.margin && dep < C.far && Math.abs(lat) < Math.max(dep, 0) * C.half + C.margin;
     };
   }
-  const fr = frameObjects(mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: true, filter });
+  // steady (modern style): the near version at every distance, the bitmaps inside shapes at any
+  // distance and the ray's own angle, so trees and boards do not pop between versions, appear from
+  // nothing or flick between frames as the camera moves
+  const steady = opt.objects === 'steady';
+  const fr = frameObjects(mesh, { x: cam.x, y: cam.y, heading: cam.heading }, { lod: !steady, exactAngle: steady, anyDepth: steady, filter });
   gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, set.objTex);
   gl.activeTexture(gl.TEXTURE0);
   // one-sided polygons, layer by layer (later layers are coplanar details on top)

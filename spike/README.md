@@ -51,6 +51,7 @@ node build-bundle.mjs --autoexec "gp /g" --out dist/route-g-25000.jsdos
 | `lib/dos-sleep.mjs` | Wakes the emulator from its sleeps on a timer: js-dos's direct mode waits by posting messages to itself, which kept the main thread busy. `probes/p5-profile.mjs` profiles the page's main thread in a race. |
 | `lib/saves.mjs` | Keeps the files the game writes (saved games, names, track records, car setups, F1PREFS.DAT) in the browser between visits, and the page's menu choices; `probes/p5-saves.mjs` saves from the game's menu, opens the page again and finds the file. |
 | `lib/pixel-smooth.mjs` | The game's cockpit, dash and messages drawn larger through xBR, a filter made for pixel art (`render.html?cockpit=smooth`). |
+| `lib/sun-ray.mjs` | Whether points are in the sun or in a shape's shadow: rays toward the sun against the shapes that cast shadows, through a grid; the page dims the cockpit with it. |
 | `amiga/` | Python tools for the Amiga version: disk and hunk readers, a 68000 disassembler, the offline Paula renderer, the title tune and engine renders, `tune-log.py` (the music player's register writes from the 68000 code, for the tests). |
 | `build-site.mjs` | Builds the GitHub Pages site. |
 | `raw.html` | Test page using the lower-level engine API with our own canvas, input and audio. |

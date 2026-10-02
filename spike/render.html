@@ -70,6 +70,8 @@
                           its bitmaps
     shade=on|off          the faces of the scene's shapes (stands, buildings, cars) lit very
                           slightly by a fixed sun (modern), or as the game colours them
+    shadows=on|off        the stands', buildings', bridges' and walls' shadows from the same
+                          sun on the road, the ground and each other (modern), or none
     fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
                           (30, the default, is the most the game's physics allows; game
                           keeps the game's own setting, 15 in the Quick Race)
@@ -201,6 +203,7 @@ const opts = {
   mirrorsParam: ['real', 'game'].includes(q.get('mirrors')) ? q.get('mirrors') : null,
   cockpitParam: ['smooth', 'pixels'].includes(q.get('cockpit')) ? q.get('cockpit') : null,
   shadeParam: ['on', 'off'].includes(q.get('shade')) ? q.get('shade') : null,
+  shadowsParam: ['on', 'off'].includes(q.get('shadows')) ? q.get('shadows') : null,
   audio: q.get('audio') ?? 'own',
   // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
@@ -225,6 +228,7 @@ function applyStyle(style) {
   opts.mirrors = opts.mirrorsParam ?? (style === 'classic' ? 'game' : 'real');
   opts.cockpit = opts.cockpitParam ?? (style === 'classic' ? 'pixels' : 'smooth');
   opts.shade = opts.shadeParam ?? (style === 'classic' ? 'off' : 'on');
+  opts.shadows = opts.shadowsParam ?? (style === 'classic' ? 'off' : 'on');
   const ck = document.getElementById('cockpit');
   if (ck) ck.value = opts.cockpit;
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
@@ -430,6 +434,19 @@ let ci = null, mem = null, reader = null, circuit = -1;
 let lastGameFrameAt = -1e9;   // when the last new game frame arrived (the game is racing)
 let realMirrors = false;      // this frame draws real rear views in the cockpit mirrors
 let pageDt = 0;               // seconds since the last page frame
+let gamePaused = false;       // the game is paused (P), from the latest reading of its state
+// the cockpit overlay's light (1 in the sun), eased: a shape's shadow dims it to 70 %
+let cockpitSun = 1, cockpitFilter = '';
+function cockpitLight(target) {
+  cockpitSun += (target - cockpitSun) * (1 - Math.exp(-pageDt * 10));
+  window.renderApp.cockpitSun = cockpitSun;
+  const b = 1 - 0.3 * (1 - cockpitSun);
+  const f = b < 0.995 ? `brightness(${b.toFixed(3)})` : '';
+  if (f !== cockpitFilter) {
+    cockpitFilter = f;
+    for (const id of ['hud', 'hudsmooth']) { const c = document.getElementById(id); if (c) c.style.filter = f; }
+  }
+}
 const wheelSpins = new Map(); // each car's wheels' turn (modern style), by slot
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
 const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
@@ -497,7 +514,8 @@ function frame(now) {
   }
   // the game draws a race view while the routine runs (it stops in pause, where the frame stays)
   if (routine && routine.installed) { const c = routine.calls; if (c !== routineSeen.calls) { routineSeen.calls = c; routineSeen.at = now; } }
-  const drawing = !!routine && routine.installed && (now - routineSeen.at < 500 || (!!cur && cur.st.paused));
+  // (paused from the latest reading: a paused game makes no new frames, so the last frame kept says running)
+  const drawing = !!routine && routine.installed && (now - routineSeen.at < 500 || (!!cur && (cur.st.paused || gamePaused)));
   const swap = opts.layout === 'single' && opts.screen === 'new' && !!cur && drawing;
   let hudView = null;
   // real rear views in the cockpit mirrors (drawn under the game's glass, made see-through)
@@ -524,6 +542,7 @@ function frame(now) {
   if (mem) {
     const st = reader.read();
     window.renderApp.state = st;
+    gamePaused = !!(st.inSession && st.paused);
     if (st.inSession && st.track.lapSegments > 0) {
       if (st.session.circuit !== circuit) loadCircuit(st);
       if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
@@ -602,7 +621,7 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
+      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, shadows: opts.shadows, objects: opts.style === 'modern' ? 'steady' : 'game', pitLane: renderer.objects ? cameraInPitLane(mem) : false };
       renderer.draw(cam, drawOpts);
       if (realMirrors && swapped && st.view.mode === 'cockpit') {
         // each mirror: the cars in its view, seen from the camera turned by the mirror's angle (not
@@ -615,6 +634,15 @@ function frame(now) {
         }));
         renderer.drawMirrors(cam, drawOpts, { glass: mirrorClip(carData), sides, cars: carData });
       }
+      // in the cockpit, the cockpit and dash darken as the car goes into a shape's shadow: the sun
+      // at the driver's head and round it, by rays toward the sun against the shapes that cast
+      let sun = 1;
+      if (swapped && st.view.mode === 'cockpit' && opts.shadows === 'on') {
+        const h = (cam.heading / 65536) * 2 * Math.PI, fx = Math.sin(h), fy = Math.cos(h), ft = 64;
+        const at = (f, r, dz) => [cam.x + fx * f * ft + fy * r * ft, cam.y + fy * f * ft - fx * r * ft, cam.z + dz * ft];
+        sun = renderer.sunAt([at(0, 0, 0), at(0, -3, -1.5), at(0, 3, -1.5), at(5, 0, -1.5), at(-5, 0, -1.5)]);
+      }
+      cockpitLight(sun);
     }
     perf.frames++;
   }
