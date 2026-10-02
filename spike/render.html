@@ -65,8 +65,11 @@
                           through xBR, a filter made for pixel art (lib/pixel-smooth.mjs;
                           modern), or as square pixels (classic). Also a menu.
     mirrors=real|game     the cockpit mirrors: real rear views from our renderer (modern),
-                          or the game's (classic): its fixed backdrop with the cars behind
-                          as its bitmaps
+                          bowed a little as a convex mirror, under a glass sheen; or the
+                          game's (classic): its fixed backdrop with the cars behind as
+                          its bitmaps
+    shade=on|off          the faces of the scene's shapes (stands, buildings, cars) lit very
+                          slightly by a fixed sun (modern), or as the game colours them
     fps=30|25|15|...|game the game's frame rate, set in the menus for the next session
                           (30, the default, is the most the game's physics allows; game
                           keeps the game's own setting, 15 in the Quick Race)
@@ -197,6 +200,7 @@ const opts = {
   polesParam: q.get('poles'),
   mirrorsParam: ['real', 'game'].includes(q.get('mirrors')) ? q.get('mirrors') : null,
   cockpitParam: ['smooth', 'pixels'].includes(q.get('cockpit')) ? q.get('cockpit') : null,
+  shadeParam: ['on', 'off'].includes(q.get('shade')) ? q.get('shade') : null,
   audio: q.get('audio') ?? 'own',
   // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
@@ -220,6 +224,7 @@ function applyStyle(style) {
   opts.poles = opts.polesParam ?? (style === 'classic' ? 'pixel' : 'solid');
   opts.mirrors = opts.mirrorsParam ?? (style === 'classic' ? 'game' : 'real');
   opts.cockpit = opts.cockpitParam ?? (style === 'classic' ? 'pixels' : 'smooth');
+  opts.shade = opts.shadeParam ?? (style === 'classic' ? 'off' : 'on');
   const ck = document.getElementById('cockpit');
   if (ck) ck.value = opts.cockpit;
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
@@ -597,7 +602,7 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
+      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
       renderer.draw(cam, drawOpts);
       if (realMirrors && swapped && st.view.mode === 'cockpit') {
         // each mirror: the cars in its view, seen from the camera turned by the mirror's angle (not
