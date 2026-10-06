@@ -1,0 +1,149 @@
+//! The machine for JavaScript (wasm32): plain exported functions on a machine
+//! pointer, and buffers the page fills or reads through the module's memory.
+//! lib/pc.mjs wraps them.
+
+use crate::pc::Machine;
+
+pub struct Handle {
+    m: Machine,
+    out: Vec<u8>,
+}
+
+fn h(p: *mut Handle) -> &'static mut Handle {
+    unsafe { &mut *p }
+}
+fn s(ptr: *const u8, len: usize) -> String {
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }).to_string()
+}
+
+#[no_mangle]
+pub extern "C" fn mc_new() -> *mut Handle {
+    Box::into_raw(Box::new(Handle {
+        m: Machine::new(),
+        out: vec![],
+    }))
+}
+#[no_mangle]
+pub extern "C" fn mc_alloc(len: usize) -> *mut u8 {
+    let mut v = vec![0u8; len];
+    let p = v.as_mut_ptr();
+    std::mem::forget(v);
+    p
+}
+#[no_mangle]
+pub extern "C" fn mc_free(ptr: *mut u8, len: usize) {
+    unsafe { drop(Vec::from_raw_parts(ptr, len, len)) }
+}
+/// Add a file to drive C (takes the data buffer from mc_alloc).
+#[no_mangle]
+pub extern "C" fn mc_add_file(
+    p: *mut Handle,
+    name: *const u8,
+    name_len: usize,
+    data: *mut u8,
+    len: usize,
+) {
+    let v = unsafe { Vec::from_raw_parts(data, len, len) };
+    h(p).m.add_file(&s(name, name_len), v);
+}
+/// Load a program; 0 when it is ready to run.
+#[no_mangle]
+pub extern "C" fn mc_start(
+    p: *mut Handle,
+    prog: *const u8,
+    prog_len: usize,
+    tail: *const u8,
+    tail_len: usize,
+) -> i32 {
+    match h(p).m.start(&s(prog, prog_len), &s(tail, tail_len)) {
+        Ok(()) => 0,
+        Err(e) => {
+            h(p).m.dos.log.push_str(&e);
+            -1
+        }
+    }
+}
+/// Run for `ms` of emulated time; the exit code once the program has ended, else -1.
+#[no_mangle]
+pub extern "C" fn mc_run(p: *mut Handle, ms: f64) -> i32 {
+    let m = &mut h(p).m;
+    m.run(ms);
+    m.exited.map(|c| c as i32).unwrap_or(-1)
+}
+#[no_mangle]
+pub extern "C" fn mc_key(p: *mut Handle, byte: u32) {
+    h(p).m.key_byte(byte as u8);
+}
+#[no_mangle]
+pub extern "C" fn mc_set_cycles(p: *mut Handle, per_ms: f64) {
+    h(p).m.cycles_per_ms = per_ms;
+}
+#[no_mangle]
+pub extern "C" fn mc_now(p: *mut Handle) -> f64 {
+    h(p).m.hw.now
+}
+#[no_mangle]
+pub extern "C" fn mc_count(p: *mut Handle) -> f64 {
+    h(p).m.cpu.count as f64
+}
+/// The screen as RGBA, 320 x 200.
+#[no_mangle]
+pub extern "C" fn mc_render(p: *mut Handle) -> *const u8 {
+    h(p).m.render().as_ptr()
+}
+#[no_mangle]
+pub extern "C" fn mc_mode(p: *mut Handle) -> u32 {
+    h(p).m.hw.vga.mode as u32
+}
+/// Guest memory (linear 0 at the pointer).
+#[no_mangle]
+pub extern "C" fn mc_ram(p: *mut Handle) -> *mut u8 {
+    h(p).m.hw.mem.as_mut_ptr()
+}
+#[no_mangle]
+pub extern "C" fn mc_ram_len(p: *mut Handle) -> usize {
+    h(p).m.hw.mem.len()
+}
+/// Text for the page (read with mc_out, mc_out_len): 0 the log, 1 the names of the files the program wrote, 2 the console.
+#[no_mangle]
+pub extern "C" fn mc_text(p: *mut Handle, what: u32) {
+    let hd = h(p);
+    let t = match what {
+        0 => hd.m.log(),
+        1 => {
+            hd.m.dos
+                .changed
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => hd.m.dos.console.clone(),
+    };
+    hd.out = t.into_bytes();
+}
+/// A file's bytes (read with mc_out, mc_out_len); length u32::MAX when it does not exist.
+#[no_mangle]
+pub extern "C" fn mc_file(p: *mut Handle, name: *const u8, name_len: usize) -> u32 {
+    let hd = h(p);
+    match hd.m.dos.files.get(&s(name, name_len).to_uppercase()) {
+        Some(d) => {
+            hd.out = d.clone();
+            d.len() as u32
+        }
+        None => u32::MAX,
+    }
+}
+#[no_mangle]
+pub extern "C" fn mc_out(p: *mut Handle) -> *const u8 {
+    h(p).out.as_ptr()
+}
+#[no_mangle]
+pub extern "C" fn mc_out_len(p: *mut Handle) -> usize {
+    h(p).out.len()
+}
+/// Forget which files changed (after the page kept them).
+#[no_mangle]
+pub extern "C" fn mc_changed_clear(p: *mut Handle) {
+    h(p).m.dos.changed.clear();
+}

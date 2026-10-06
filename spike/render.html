@@ -41,6 +41,10 @@
                           classic: as the game draws (bitmap cars beyond 52 ft,
                           bitmap wheels and helmets, its choice of cars, its haze
                           steps) and the game's 4:3 framing. Also a menu on the page.
+    machine=dosbox|rust   the PC the game runs on: js-dos's DOSBox (default), or our own
+                          in Rust (spike/machine, dist/machine.wasm: a 286 with the devices
+                          and DOS services gp.exe uses; it starts gp /g, without the intro,
+                          and has no AdLib sound: the Amiga sound plays)
     pad=auto|off          auto: a game controller drives (once the browser sees it: press
                           one of its buttons): in a session its left stick steers and its
                           triggers accelerate and brake through the game's own joystick
@@ -190,8 +194,9 @@ import { timerSleep } from './lib/dos-sleep.mjs';
 import { makeSmoother } from './lib/pixel-smooth.mjs';
 import { readPad, firstPad, padKeys } from './lib/gamepad.mjs';
 import { virtualJoystick } from './lib/joystick.mjs';
+import { createPC, pcCommandInterface } from './lib/pc.mjs';
 import { changeStore, keeper, menuChoices } from './lib/saves.mjs';
-import { unzipSync } from './node_modules/fflate/esm/browser.js';
+import { unzipSync, zipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -223,6 +228,8 @@ const opts = {
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
   manual: q.get('manual') ?? 'auto',
   pad: q.get('pad') === 'off' ? 'off' : 'auto',
+  // the PC the game runs on: js-dos's DOSBox, or ours in Rust (machine/, dist/machine.wasm)
+  machine: q.get('machine') === 'rust' ? 'rust' : 'dosbox',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
   fps: q.get('fps') === 'game' ? null : Math.min(30, Math.max(8, +(q.get('fps') ?? 30) || 30)),
@@ -548,8 +555,11 @@ function controller(st, now) {
 }
 
 let loopErrors = 0, lastPaletteAt = 0;
+let machineAt = null;          // when the Rust PC last ran (machine=rust)
 function frameLoop(now) {
   const t0 = performance.now();
+  // our PC runs the game for the time since the last page frame (at most 100 ms: a slower host slows the game)
+  if (ci && ci.tick) { if (machineAt !== null) ci.tick(Math.min(100, now - machineAt)); machineAt = now; }
   try { frame(now); } catch (e) {
     if (loopErrors++ < 5) { log('frame-error', { error: String(e?.stack ?? e) }); console.error(e); }
   }
@@ -741,8 +751,18 @@ requestAnimationFrame(frameLoop);
   // the game's files kept from the last visit, laid over the bundle's
   const kept = opts.saves ? await changes.load(opts.bundle) : null;
   if (kept) log('saves-loaded', { files: kept.files });
-  ci = await emulators.dosboxDirect(kept ? [bundle.slice(), kept.zip.slice()] : bundle.slice(), { audioWorklet: false });
-  if (opts.sleep === 'timer') log('sleep', { timer: timerSleep(ci) });
+  if (opts.machine === 'rust') {
+    // our PC: the bundle's files, the kept ones over them; it runs from the page's frame loop (frameLoop)
+    const files = unzipSync(bundle);
+    if (kept) Object.assign(files, unzipSync(kept.zip));
+    const pc = await createPC({ wasm: new URL('dist/machine.wasm', location.href), files, tail: ' /g' });
+    ci = pcCommandInterface(pc, { zipSync, kept: kept?.files });
+    if (opts.sound === 'adlib') { opts.sound = 'amiga'; log('adlib-unavailable'); }
+    log('machine', { machine: 'rust' });
+  } else {
+    ci = await emulators.dosboxDirect(kept ? [bundle.slice(), kept.zip.slice()] : bundle.slice(), { audioWorklet: false });
+  }
+  if (opts.sleep === 'timer' && opts.machine !== 'rust') log('sleep', { timer: timerSleep(ci) });
   if (opts.saves) {
     // checked while the game is in its menus, not while it races
     saves = keeper(ci, { key: opts.bundle, store: changes, unzip: unzipSync, start: kept,

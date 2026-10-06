@@ -1,0 +1,17 @@
+[package]
+name = "f1gp-machine"
+version = "0.1.0"
+edition = "2021"
+description = "A small PC in Rust for F1GP: a 286 real-mode CPU, the devices and the DOS services gp.exe uses"
+publish = false
+
+[lib]
+crate-type = ["rlib"]  # the wasm build asks for cdylib (build-machine.mjs)
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

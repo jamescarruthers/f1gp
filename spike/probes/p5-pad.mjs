@@ -7,7 +7,7 @@
 // the race (the probe gets from the main menu to the race with the pad), and
 // that the controls go back when the controller goes and when the session ends.
 //
-//   timeout 500 node probes/p5-pad.mjs
+//   timeout 500 node probes/p5-pad.mjs [--query '{"machine":"rust"}']
 //
 // Output: out/p5-pad/result.json and a line per check; exit 1 if one fails.
 
@@ -28,7 +28,9 @@ function fakePad() {
   Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__padOn ? pad : null] });
 }
 
-const emu = await launch({ bundle: 'dist/f1gp.jsdos', page: 'render.html', query: {}, viewport: { width: 800, height: 500 }, initScript: fakePad,
+const args = process.argv.slice(2);
+const QUERY = JSON.parse((() => { const i = args.indexOf('--query'); return i >= 0 ? args[i + 1] : '{}'; })());
+const emu = await launch({ bundle: 'dist/f1gp.jsdos', page: 'render.html', query: QUERY, viewport: { width: 800, height: 500 }, initScript: fakePad,
   chromiumArgs: ['--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--enable-gpu-compositing'] });
 const page = emu.page;
 const checks = [];

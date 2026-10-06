@@ -47,6 +47,8 @@ for (const f of needed) copy(f);
 // the emulator: the loader, DOSBox (direct mode) and the zip reader it uses for bundles
 for (const f of ["emulators.js", "wdosbox.js", "wdosbox.wasm", "wlibzip.js", "wlibzip.wasm"]) copy(`node_modules/js-dos/dist/emulators/${f}`);
 copy("node_modules/fflate/esm/browser.js");
+// our PC (render.html?machine=rust), built by build-machine.mjs
+try { statSync(join(here, "dist", "machine.wasm")); copy("dist/machine.wasm"); } catch { console.warn("no dist/machine.wasm: run node build-machine.mjs (machine=rust will not load)"); }
 
 const bundle = buildBundle({
   game: GAME, out: join(OUT, "dist", "f1gp.jsdos"), sound: "adlib", cycles: "25000",

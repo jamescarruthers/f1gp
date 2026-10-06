@@ -1,5 +1,6 @@
-# Build the site (spike/build-site.mjs: the pages, their modules, the emulator
-# and a game bundle built from original/) and deploy it to GitHub Pages.
+# Build the site (spike/build-site.mjs: the pages, their modules, the emulator,
+# our PC in Rust (spike/machine, built by build-machine.mjs) and a game bundle
+# built from original/) and deploy it to GitHub Pages.
 # Pull requests build it as a check; only main deploys.
 name: Pages
 
@@ -32,9 +33,18 @@ jobs:
       - name: Test
         working-directory: spike
         run: node --test tests/*.test.mjs
+      - name: Our PC (Rust)
+        working-directory: spike
+        run: |
+          rustup target add wasm32-unknown-unknown
+          (cd machine && cargo test --release)
+          node build-machine.mjs
       - name: Build the site
         working-directory: spike
         run: node build-site.mjs --out ../_site
+      - name: Boot the game on our PC
+        working-directory: spike
+        run: node probes/p6-pc-route.mjs --bundle ../_site/dist/f1gp.jsdos
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

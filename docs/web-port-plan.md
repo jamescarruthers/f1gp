@@ -499,6 +499,43 @@ them without emulating the Amiga (`render.html?sound=amiga`, the Sound menu;
    a game bundle built from `original/` with it, so the import step above is
    not needed for this site.
 
+## Our own PC: step 1 of a Rust rewrite (done, behind an option)
+
+The aim is to run the game without an emulator, by rewriting it in Rust a
+piece at a time, each piece checked against the original. Step 1 is a small
+PC in Rust that runs `gp.exe` as it is, in place of DOSBox
+(`spike/machine/README.md`; the page's `render.html?machine=rust`, through
+`spike/lib/pc.mjs`). It gives the later steps a machine whose every part is
+ours, so a routine of the game can be swapped for a Rust function rather than
+patched in bytes.
+
+- **The CPU:** an 80286 in real mode (the game tests for a 386 but uses only
+  286 instructions). Checked against the SingleStepTests 80286 real-mode set
+  (1,477,997 single instructions recorded on a real chip): 160 differ, all in
+  cases the game does not meet.
+- **Around it:** the interrupt controller, the timer, the keyboard, VGA mode
+  13h, the game port, the AdLib's detection, EMS (the game will not start
+  without it), and DOS and BIOS served in Rust on an in-memory drive C.
+- **Time:** the machine's own clock (instructions at `cycles_per_ms`, a HLT
+  skips to the next interrupt), so the same inputs give the same run.
+- **Size:** 194 KB of WebAssembly, against DOSBox's 1.46 MB (with its loader,
+  1.6 MB).
+- **Speed:** about 55 million instructions a second natively, and in Node's
+  WebAssembly the route from boot to a race took 16 s for 36 s of the game's
+  time at 20,000 instructions a millisecond.
+- **Checks:** `spike/probes/p6-pc-route.mjs` boots the game in Node and drives
+  `lib/route.cjs` to a Monza Quick Race, reads the state as the page does
+  (gp.exe at 01A2h, as under DOSBox) and drives off (CI runs it on every
+  push); the page's controller probe passes all 19 checks on it.
+- **Not done:** AdLib synthesis (`sound=adlib` falls back to the Amiga sound),
+  the intro, a mouse, the serial link; it runs in the page's frame loop, so a
+  host slower than the game's time slows the game.
+
+Next (step 2): a hook in the machine that runs a Rust function in place of
+one of the game's routines, and a check that runs both on the same state and
+compares the memory they leave; then the routines in turn, starting with the
+ones already decoded.
+
 ## Risks and open questions
 
 | Risk | Effect | What to do |
