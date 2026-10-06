@@ -67,6 +67,18 @@ test('leaves other messages and sessions alone, and a stopped emulator asleep', 
 
 test('reads js-dos sleep counters', () => {
   const win = fakeWindow(), m = fakeModule(win);
-  assert.deepEqual(sleepCounters({ transport: { module: m } }), { sleeps: 5, nonSkippable: 3, sleepMs: 12 });
+  assert.deepEqual(sleepCounters({ transport: { module: m } }), { sleeps: 5, nonSkippable: 3, sleepMs: 12, busyMs: null });
   assert.equal(sleepCounters({}), null);
+});
+
+test('counts the time DOSBox runs between a wake-up and its next sleep', () => {
+  const win = fakeWindow(), m = fakeModule(win);
+  timerSleep({ transport: { module: m } });
+  assert.equal(sleepCounters({ transport: { module: m } }).busyMs, 0);
+  // the emulator runs about 5 ms after this wake-up
+  m.sync_sleep(() => { const t = performance.now(); while (performance.now() - t < 5); m.woken++; });
+  win.send({ name: 'wc-sync-sleep', props: { sessionId: 's1' } });
+  assert.equal(m.woken, 1);
+  const { busyMs } = sleepCounters({ transport: { module: m } });
+  assert.ok(busyMs >= 5 && busyMs < 50, `busyMs ${busyMs}`);
 });
