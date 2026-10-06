@@ -5,7 +5,7 @@
 // finds GPSAVES\MYTEST and the style stays classic; then forget the files
 // (the Saves panel) and check that they are gone.
 //
-//   timeout 400 node probes/p5-saves.mjs
+//   timeout 400 node probes/p5-saves.mjs [--query '{"machine":"rust"}']
 //
 // Output: out/p5-saves/result.json and screenshots of each step.
 
@@ -14,13 +14,15 @@ import path from 'node:path';
 import { launch } from '../lib/browser-emu.mjs';
 import { route, sleep } from './browser-probe-lib.mjs';
 
+const args = process.argv.slice(2);
+const opt = (k, d) => { const i = args.indexOf(`--${k}`); return i >= 0 ? args[i + 1] : d; };
 const OUT = path.join(import.meta.dirname, '..', 'out', 'p5-saves');
 fs.mkdirSync(OUT, { recursive: true });
 const log = (...m) => console.log(m.join(' '));
 const result = { checks: {} };
 const check = (name, ok, detail) => { result.checks[name] = { ok: !!ok, detail }; log(ok ? 'ok  ' : 'FAIL', name, detail === undefined ? '' : JSON.stringify(detail)); };
 
-const emu = await launch({ bundle: 'dist/f1gp.jsdos', page: 'render.html', query: {}, viewport: { width: 1100, height: 760 } });
+const emu = await launch({ bundle: 'dist/f1gp.jsdos', page: 'render.html', query: JSON.parse(opt('query', '{}')), viewport: { width: 1100, height: 760 } });
 const d = emu.driver, page = emu.page;
 const shot = (name) => d.shot(path.join(OUT, `${name}.png`));
 const ready = () => page.waitForFunction(() => window.emuReady === true, null, { timeout: 60000, polling: 100 });

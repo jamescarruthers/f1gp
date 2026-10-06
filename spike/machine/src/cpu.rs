@@ -53,6 +53,10 @@ pub trait Bus {
         self.io_out8(port, v as u8);
         self.io_out8(port.wrapping_add(1), (v >> 8) as u8);
     }
+    /// An interrupt request the CPU would take now if IF allowed it (Cpu::run stops for it).
+    fn irq_pending(&mut self) -> bool {
+        false
+    }
 }
 
 /// What a step ended with.
@@ -98,6 +102,8 @@ pub struct Cpu {
     pub msw: u16,
     pub gdtr: (u32, u16),
     pub idtr: (u32, u16),
+    /// something may have let an interrupt in (IF set, a port written): Cpu::run checks
+    recheck: bool,
     // the instruction being run
     seg_ovr: Option<u8>,
     rep: u8,
@@ -110,9 +116,24 @@ impl Default for Cpu {
     }
 }
 
-#[inline]
-fn parity(v: u8) -> bool {
-    v.count_ones() % 2 == 0
+/// The flags arithmetic sets.
+const ARITH: u16 = CF | PF | AF | ZF | SF | OF;
+
+/// PF for a result: set when its low byte has an even number of ones (0x9669: bit n set when
+/// the nibble n has an even number; the byte folded to a nibble keeps its parity).
+#[inline(always)]
+fn pf(v: u8) -> u16 {
+    ((0x9669u16 >> ((v ^ (v >> 4)) & 0x0f)) & 1) << 2
+}
+/// ZF, SF and PF for an 8-bit result.
+#[inline(always)]
+fn szp8(v: u8) -> u16 {
+    ((v == 0) as u16) << 6 | (v & 0x80) as u16 | pf(v)
+}
+/// ZF, SF and PF for a 16-bit result.
+#[inline(always)]
+fn szp16(v: u16) -> u16 {
+    ((v == 0) as u16) << 6 | (v >> 8) & 0x80 | pf(v as u8)
 }
 
 impl Cpu {
@@ -129,6 +150,7 @@ impl Cpu {
             msw: 0xfff0,
             gdtr: (0, 0xffff),
             idtr: (0, 0x03ff),
+            recheck: true,
             seg_ovr: None,
             rep: 0,
             start_ip: 0,
@@ -137,7 +159,7 @@ impl Cpu {
 
     // ------------------------------------------------------------ registers and flags
 
-    #[inline]
+    #[inline(always)]
     pub fn get8(&self, r: u8) -> u8 {
         let w = self.r[(r & 3) as usize];
         if r < 4 {
@@ -146,7 +168,7 @@ impl Cpu {
             (w >> 8) as u8
         }
     }
-    #[inline]
+    #[inline(always)]
     pub fn set8(&mut self, r: u8, v: u8) {
         let w = &mut self.r[(r & 3) as usize];
         if r < 4 {
@@ -155,11 +177,11 @@ impl Cpu {
             *w = (*w & 0x00ff) | (v as u16) << 8
         }
     }
-    #[inline]
+    #[inline(always)]
     fn flag(&self, f: u16) -> bool {
         self.flags & f != 0
     }
-    #[inline]
+    #[inline(always)]
     fn setf(&mut self, f: u16, on: bool) {
         if on {
             self.flags |= f
@@ -171,40 +193,37 @@ impl Cpu {
     #[inline]
     pub fn load_flags(&mut self, v: u16) {
         self.flags = (v & FLAGS_MASK) | 0x0002;
+        self.recheck = true;
     }
-    #[inline]
+    #[inline(always)]
     fn szp8(&mut self, v: u8) {
-        self.setf(ZF, v == 0);
-        self.setf(SF, v & 0x80 != 0);
-        self.setf(PF, parity(v));
+        self.flags = (self.flags & !(ZF | SF | PF)) | szp8(v);
     }
-    #[inline]
+    #[inline(always)]
     fn szp16(&mut self, v: u16) {
-        self.setf(ZF, v == 0);
-        self.setf(SF, v & 0x8000 != 0);
-        self.setf(PF, parity(v as u8));
+        self.flags = (self.flags & !(ZF | SF | PF)) | szp16(v);
     }
 
     // ------------------------------------------------------------ memory
 
-    #[inline]
+    #[inline(always)]
     pub fn lin(&self, seg: u8, off: u16) -> u32 {
-        ((self.s[seg as usize] as u32) << 4).wrapping_add(off as u32) & self.a20
+        ((self.s[(seg & 3) as usize] as u32) << 4).wrapping_add(off as u32) & self.a20
     }
     /// A word at offset FFFFh: exception 13 (on the stack segment too, as a real 286 does).
     #[inline]
     fn overrun(_seg: u8) -> Stop {
         Stop::Exc(13)
     }
-    #[inline]
+    #[inline(always)]
     fn rd8m<B: Bus>(&self, b: &mut B, seg: u8, off: u16) -> u8 {
         b.rd8(self.lin(seg, off))
     }
-    #[inline]
+    #[inline(always)]
     fn wr8m<B: Bus>(&self, b: &mut B, seg: u8, off: u16, v: u8) {
         b.wr8(self.lin(seg, off), v)
     }
-    #[inline]
+    #[inline(always)]
     fn rd16m<B: Bus>(&self, b: &mut B, seg: u8, off: u16) -> R<u16> {
         if off == 0xffff {
             return Err(Self::overrun(seg));
@@ -212,7 +231,7 @@ impl Cpu {
         let a = self.lin(seg, off);
         Ok(b.rd8(a) as u16 | (b.rd8((a + 1) & self.a20) as u16) << 8)
     }
-    #[inline]
+    #[inline(always)]
     fn wr16m<B: Bus>(&self, b: &mut B, seg: u8, off: u16, v: u16) -> R<()> {
         if off == 0xffff {
             return Err(Self::overrun(seg));
@@ -223,7 +242,7 @@ impl Cpu {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn fetch8<B: Bus>(&mut self, b: &mut B) -> R<u8> {
         if self.ip.wrapping_sub(self.start_ip) >= 10 {
             return Err(Stop::Exc(13)); // longer than ten bytes
@@ -232,20 +251,32 @@ impl Cpu {
         self.ip = self.ip.wrapping_add(1);
         Ok(v)
     }
-    #[inline]
+    #[inline(always)]
     fn fetch16<B: Bus>(&mut self, b: &mut B) -> R<u16> {
         let lo = self.fetch8(b)? as u16;
         Ok(lo | (self.fetch8(b)? as u16) << 8)
     }
 
-    #[inline]
+    /// OUT: a write to the interrupt controller can let an interrupt in.
+    #[inline(always)]
+    fn out8<B: Bus>(&mut self, b: &mut B, port: u16, v: u8) {
+        b.io_out8(port, v);
+        self.recheck = true;
+    }
+    #[inline(always)]
+    fn out16<B: Bus>(&mut self, b: &mut B, port: u16, v: u16) {
+        b.io_out16(port, v);
+        self.recheck = true;
+    }
+
+    #[inline(always)]
     fn push<B: Bus>(&mut self, b: &mut B, v: u16) -> R<()> {
         let sp = self.r[SP].wrapping_sub(2);
         self.wr16m(b, SS, sp, v)?;
         self.r[SP] = sp;
         Ok(())
     }
-    #[inline]
+    #[inline(always)]
     fn pop<B: Bus>(&mut self, b: &mut B) -> R<u16> {
         let v = self.rd16m(b, SS, self.r[SP])?;
         self.r[SP] = self.r[SP].wrapping_add(2);
@@ -254,6 +285,7 @@ impl Cpu {
 
     // ------------------------------------------------------------ operands
 
+    #[inline(always)]
     fn modrm<B: Bus>(&mut self, b: &mut B) -> R<(u8, Ea)> {
         let m = self.fetch8(b)?;
         let md = m >> 6;
@@ -293,32 +325,32 @@ impl Cpu {
         }
         Ok((reg, Ea::Mem { seg, off }))
     }
-    #[inline]
+    #[inline(always)]
     fn rm8<B: Bus>(&mut self, b: &mut B, ea: Ea) -> u8 {
         match ea {
             Ea::Reg(r) => self.get8(r),
             Ea::Mem { seg, off } => self.rd8m(b, seg, off),
         }
     }
-    #[inline]
+    #[inline(always)]
     fn set_rm8<B: Bus>(&mut self, b: &mut B, ea: Ea, v: u8) {
         match ea {
             Ea::Reg(r) => self.set8(r, v),
             Ea::Mem { seg, off } => self.wr8m(b, seg, off, v),
         }
     }
-    #[inline]
+    #[inline(always)]
     fn rm16<B: Bus>(&mut self, b: &mut B, ea: Ea) -> R<u16> {
         match ea {
-            Ea::Reg(r) => Ok(self.r[r as usize]),
+            Ea::Reg(r) => Ok(self.r[(r & 7) as usize]),
             Ea::Mem { seg, off } => self.rd16m(b, seg, off),
         }
     }
-    #[inline]
+    #[inline(always)]
     fn set_rm16<B: Bus>(&mut self, b: &mut B, ea: Ea, v: u16) -> R<()> {
         match ea {
             Ea::Reg(r) => {
-                self.r[r as usize] = v;
+                self.r[(r & 7) as usize] = v;
                 Ok(())
             }
             Ea::Mem { seg, off } => self.wr16m(b, seg, off, v),
@@ -335,26 +367,28 @@ impl Cpu {
 
     // ------------------------------------------------------------ arithmetic
 
+    #[inline(always)]
     fn alu8(&mut self, op: u8, a: u8, b: u8) -> u8 {
         match op {
             0 | 2 => {
-                let c = if op == 2 && self.flag(CF) { 1 } else { 0 };
+                let c = (op == 2) as u16 & self.flags & CF;
                 let res = a as u16 + b as u16 + c;
                 let r = res as u8;
-                self.setf(CF, res > 0xff);
-                self.setf(AF, (a ^ b ^ r) & 0x10 != 0);
-                self.setf(OF, (a ^ r) & (b ^ r) & 0x80 != 0);
-                self.szp8(r);
+                let of = (((a ^ r) & (b ^ r) & 0x80) as u16) << 4;
+                self.flags =
+                    (self.flags & !ARITH) | (res >> 8) | ((a ^ b ^ r) & 0x10) as u16 | of | szp8(r);
                 r
             }
             3 | 5 | 7 => {
-                let c = if op == 3 && self.flag(CF) { 1 } else { 0 };
+                let c = (op == 3) as u16 & self.flags & CF;
                 let res = (a as u16).wrapping_sub(b as u16).wrapping_sub(c);
                 let r = res as u8;
-                self.setf(CF, (a as u16) < b as u16 + c);
-                self.setf(AF, (a ^ b ^ r) & 0x10 != 0);
-                self.setf(OF, (a ^ b) & (a ^ r) & 0x80 != 0);
-                self.szp8(r);
+                let of = (((a ^ b) & (a ^ r) & 0x80) as u16) << 4;
+                self.flags = (self.flags & !ARITH)
+                    | (res >> 8) & 1
+                    | ((a ^ b ^ r) & 0x10) as u16
+                    | of
+                    | szp8(r);
                 r
             }
             _ => {
@@ -363,32 +397,33 @@ impl Cpu {
                     4 => a & b,
                     _ => a ^ b,
                 };
-                self.flags &= !(CF | OF | AF);
-                self.szp8(r);
+                self.flags = (self.flags & !ARITH) | szp8(r);
                 r
             }
         }
     }
+    #[inline(always)]
     fn alu16(&mut self, op: u8, a: u16, b: u16) -> u16 {
         match op {
             0 | 2 => {
-                let c = if op == 2 && self.flag(CF) { 1 } else { 0 };
+                let c = ((op == 2) as u16 & self.flags & CF) as u32;
                 let res = a as u32 + b as u32 + c;
                 let r = res as u16;
-                self.setf(CF, res > 0xffff);
-                self.setf(AF, (a ^ b ^ r) & 0x10 != 0);
-                self.setf(OF, (a ^ r) & (b ^ r) & 0x8000 != 0);
-                self.szp16(r);
+                let of = ((a ^ r) & (b ^ r) & 0x8000) >> 4;
+                self.flags =
+                    (self.flags & !ARITH) | (res >> 16) as u16 | (a ^ b ^ r) & 0x10 | of | szp16(r);
                 r
             }
             3 | 5 | 7 => {
-                let c = if op == 3 && self.flag(CF) { 1 } else { 0 };
+                let c = ((op == 3) as u16 & self.flags & CF) as u32;
                 let res = (a as u32).wrapping_sub(b as u32).wrapping_sub(c);
                 let r = res as u16;
-                self.setf(CF, (a as u32) < b as u32 + c);
-                self.setf(AF, (a ^ b ^ r) & 0x10 != 0);
-                self.setf(OF, (a ^ b) & (a ^ r) & 0x8000 != 0);
-                self.szp16(r);
+                let of = ((a ^ b) & (a ^ r) & 0x8000) >> 4;
+                self.flags = (self.flags & !ARITH)
+                    | (res >> 16) as u16 & 1
+                    | (a ^ b ^ r) & 0x10
+                    | of
+                    | szp16(r);
                 r
             }
             _ => {
@@ -397,38 +432,37 @@ impl Cpu {
                     4 => a & b,
                     _ => a ^ b,
                 };
-                self.flags &= !(CF | OF | AF);
-                self.szp16(r);
+                self.flags = (self.flags & !ARITH) | szp16(r);
                 r
             }
         }
     }
+    #[inline(always)]
     fn inc8(&mut self, a: u8) -> u8 {
         let r = a.wrapping_add(1);
-        self.setf(AF, (a ^ r) & 0x10 != 0);
-        self.setf(OF, r == 0x80);
-        self.szp8(r);
+        let af = ((a ^ r) & 0x10) as u16;
+        self.flags = (self.flags & !(ARITH & !CF)) | af | ((r == 0x80) as u16) << 11 | szp8(r);
         r
     }
+    #[inline(always)]
     fn dec8(&mut self, a: u8) -> u8 {
         let r = a.wrapping_sub(1);
-        self.setf(AF, (a ^ r) & 0x10 != 0);
-        self.setf(OF, r == 0x7f);
-        self.szp8(r);
+        let af = ((a ^ r) & 0x10) as u16;
+        self.flags = (self.flags & !(ARITH & !CF)) | af | ((r == 0x7f) as u16) << 11 | szp8(r);
         r
     }
+    #[inline(always)]
     fn inc16(&mut self, a: u16) -> u16 {
         let r = a.wrapping_add(1);
-        self.setf(AF, (a ^ r) & 0x10 != 0);
-        self.setf(OF, r == 0x8000);
-        self.szp16(r);
+        let af = (a ^ r) & 0x10;
+        self.flags = (self.flags & !(ARITH & !CF)) | af | ((r == 0x8000) as u16) << 11 | szp16(r);
         r
     }
+    #[inline(always)]
     fn dec16(&mut self, a: u16) -> u16 {
         let r = a.wrapping_sub(1);
-        self.setf(AF, (a ^ r) & 0x10 != 0);
-        self.setf(OF, r == 0x7fff);
-        self.szp16(r);
+        let af = (a ^ r) & 0x10;
+        self.flags = (self.flags & !(ARITH & !CF)) | af | ((r == 0x7fff) as u16) << 11 | szp16(r);
         r
     }
 
@@ -558,6 +592,36 @@ impl Cpu {
 
     /// Run one instruction (with its prefixes; a repeated string instruction runs to its end).
     pub fn step<B: Bus>(&mut self, b: &mut B) -> Event {
+        self.step_inline(b)
+    }
+
+    /// Run instructions until `count` reaches `limit`, an instruction stops the CPU (HLT, a
+    /// callback), or an interrupt may be taken (IF set, no inhibit, `Bus::irq_pending`): the
+    /// caller takes interrupts. One loop here, rather than a call per instruction.
+    ///
+    /// The check for an interrupt is made at the start and after an instruction that can let
+    /// one in (STI, POPF, IRET, OUT: `recheck`), once no interrupt shadow (MOV SS, STI) is
+    /// in force: interrupt requests are raised between calls, never during one.
+    pub fn run<B: Bus>(&mut self, b: &mut B, limit: u64) -> Event {
+        self.recheck = true;
+        while self.count < limit {
+            if self.recheck && !self.irq_inhibit {
+                self.recheck = false;
+                if self.flags & IF != 0 && b.irq_pending() {
+                    self.recheck = true;
+                    break;
+                }
+            }
+            match self.step_inline(b) {
+                Event::Ok => {}
+                e => return e,
+            }
+        }
+        Event::Ok
+    }
+
+    #[inline(always)]
+    fn step_inline<B: Bus>(&mut self, b: &mut B) -> Event {
         self.start_ip = self.ip;
         self.seg_ovr = None;
         self.rep = 0;
@@ -579,6 +643,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn jcc(&self, c: u8) -> bool {
         let f = |x| self.flag(x);
         let r = match c >> 1 {
@@ -594,6 +659,7 @@ impl Cpu {
         r != (c & 1 != 0)
     }
 
+    #[inline(always)]
     fn exec<B: Bus>(&mut self, b: &mut B) -> R<()> {
         let mut op;
         loop {
@@ -624,7 +690,7 @@ impl Cpu {
                     1 => {
                         let (reg, ea) = self.modrm(b)?;
                         let a = self.rm16(b, ea)?;
-                        let v = self.alu16(alu, a, self.r[reg as usize]);
+                        let v = self.alu16(alu, a, self.r[(reg & 7) as usize]);
                         if alu != 7 {
                             self.set_rm16(b, ea, v)?
                         }
@@ -640,9 +706,9 @@ impl Cpu {
                     3 => {
                         let (reg, ea) = self.modrm(b)?;
                         let x = self.rm16(b, ea)?;
-                        let v = self.alu16(alu, self.r[reg as usize], x);
+                        let v = self.alu16(alu, self.r[(reg & 7) as usize], x);
                         if alu != 7 {
-                            self.r[reg as usize] = v
+                            self.r[(reg & 7) as usize] = v
                         }
                     }
                     4 => {
@@ -772,7 +838,7 @@ impl Cpu {
                 let (seg, off) = Self::mem_only(ea)?;
                 let lo = self.rd16m(b, seg, off)? as i16;
                 let hi = self.rd16m(b, seg, off.wrapping_add(2))? as i16;
-                let v = self.r[reg as usize] as i16;
+                let v = self.r[(reg & 7) as usize] as i16;
                 if v < lo || v > hi {
                     return Err(Stop::Exc(5));
                 }
@@ -794,7 +860,7 @@ impl Cpu {
                     self.fetch8(b)? as i8 as i32
                 };
                 let p = a * imm;
-                self.r[reg as usize] = p as u16;
+                self.r[(reg & 7) as usize] = p as u16;
                 let over = p != p as i16 as i32;
                 self.setf(CF, over);
                 self.setf(OF, over);
@@ -836,7 +902,7 @@ impl Cpu {
             0x85 => {
                 let (reg, ea) = self.modrm(b)?;
                 let a = self.rm16(b, ea)?;
-                self.alu16(4, a, self.r[reg as usize]);
+                self.alu16(4, a, self.r[(reg & 7) as usize]);
             }
             0x86 => {
                 let (reg, ea) = self.modrm(b)?;
@@ -848,9 +914,9 @@ impl Cpu {
             0x87 => {
                 let (reg, ea) = self.modrm(b)?;
                 let a = self.rm16(b, ea)?;
-                let r = self.r[reg as usize];
+                let r = self.r[(reg & 7) as usize];
                 self.set_rm16(b, ea, r)?;
-                self.r[reg as usize] = a;
+                self.r[(reg & 7) as usize] = a;
             }
             0x88 => {
                 let (reg, ea) = self.modrm(b)?;
@@ -859,7 +925,7 @@ impl Cpu {
             }
             0x89 => {
                 let (reg, ea) = self.modrm(b)?;
-                let v = self.r[reg as usize];
+                let v = self.r[(reg & 7) as usize];
                 self.set_rm16(b, ea, v)?;
             }
             0x8a => {
@@ -870,20 +936,20 @@ impl Cpu {
             0x8b => {
                 let (reg, ea) = self.modrm(b)?;
                 let v = self.rm16(b, ea)?;
-                self.r[reg as usize] = v;
+                self.r[(reg & 7) as usize] = v;
             }
             0x8c => {
                 let (reg, ea) = self.modrm(b)?;
                 if reg > 3 {
                     return Err(Stop::Exc(6));
                 }
-                let v = self.s[reg as usize];
+                let v = self.s[(reg & 3) as usize];
                 self.set_rm16(b, ea, v)?;
             }
             0x8d => {
                 let (reg, ea) = self.modrm(b)?;
                 let (_, off) = Self::mem_only(ea)?;
-                self.r[reg as usize] = off;
+                self.r[(reg & 7) as usize] = off;
             }
             0x8e => {
                 let (reg, ea) = self.modrm(b)?;
@@ -891,7 +957,7 @@ impl Cpu {
                     return Err(Stop::Exc(6));
                 }
                 let v = self.rm16(b, ea)?;
-                self.s[reg as usize] = v;
+                self.s[(reg & 3) as usize] = v;
                 if reg == SS {
                     self.irq_inhibit = true
                 }
@@ -994,7 +1060,7 @@ impl Cpu {
                 let (seg, off) = Self::mem_only(ea)?;
                 let v = self.rd16m(b, seg, off)?;
                 let s = self.rd16m(b, seg, off.wrapping_add(2))?;
-                self.r[reg as usize] = v;
+                self.r[(reg & 7) as usize] = v;
                 self.s[if op == 0xc4 { ES } else { DS } as usize] = s;
             }
             0xc6 => {
@@ -1130,11 +1196,11 @@ impl Cpu {
             }
             0xe6 => {
                 let p = self.fetch8(b)? as u16;
-                b.io_out8(p, self.r[AX] as u8);
+                self.out8(b, p, self.r[AX] as u8);
             }
             0xe7 => {
                 let p = self.fetch8(b)? as u16;
-                b.io_out16(p, self.r[AX]);
+                self.out16(b, p, self.r[AX]);
             }
             0xe8 => {
                 let d = self.fetch16(b)?;
@@ -1161,8 +1227,8 @@ impl Cpu {
                 self.set8(0, v);
             }
             0xed => self.r[AX] = b.io_in16(self.r[DX]),
-            0xee => b.io_out8(self.r[DX], self.r[AX] as u8),
-            0xef => b.io_out16(self.r[DX], self.r[AX]),
+            0xee => self.out8(b, self.r[DX], self.r[AX] as u8),
+            0xef => self.out16(b, self.r[DX], self.r[AX]),
             0xf4 => return Err(Stop::Halt),
             0xf5 => self.flags ^= CF,
             0xf6 | 0xf7 => self.group3(b, op)?,
@@ -1174,6 +1240,7 @@ impl Cpu {
                     self.irq_inhibit = true
                 }
                 self.flags |= IF;
+                self.recheck = true;
             }
             0xfc => self.flags &= !DF,
             0xfd => self.flags |= DF,
@@ -1457,11 +1524,11 @@ impl Cpu {
                 }
                 0x6e => {
                     let v = self.rd8m(b, src, si);
-                    b.io_out8(self.r[DX], v);
+                    self.out8(b, self.r[DX], v);
                 }
                 0x6f => {
                     let v = self.rd16m(b, src, si)?;
-                    b.io_out16(self.r[DX], v);
+                    self.out16(b, self.r[DX], v);
                 }
                 0xa4 => {
                     let v = self.rd8m(b, src, si);

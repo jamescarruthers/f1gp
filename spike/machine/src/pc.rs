@@ -67,11 +67,15 @@ impl Hw {
 }
 
 impl Bus for Hw {
-    #[inline]
+    #[inline(always)]
+    fn irq_pending(&mut self) -> bool {
+        self.pic.pending().is_some()
+    }
+    #[inline(always)]
     fn rd8(&mut self, a: u32) -> u8 {
         self.mem[a as usize]
     }
-    #[inline]
+    #[inline(always)]
     fn wr8(&mut self, a: u32, v: u8) {
         if a < 0xf0000 {
             self.mem[a as usize] = v;
@@ -298,7 +302,7 @@ impl Machine {
                     idle = true;
                     break;
                 }
-                match self.cpu.step(&mut self.hw) {
+                match self.cpu.run(&mut self.hw, start + budget) {
                     Event::Ok => {}
                     Event::Halt => {
                         idle = true;

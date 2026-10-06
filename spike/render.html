@@ -555,11 +555,10 @@ function controller(st, now) {
 }
 
 let loopErrors = 0, lastPaletteAt = 0;
-let machineAt = null;          // when the Rust PC last ran (machine=rust)
 function frameLoop(now) {
   const t0 = performance.now();
-  // our PC runs the game for the time since the last page frame (at most 100 ms: a slower host slows the game)
-  if (ci && ci.tick) { if (machineAt !== null) ci.tick(Math.min(100, now - machineAt)); machineAt = now; }
+  // our PC runs on its own clock (lib/pc.mjs); its screen as it is now
+  if (ci && ci.frame) ci.frame();
   try { frame(now); } catch (e) {
     if (loopErrors++ < 5) { log('frame-error', { error: String(e?.stack ?? e) }); console.error(e); }
   }
@@ -752,7 +751,7 @@ requestAnimationFrame(frameLoop);
   const kept = opts.saves ? await changes.load(opts.bundle) : null;
   if (kept) log('saves-loaded', { files: kept.files });
   if (opts.machine === 'rust') {
-    // our PC: the bundle's files, the kept ones over them; it runs from the page's frame loop (frameLoop)
+    // our PC: the bundle's files, the kept ones over them; it runs on its own clock, as DOSBox does
     const files = unzipSync(bundle);
     if (kept) Object.assign(files, unzipSync(kept.zip));
     const pc = await createPC({ wasm: new URL('dist/machine.wasm', location.href), files, tail: ' /g' });
