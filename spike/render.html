@@ -41,6 +41,13 @@
                           classic: as the game draws (bitmap cars beyond 52 ft,
                           bitmap wheels and helmets, its choice of cars, its haze
                           steps) and the game's 4:3 framing. Also a menu on the page.
+    pad=auto|off          auto: a game controller drives (once the browser sees it: press
+                          one of its buttons): in a session its left stick steers and its
+                          triggers accelerate and brake through the game's own joystick
+                          code (lib/joystick.mjs), its buttons press the game's keys
+                          (lib/gamepad.mjs; the Keys panel lists them). A driving key
+                          (A, Z, comma, full stop) gives the controls back to the
+                          keyboard until the controller is used again. off: ignore it
     manual=auto|off       auto: take the player through the manual check (English manual,
                           the word typed) and the joystick question (Use Keys)
     audio=own|off         the game's sound through our AudioWorklet (starts on the first
@@ -72,7 +79,7 @@
                           slightly by a fixed sun (modern), or as the game colours them
     shadows=on|off        the stands', buildings', bridges' and walls' shadows from the same
                           sun on the road, the ground and each other (modern), or none
-    objects=steady|game   the trackside shapes and bitmaps: the near version at every
+    lod=steady|game       the trackside shapes and bitmaps: the near version at every
                           distance, turned by the ray's own angle (modern: trees and boards
                           do not pop or flick), or as the game picks them by depth and
                           screen column (classic; less to draw)
@@ -181,6 +188,8 @@ import { sceneRoutine, viewportFill, chooseMarker, keyFrame, paintMirrors, shown
 import { setFrameRate, frameTicks, readFrameTicks, readWorkTicks, cyclesGovernor, framePacer } from './lib/pace.mjs';
 import { timerSleep } from './lib/dos-sleep.mjs';
 import { makeSmoother } from './lib/pixel-smooth.mjs';
+import { readPad, firstPad, padKeys } from './lib/gamepad.mjs';
+import { virtualJoystick } from './lib/joystick.mjs';
 import { changeStore, keeper, menuChoices } from './lib/saves.mjs';
 import { unzipSync } from './node_modules/fflate/esm/browser.js';
 
@@ -208,11 +217,12 @@ const opts = {
   cockpitParam: ['smooth', 'pixels'].includes(q.get('cockpit')) ? q.get('cockpit') : null,
   shadeParam: ['on', 'off'].includes(q.get('shade')) ? q.get('shade') : null,
   shadowsParam: ['on', 'off'].includes(q.get('shadows')) ? q.get('shadows') : null,
-  objectsParam: ['steady', 'game'].includes(q.get('objects')) ? q.get('objects') : null,
+  lodParam: ['steady', 'game'].includes(q.get('lod')) ? q.get('lod') : null,
   audio: q.get('audio') ?? 'own',
   // the Amiga version's sound unless asked for the PC's (falls back to it without dist/amiga-sound.bin)
   sound: ['adlib', 'amiga', 'amiga-clean'].includes(q.get('sound')) ? q.get('sound') : 'amiga',
   manual: q.get('manual') ?? 'auto',
+  pad: q.get('pad') === 'off' ? 'off' : 'auto',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
   fps: q.get('fps') === 'game' ? null : Math.min(30, Math.max(8, +(q.get('fps') ?? 30) || 30)),
@@ -234,7 +244,7 @@ function applyStyle(style) {
   opts.cockpit = opts.cockpitParam ?? (style === 'classic' ? 'pixels' : 'smooth');
   opts.shade = opts.shadeParam ?? (style === 'classic' ? 'off' : 'on');
   opts.shadows = opts.shadowsParam ?? (style === 'classic' ? 'off' : 'on');
-  opts.objects = opts.objectsParam ?? (style === 'classic' ? 'game' : 'steady');
+  opts.lod = opts.lodParam ?? (style === 'classic' ? 'game' : 'steady');
   const ck = document.getElementById('cockpit');
   if (ck) ck.value = opts.cockpit;
   if (!opts.framingParam && opts.layout !== 'overlay') opts.framing = style === 'classic' ? 'original' : 'wide';
@@ -510,6 +520,33 @@ function loadCircuit(st) {
   window.renderApp.track = { circuit: c, name: CIRCUITS[c], source: opts.source, vertices: info.count, parts: info.parts, objects: info.objects };
 }
 
+// a game controller: its buttons press the game's keys; in a session its stick and triggers steer,
+// accelerate and brake through the game's joystick code, which the page takes over for the session
+// and gives back after it (lib/gamepad.mjs, lib/joystick.mjs). Of the controller and the keyboard,
+// the last used drives: a keyboard driving key gives the controls back, the controller takes them again.
+let joystick = null, padName = null;
+let padUsedAt = -Infinity, keysUsedAt = -Infinity;
+const DRIVING_KEYS = new Set(['KeyA', 'KeyZ', 'Comma', 'Period']);
+const padKeyMap = padKeys();
+function controller(st, now) {
+  const gp = opts.pad === 'off' || !navigator.getGamepads ? null : firstPad(navigator.getGamepads());
+  if ((gp ? gp.id : null) !== padName) {
+    padName = gp ? gp.id : null;
+    log(gp ? 'pad-connected' : 'pad-gone', { id: padName });
+    if (gp) padUsedAt = now; // the browser shows a controller once one of its buttons is pressed
+  }
+  const input = gp ? readPad(gp) : null;
+  if (input && (input.steer || input.throttle || input.brake || Object.values(input.buttons).some(Boolean))) padUsedAt = now;
+  const inSession = !!st.inSession;
+  for (const [code, down] of padKeyMap.update(input, inSession, now)) ci.sendKeyEvent(CODE_TO_KEY[code], down);
+  if (input && inSession && padUsedAt >= keysUsedAt) {
+    joystick ??= virtualJoystick(mem);
+    if (!joystick.engaged && joystick.engage()) log('pad-engaged');
+    joystick.set(input);
+  } else if (joystick && joystick.engaged) { joystick.disengage(); log('pad-released'); }
+  window.renderApp.pad = { name: padName, engaged: !!(joystick && joystick.engaged), input };
+}
+
 let loopErrors = 0, lastPaletteAt = 0;
 function frameLoop(now) {
   const t0 = performance.now();
@@ -561,6 +598,7 @@ function frame(now) {
     const st = reader.read();
     window.renderApp.state = st;
     gamePaused = !!(st.inSession && st.paused);
+    controller(st, now);
     if (st.inSession && st.track.lapSegments > 0) {
       if (st.session.circuit !== circuit) loadCircuit(st);
       if (st.consistent && (!cur || st.frame !== cur.st.frame)) {
@@ -639,7 +677,7 @@ function frame(now) {
       if (sceneOpts && k !== markKey) { markKey = k; renderer.setScene(readScene(mem), sceneOpts); log('markings-changed'); }
     }
     if (opts.layout !== 'single' || swapped) {
-      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, shadows: opts.shadows, objects: opts.objects, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
+      const drawOpts = { framing: opts.layout === 'single' ? 'stage' : opts.framing, haze: opts.haze, texture: textureOn(mem) ? opts.texture : 'off', crowd: opts.crowd, poles: opts.poles, shade: opts.shade, shadows: opts.shadows, objects: opts.lod, pitLane: renderer.objects ? cameraInPitLane(mem) : false };
       renderer.draw(cam, drawOpts);
       if (realMirrors && swapped && st.view.mode === 'cockpit') {
         // each mirror: the cars in its view, seen from the camera turned by the mirror's angle (not
@@ -677,12 +715,12 @@ setInterval(() => {
   const r = perf.raf.splice(0), d = perf.draw.splice(0), js = perf.js.splice(0).sort((a, b) => a - b);
   const med = (a) => { if (!a.length) return '-'; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1].toFixed(2); };
   const st = cur && cur.st;
-  $('status').textContent = st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting');
+  $('status').textContent = (st ? `${st.session.type} · ${CIRCUITS[st.session.circuit] ?? ''} · ${st.view.mode} · frame ${st.frame}` : (mem ? 'waiting for a session' : 'starting')) + (padName ? ' · controller' : '');
   const gameFps = st ? st.session.fps : null, cycles = governor ? governor.cycles : null;
   // the page's own work per frame (the emulator shares the thread): median, the slowest tenth, the slowest
   const jsAt = (p) => (js.length ? +js[Math.min(js.length - 1, Math.floor(p * js.length))].toFixed(2) : null);
   const slowest = r.length ? Math.max(...r).toFixed(1) : '-';
-  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms, slowest ${slowest} · page work ${jsAt(0.5) ?? '-'} ms, slowest ${jsAt(1) ?? '-'} · draw ${med(d)} ms · game ${gameFps ?? '-'} fps, frames kept ${perf.kept}/s${cycles ? ` · ${cycles} cycles` : ''} · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}, texture ${opts.texture}, shadows ${opts.shadows}, objects ${opts.objects}, mirrors ${opts.mirrors}`;
+  $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms, slowest ${slowest} · page work ${jsAt(0.5) ?? '-'} ms, slowest ${jsAt(1) ?? '-'} · draw ${med(d)} ms · game ${gameFps ?? '-'} fps, frames kept ${perf.kept}/s${cycles ? ` · ${cycles} cycles` : ''} · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}, texture ${opts.texture}, shadows ${opts.shadows}, lod ${opts.lod}, mirrors ${opts.mirrors}`;
   window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, jsMs: jsAt(0.5), jsP90: jsAt(0.9), jsMax: jsAt(1), kept: perf.kept, gameFps, cycles, size: [glCanvas.width, glCanvas.height] };
   perf.kept = 0;
 }, 1000);
@@ -755,6 +793,7 @@ requestAnimationFrame(frameLoop);
     if (code === undefined) return;
     e.preventDefault();
     if (down && e.repeat) return;
+    if (down && DRIVING_KEYS.has(e.code)) keysUsedAt = performance.now();
     if (down) held.add(code); else held.delete(code);
     ci.sendKeyEvent(code, down);
   };

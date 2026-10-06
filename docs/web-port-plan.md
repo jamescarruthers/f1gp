@@ -91,8 +91,9 @@ Findings:
 - **Hosting:** no COOP/COEP headers are needed, so GitHub Pages works. With
   js-dos's files self-hosted, the page makes no requests to other hosts.
 - **Controls:** keyboard and mouse reach the game. js-dos has no route for
-  analogue joystick input; that needs a small change to the emulator build
-  (Phase 5).
+  analogue joystick input. A game controller now drives through the game's
+  own joystick code instead, with no change to the emulator (Phase 5,
+  Controls).
 - **Known issues:** the DOSBox build produces about 5.9% more audio samples
   than its stated rate, and the DOSBox-X build gives no sound. Both need a
   fix or a workaround later.
@@ -354,9 +355,9 @@ filter. The slowest frames hardly changed. Ruled out: garbage collection
 the cockpit's sun rays (9 µs a frame) and their grid (10 ms, built once per
 scene). This browser draws on the CPU, so it cannot show what a GPU does with
 the shadow map; the page's status line shows the slowest frame of each second
-and the page's own work, with the shadows, objects and mirrors settings, so a
+and the page's own work, with the shadows, lod and mirrors settings, so a
 machine where it still stutters can be checked by setting `shadows=off`,
-`objects=game` and `mirrors=game` one at a time.
+`lod=game` and `mirrors=game` one at a time.
 
 To do:
 
@@ -474,8 +475,23 @@ them without emulating the Amiga (`render.html?sound=amiga`, the Sound menu;
    keeps the files the game changed (js-dos `persist`) in IndexedDB and lays
    them over the bundle on the next start, and a Saves panel lists and forgets
    them. `spike/probes/p5-saves.mjs` checks the whole path.
-3. **Controls:** keyboard, mouse, gamepad (needs the emulator change for
-   analogue input), touch.
+3. **Controls:** keyboard, mouse, gamepad, touch. Done for a gamepad
+   (`spike/lib/gamepad.mjs`, `spike/lib/joystick.mjs`, `render.html?pad=`),
+   without the emulator change: in a session the page sets the game's controls
+   to its analogue joystick (steering on joystick A's x axis, accelerator and
+   brake on joystick B's two axes as pedals, gears on two buttons), with a
+   calibration and scales of its own and the flags the game works out at a
+   session's start, turns the game's button read into a return and writes the
+   axes and buttons each frame. The left stick steers (a dead zone of 0.1, then
+   a curve of power 1.5), the triggers or the right stick accelerate and brake
+   gradually, the shoulder buttons change gear, and the other buttons press the
+   game's keys; in the menus the d-pad and A move and choose. After the session,
+   or when the controller goes, every byte goes back, so the menus and saved
+   settings keep the keyboard. A keyboard driving key gives the controls back to
+   the keyboard until the controller is used again. `spike/probes/p5-pad.mjs`
+   drives a Quick Race from the main menu with a stand-in controller (19
+   checks). Not done: touch, and steering wheels that the browser does not map
+   as a standard pad.
 4. **Offline:** a service worker caches the page and emulator.
 5. **Deploy** to a static host with a GitHub Actions job. Done for GitHub
    Pages (`.github/workflows/pages.yml`, `spike/build-site.mjs`): every push to
