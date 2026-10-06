@@ -189,7 +189,7 @@ export function pcCommandInterface(pc, o) {
   const frames = [];
   const kept = new Set((o.kept ?? []).map((n) => n.toUpperCase().replace(/\//g, '\\')));
   const slice = o.slice ?? 2, budget = o.budget ?? 6, behind = o.behind ?? 200;
-  let paused = false, origin = null, queued = false, dropped = 0;
+  let paused = false, origin = null, queued = false, dropped = 0, busy = 0;
   const channel = new MessageChannel();
   const queue = (ms) => {
     if (queued) return;
@@ -205,6 +205,7 @@ export function pcCommandInterface(pc, o) {
     if (start - origin - pc.now() > behind) { dropped += start - origin - pc.now() - behind; origin = start - pc.now() - behind; }
     const target = start - origin;
     while (pc.now() < target && performance.now() - start < budget) pc.run(Math.min(slice, target - pc.now()));
+    busy += performance.now() - start;
     if (pc.exited !== null) return;
     queue(pc.now() < target ? 0 : Math.max(1, pc.now() - (performance.now() - origin)));
   };
@@ -222,6 +223,8 @@ export function pcCommandInterface(pc, o) {
     },
     /** Real time (ms) the machine could not keep up with, so the game ran slower. */
     get dropped() { return dropped; },
+    /** Time (ms) the machine's tasks have taken on the main thread. */
+    get busyMs() { return busy; },
     events: () => ({
       onFrame: (f) => frames.push(f),
       onSoundPush: () => {},

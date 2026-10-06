@@ -527,7 +527,9 @@ patched in bytes.
   million natively), against DOSBox's 55 million; a second of the race at the
   page's 8,000 cycles takes 0.09 s of the host's CPU, against DOSBox's 0.21 s.
   In the page the main thread is busy 25-47% of the time on it, 36-60% on
-  DOSBox (`spike/probes/p6-bench.mjs`, `p6-bench-page.mjs`).
+  DOSBox (`spike/probes/p6-bench.mjs`, `p6-bench-page.mjs`). The site's
+  `bench.html` runs both through the same race in the visitor's own browser
+  and shows the results side by side.
 - **Checks:** `spike/probes/p6-pc-route.mjs` boots the game in Node and drives
   `lib/route.cjs` to a Monza Quick Race, reads the state as the page does
   (gp.exe at 01A2h, as under DOSBox) and drives off (CI runs it on every

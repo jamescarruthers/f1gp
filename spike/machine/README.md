@@ -121,6 +121,9 @@ cargo run --release --bin boot -- <files> <out> [seconds] [GP.EXE] [" /g"]
   with the autopilot.
 - `probes/p6-bench.mjs [--machine dosbox]` and `probes/p6-bench-page.mjs
   [--machine rust]`: the speeds above.
+- `bench.html` (on the site): both machines through the same race in your own
+  browser, on your own GPU, with the results side by side;
+  `probes/p6-bench-browser.mjs` runs it in headless Chromium.
 
 ## Not done yet
 

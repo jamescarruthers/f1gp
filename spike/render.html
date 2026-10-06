@@ -490,7 +490,7 @@ let sceneOpts = null, markKey = null; // the scene's options, and its markings w
 let swapped = false;          // single layout: our view is showing
 let mirrorCars = [];          // frameCars().mirrors of the last drawn frame (cockpit)
 const routineSeen = { calls: -1, at: -1e9 }; // when the routine's call counter last moved
-const perf = { raf: [], draw: [], js: [], frames: 0, kept: 0, last: null };
+const perf = { raf: [], draw: [], js: [], frames: 0, kept: 0, last: null, work: 0 };
 
 const teamColour = (car) => (car.isPlayer ? [255, 120, 20] : [235, 235, 235]);
 
@@ -563,6 +563,7 @@ function frameLoop(now) {
     if (loopErrors++ < 5) { log('frame-error', { error: String(e?.stack ?? e) }); console.error(e); }
   }
   perf.js.push(performance.now() - t0);
+  perf.work += performance.now() - t0;
   requestAnimationFrame(frameLoop);
 }
 
@@ -734,7 +735,9 @@ setInterval(() => {
   perf.kept = 0;
 }, 1000);
 
-window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null, setStyle: (v) => { applyStyle(v); $('style').value = v; } };
+window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null, setStyle: (v) => { applyStyle(v); $('style').value = v; },
+  // the time (ms) the page's frame loop has taken (bench.html)
+  pageWorkMs: () => perf.work };
 // the Phase 1 tools (route driver, autopilot) look for window.mapApp
 window.mapApp = window.renderApp;
 requestAnimationFrame(frameLoop);
