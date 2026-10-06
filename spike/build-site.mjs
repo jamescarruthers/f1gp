@@ -32,6 +32,9 @@ const copy = (from, to = from) => {
 copy("site/index.html", "index.html");
 copy("render.html");
 copy("map.html");
+copy("bench.html");
+// bench.html loads the route (a CommonJS file it runs as a classic script)
+copy("lib/route.cjs");
 // the modules the pages import, followed from page to module (and the
 // AudioWorklet modules lib/ loads with new URL("./x.mjs", import.meta.url))
 const needed = new Set();
@@ -42,7 +45,7 @@ const scan = (file) => {
     if (!needed.has(dep)) { needed.add(dep); scan(dep); }
   }
 };
-for (const page of ["render.html", "map.html"]) scan(page);
+for (const page of ["render.html", "map.html", "bench.html"]) scan(page);
 for (const f of needed) copy(f);
 // the emulator: the loader, DOSBox (direct mode) and the zip reader it uses for bundles
 for (const f of ["emulators.js", "wdosbox.js", "wdosbox.wasm", "wlibzip.js", "wlibzip.wasm"]) copy(`node_modules/js-dos/dist/emulators/${f}`);

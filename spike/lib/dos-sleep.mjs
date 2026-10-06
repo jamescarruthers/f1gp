@@ -24,10 +24,12 @@ export function timerSleep(ci) {
   const m = ci?.transport?.module;
   if (!m || typeof m.receive !== 'function' || typeof m.sync_sleep !== 'function' || m.timerSleep) return false;
   window.removeEventListener('message', m.receive);
+  // DOSBox runs from its wake-up to its next sleep: that time is the emulator's (busyMs)
+  m.busyMs = 0;
   const wake = () => {
     const w = m.sync_wakeUp;
     delete m.sync_wakeUp; delete m.wakeUpAt;
-    if (m.alive && w) w();
+    if (m.alive && w) { const t = performance.now(); w(); m.busyMs += performance.now() - t; }
   };
   // as wdosbox.js's Module.receive, with a timer in place of the next message
   m.receive = (ev) => {
@@ -42,9 +44,10 @@ export function timerSleep(ci) {
   return true;
 }
 
-/** js-dos's sleep counters: { sleeps, nonSkippable, sleepMs } since the emulator started. */
+/** js-dos's sleep counters: { sleeps, nonSkippable, sleepMs } since the emulator started, and with
+ * timerSleep the time DOSBox has run (busyMs). */
 export function sleepCounters(ci) {
   const m = ci?.transport?.module;
   if (!m) return null;
-  return { sleeps: m.sleep_count, nonSkippable: m.nonskippable_sleep_count, sleepMs: m.sleep_time };
+  return { sleeps: m.sleep_count, nonSkippable: m.nonskippable_sleep_count, sleepMs: m.sleep_time, busyMs: m.busyMs ?? null };
 }

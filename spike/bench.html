@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1GP machine benchmark</title>
+<!--
+  bench.html: the two PCs the game runs on, measured in this browser: js-dos's DOSBox and ours in
+  Rust (machine/, render.html?machine=rust). Each in turn runs in render.html in the frame below,
+  through the same Quick Race at Monza with the autopilot driving (lib/route.cjs, lib/autopilot.mjs),
+  with the same page options (sound off, saves off, so nothing is kept). For each:
+    1. the game's own picture at 25,000 cycles (the emulator does nearly all the work);
+    2. its top speed: the cycles setting raised (50,000 to 400,000) until the game can no longer
+       keep real time; the instructions a second it reached;
+    3. the new view, as players see it, the cycles chosen by the page's governor.
+  Measured: the game's speed against real time, the page's frame rate and frame intervals, and the
+  time on the main thread the emulator took (lib/pc.mjs busyMs; DOSBox from wake-up to sleep,
+  lib/dos-sleep.mjs) and the page's frame loop took (renderApp.pageWorkMs). DOSBox's time includes
+  handing its frames to the page and its AdLib synthesis; ours hands its screen over in the page's
+  frame loop.
+
+  Query options:
+    seconds=10|20|30      each measurement (default 20)
+    size=fit|960x600|1280x800  the game frame (default fit: the width of the window)
+    first=dosbox|rust     which machine runs first (default dosbox)
+    auto=1                start at once (probes/p6-bench-browser.mjs)
+-->
+<style>
+  :root { --bg: #f4f3ef; --fg: #1d1d1b; --muted: #6b6a66; --panel: #ffffff; --line: #d9d7d0; --good: #2f6b3a; --bad: #9a3324; --accent: #a8321e; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #161615; --fg: #ecebe6; --muted: #9a9993; --panel: #20201e; --line: #3a3936; --good: #7fc28b; --bad: #e08b78; --accent: #e0745c; color-scheme: dark; }
+  }
+  :root[data-theme="dark"] { --bg: #161615; --fg: #ecebe6; --muted: #9a9993; --panel: #20201e; --line: #3a3936; --good: #7fc28b; --bad: #e08b78; --accent: #e0745c; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+  header { padding: 12px 16px 4px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; }
+  header a { color: var(--muted); font-size: 13px; }
+  main { padding: 0 16px 24px; display: grid; gap: 12px; }
+  .intro { max-width: 72ch; color: var(--muted); margin: 0; }
+  .controls { display: flex; gap: 12px 16px; flex-wrap: wrap; align-items: center; }
+  .controls label { color: var(--muted); font-size: 13px; }
+  select, button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; }
+  button { cursor: pointer; }
+  button.primary { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); min-height: 1.4em; }
+  #stage { background: #000; border-radius: 6px; overflow: hidden; max-width: 100%; }
+  #stage[hidden] { display: none; }
+  #frame { display: block; border: 0; width: 100%; height: 72vh; background: #000; }
+  .tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 12px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  thead th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }
+  tr.group td { font-weight: 600; background: var(--bg); padding-top: 9px; }
+  td.better { color: var(--good); }
+  td.worse { color: var(--bad); }
+  td.note { color: var(--muted); font-size: 12px; }
+  #env { font-size: 12px; color: var(--muted); max-width: 100ch; margin: 0; }
+  #out { width: 100%; height: 12em; font: 12px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Machine benchmark: DOSBox against our PC</h1>
+  <a href="render.html">the game</a>
+</header>
+<main>
+  <p class="intro">This runs the game on each PC in turn in the frame below: DOSBox (js-dos) and
+  ours in Rust. Each drives the same Quick Race at Monza with the autopilot. It measures the game's
+  speed, the page's frame rate and the time each emulator takes on the browser's main thread. It
+  takes about five minutes with 20-second tests. Keep this tab in front and leave the mouse and keys
+  alone while it runs; a hidden tab stops the browser drawing and spoils the numbers.</p>
+  <div class="controls">
+    <label>Each test <select id="seconds"><option value="10">10 s</option><option value="20" selected>20 s</option><option value="30">30 s</option></select></label>
+    <label>Game frame <select id="size"><option value="fit">window width</option><option value="960x600">960 × 600</option><option value="1280x800">1280 × 800</option></select></label>
+    <label>First <select id="first"><option value="dosbox">DOSBox</option><option value="rust">ours</option></select></label>
+    <button id="start" class="primary">Start</button>
+    <button id="copy" disabled>Copy results</button>
+  </div>
+  <div id="status">Ready.</div>
+  <div id="stage" hidden><iframe id="frame" title="The game under test"></iframe></div>
+  <div class="tablewrap"><table id="results"><thead><tr><th>Test</th><th>DOSBox</th><th>Ours</th><th>Ours against DOSBox</th></tr></thead><tbody></tbody></table></div>
+  <p id="env"></p>
+  <textarea id="out" readonly hidden aria-label="Results as text"></textarea>
+</main>
+<script type="module">
+import { startAutopilot } from './lib/autopilot.mjs';
+
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+for (const k of ['seconds', 'size', 'first']) if (q.has(k)) $(k).value = q.get(k);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const status = (t) => { $('status').textContent = t; };
+const NAMES = { dosbox: 'DOSBox', rust: 'ours' };
+const LEVELS = [50000, 100000, 200000, 400000];
+
+// a hidden tab stops animation frames and slows timers: a test that saw one is not counted
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => { if (document.hidden) hiddenAt = performance.now(); });
+
+// lib/route.cjs as a classic script (it sets globalThis.F1GPRoute); a blob, whatever type the server gives .cjs
+async function loadRoute() {
+  if (window.F1GPRoute) return window.F1GPRoute;
+  const src = await (await fetch('lib/route.cjs')).text();
+  const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  await new Promise((res, rej) => { const s = document.createElement('script'); s.src = url; s.onload = res; s.onerror = rej; document.head.append(s); });
+  return window.F1GPRoute;
+}
+
+async function until(f, ms, what) {
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) { const v = f(); if (v) return v; await sleep(100); }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+// the game page on a machine, with the same options for both (nothing kept, no sound, no controller)
+async function openGame(machine) {
+  const frame = $('frame');
+  const size = $('size').value;
+  if (size === 'fit') { frame.style.width = '100%'; frame.style.height = '72vh'; }
+  else { const [w, h] = size.split('x'); frame.style.width = `${w}px`; frame.style.height = `${h}px`; }
+  const p = new URLSearchParams({ machine, screen: 'original', saves: 'off', audio: 'off', manual: 'off', pad: 'off',
+    sound: 'amiga', framing: 'wide', style: 'modern', cockpit: 'smooth' });
+  frame.src = `render.html?${p}`;
+  await until(() => frame.contentWindow?.emuReady === true && frame.contentWindow, 120000, `${NAMES[machine]} to start`);
+  return frame.contentWindow;
+}
+
+function emuBusy(win) {
+  const ci = win.emuCi;
+  return typeof ci.busyMs === 'number' ? ci.busyMs : (ci.transport?.module?.busyMs ?? NaN);
+}
+function sample(win) {
+  const app = win.renderApp;
+  return { t: performance.now(), game: app.reader.read().sessionMs, emu: emuBusy(win), page: app.pageWorkMs(), dropped: win.emuCi.dropped ?? 0 };
+}
+const pct = (s, p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
+
+/** Measure `seconds` of the running game: its speed, the frames, the main thread's time. */
+async function measure(win, seconds) {
+  const dts = [];
+  let last = null, on = true;
+  const tick = (t) => { if (last !== null) dts.push(t - last); last = t; if (on) win.requestAnimationFrame(tick); };
+  win.requestAnimationFrame(tick);
+  const s0 = sample(win), h0 = hiddenAt;
+  await sleep(seconds * 1000);
+  on = false;
+  const s1 = sample(win), wall = (s1.t - s0.t) / 1000;
+  const s = [...dts].sort((a, b) => a - b), med = s.length ? pct(s, 0.5) : NaN;
+  return {
+    valid: hiddenAt === h0,
+    gameSpeed: (s1.game - s0.game) / 1000 / wall,
+    fps: dts.length / wall,
+    frameMs: { median: med, p95: pct(s, 0.95), p99: pct(s, 0.99), max: s[s.length - 1] },
+    longFramesPct: (100 * dts.filter((d) => d > 1.5 * med).length) / Math.max(1, dts.length),
+    emuMsPerS: (s1.emu - s0.emu) / wall,
+    pageMsPerS: (s1.page - s0.page) / wall,
+    droppedMsPerS: (s1.dropped - s0.dropped) / wall,
+    cycles: win.renderApp.perf?.cycles ?? null,
+    size: win.renderApp.perf?.size ?? null,
+  };
+}
+
+const cycles = (win, c) => win.emuCi.sendBackendEvent({ type: 'wc-trigger-event', event: `cycles:${c}` });
+
+async function runMachine(machine, seconds, route) {
+  const name = NAMES[machine], r = { machine };
+  status(`${name}: starting the game`);
+  const win = await openGame(machine);
+  const t0 = performance.now();
+  await route.toTrack(route.ciDriver(win.emuCi), { mode: 'quickrace', log: (l) => status(`${name}: ${l}`) });
+  r.routeS = (performance.now() - t0) / 1000;
+  await until(() => win.renderApp.reader && win.renderApp.mem, 20000, 'the game\'s state');
+  const ap = startAutopilot(win, { pollMs: 8 });
+  await sleep(3000);
+
+  status(`${name}: the game's own picture, 25,000 cycles (${seconds} s)`);
+  cycles(win, 25000);
+  await sleep(1000);
+  r.own = await measure(win, seconds);
+
+  r.top = { levels: [] };
+  for (const c of LEVELS) {
+    status(`${name}: top speed, ${c.toLocaleString('en')} cycles`);
+    cycles(win, c);
+    await sleep(1500);
+    const m = await measure(win, Math.max(5, seconds / 3));
+    r.top.levels.push({ cycles: c, gameSpeed: m.gameSpeed, fps: m.fps, valid: m.valid });
+    if (m.gameSpeed < 0.6) break; // well past its top
+  }
+  const reached = r.top.levels.map((l) => l.cycles * Math.min(1, l.gameSpeed));
+  r.top.perMs = Math.max(...reached);
+  r.top.atLeast = r.top.levels.every((l) => l.gameSpeed > 0.97);
+  r.top.valid = r.top.levels.every((l) => l.valid);
+  cycles(win, 25000);
+
+  status(`${name}: the new view (${seconds} s)`);
+  win.renderApp.opts.screen = 'new'; // as the Screen menu does, without keeping the choice
+  await sleep(4000);
+  r.view = await measure(win, seconds);
+  ap.stop();
+  try { win.emuCi.exit?.(); } catch { /* gone */ }
+  $('frame').src = 'about:blank';
+  await sleep(1500);
+  return r;
+}
+
+// ------------------------------------------------------------ the results
+const f = (v, d = 1) => (v == null || Number.isNaN(v) ? '-' : v.toLocaleString('en', { minimumFractionDigits: d, maximumFractionDigits: d }));
+// each row: label, value from a run, digits, which way is better (+1 higher, -1 lower, 0 neither)
+const ROWS = [
+  ['Game speed (1.0 = real time)', (m) => m.gameSpeed, 2, +1],
+  ['Page frame rate (fps)', (m) => m.fps, 1, +1],
+  ['Frame interval, median (ms)', (m) => m.frameMs.median, 1, -1],
+  ['Frame interval, 99th percentile (ms)', (m) => m.frameMs.p99, 1, -1],
+  ['Slowest frame (ms)', (m) => m.frameMs.max, 1, -1],
+  ['Long frames (% over 1.5 × median)', (m) => m.longFramesPct, 1, -1],
+  ['Emulator time on the main thread (ms a second)', (m) => m.emuMsPerS, 0, -1],
+  ['Page time on the main thread (ms a second)', (m) => m.pageMsPerS, 0, -1],
+  ['Both together (ms a second)', (m) => m.emuMsPerS + m.pageMsPerS, 0, -1],
+];
+function compare(a, b, dir) {
+  if (a == null || b == null || Number.isNaN(a) || Number.isNaN(b)) return ['', ''];
+  if (dir === 0) return ['', ''];
+  if (Math.abs(a) < 1e-9) return [b === a ? 'same' : '', ''];
+  const diff = (b - a) / Math.abs(a);
+  const close = Math.abs(diff) < 0.05;
+  const text = close ? 'about the same' : `${Math.round(Math.abs(diff) * 100)}% ${diff > 0 ? 'more' : 'less'}`;
+  return [text, close ? '' : (diff > 0) === (dir > 0) ? 'better' : 'worse'];
+}
+function render(res) {
+  const body = $('results').tBodies[0];
+  body.textContent = '';
+  const row = (cells, cls = []) => {
+    const tr = body.insertRow();
+    cells.forEach((c, i) => { const td = tr.insertCell(); td.textContent = c; if (cls[i]) td.className = cls[i]; });
+    return tr;
+  };
+  const d = res.dosbox, o = res.rust;
+  const tests = [
+    ['own', "The game's own picture, 25,000 cycles"],
+    ['view', 'The new view, as players see it'],
+  ];
+  for (const [k, title] of tests) {
+    row([title, '', '', '']).className = 'group';
+    for (const [label, get, digits, dir] of ROWS) {
+      const a = d?.[k] ? get(d[k]) : null, b = o?.[k] ? get(o[k]) : null;
+      const [text, cls] = compare(a, b, dir);
+      row([label, f(a, digits), f(b, digits), text], ['', '', cls, cls]);
+    }
+    const cyc = (m) => (m?.[k]?.cycles ? m[k].cycles.toLocaleString('en') : '-');
+    row(['Cycles (the page\'s governor)', cyc(d), cyc(o), ''], ['', '', '', 'note']);
+    for (const m of [d, o]) if (m?.[k] && !m[k].valid) row([`${NAMES[m.machine]}: the tab was hidden during this test; run it again`, '', '', ''], ['note']);
+  }
+  row(['Top speed', '', '', '']).className = 'group';
+  const top = (m) => (m?.top ? m.top.perMs / 1000 : null);
+  const [text, cls] = compare(top(d), top(o), +1);
+  row(['Instructions a second (millions), the game\'s own picture', (d?.top?.atLeast ? 'at least ' : '') + f(top(d), 0), (o?.top?.atLeast ? 'at least ' : '') + f(top(o), 0), text],
+    ['', '', cls, cls]);
+  for (const m of [d, o]) if (m?.top) row([`${NAMES[m.machine]}: game speed at ${m.top.levels.map((l) => `${l.cycles / 1000}k ${f(l.gameSpeed, 2)}`).join(', ')}`, '', '', ''], ['note']);
+}
+
+function asText(res) {
+  const lines = ['| Test | DOSBox | Ours |', '| --- | --- | --- |'];
+  for (const tr of $('results').tBodies[0].rows) {
+    const c = [...tr.cells].map((td) => td.textContent);
+    lines.push(`| ${c[0]} | ${c[1]} | ${c[2]} |`);
+  }
+  return `${lines.join('\n')}\n\n${$('env').textContent}\n\n${JSON.stringify(res)}`;
+}
+
+// ------------------------------------------------------------ this browser
+function environment() {
+  let gpu = null;
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    const ext = gl?.getExtension('WEBGL_debug_renderer_info');
+    gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl?.getParameter(gl.RENDERER) ?? null;
+  } catch { /* no WebGL */ }
+  return { userAgent: navigator.userAgent, cores: navigator.hardwareConcurrency ?? null, memoryGB: navigator.deviceMemory ?? null,
+    pixelRatio: devicePixelRatio, screen: [screen.width, screen.height], gpu, date: new Date().toISOString() };
+}
+async function refreshRate() {
+  const t = [];
+  await new Promise((res) => { const k = (x) => { t.push(x); if (t.length < 61) requestAnimationFrame(k); else res(); }; requestAnimationFrame(k); });
+  const d = t.slice(1).map((x, i) => x - t[i]).sort((a, b) => a - b);
+  return Math.round(1000 / d[d.length >> 1]);
+}
+
+// ------------------------------------------------------------ running
+const results = { env: null, settings: null, dosbox: null, rust: null };
+window.bench = results;
+async function run() {
+  $('start').disabled = true; $('copy').disabled = true; $('out').hidden = true;
+  const seconds = +$('seconds').value;
+  results.env = { ...environment(), refreshHz: await refreshRate() };
+  results.settings = { seconds, size: $('size').value, first: $('first').value };
+  results.dosbox = results.rust = null;
+  const e = results.env;
+  $('env').textContent = `${e.userAgent} · ${e.cores ?? '?'} cores${e.memoryGB ? `, ${e.memoryGB} GB` : ''} · GPU ${e.gpu ?? 'unknown'} · display ${e.screen.join('×')} at ${e.pixelRatio}× and about ${e.refreshHz} Hz · ${seconds} s tests · ${e.date}`;
+  render(results);
+  $('stage').hidden = false;
+  try {
+    const route = await loadRoute();
+    const order = $('first').value === 'rust' ? ['rust', 'dosbox'] : ['dosbox', 'rust'];
+    for (const m of order) {
+      results[m] = await runMachine(m, seconds, route);
+      render(results);
+    }
+    status('Done. Copy the results to share them.');
+    results.done = true;
+  } catch (err) {
+    status(`Stopped: ${err.message}`);
+    results.error = String(err.stack ?? err);
+  }
+  $('stage').hidden = true;
+  $('start').disabled = false; $('copy').disabled = false;
+  window.benchDone = true;
+}
+
+$('start').addEventListener('click', run);
+$('copy').addEventListener('click', async () => {
+  const text = asText(results);
+  try { await navigator.clipboard.writeText(text); status('Copied.'); }
+  catch { const out = $('out'); out.hidden = false; out.value = text; out.select(); status('Select all in the box below and copy it.'); }
+});
+// for lib/browser-emu.mjs's launch(), which waits for it (probes/p6-bench-browser.mjs)
+window.emuReady = true;
+if (q.get('auto') === '1') run();
+</script>
+</body>
+</html>
