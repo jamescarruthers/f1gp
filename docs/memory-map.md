@@ -215,6 +215,40 @@ fill DS:2349–234E. The keys and the bits the code tests:
 | = − | DS:234E 20h, 10h | DS:006A up, down: 2 everything, 1 no tyre squeal (19ED:2DA9), 0 off (SS:018E = 80h) | SC |
 | F7–F10, Esc, R, V, Ctrl | DS:234C 80h–08h, DS:234E 80h, 40h, 08h | Not tested in this bitfield; Esc leaves the session, R starts the replay, the others are not decoded | SC; DT (Esc, R) |
 
+## Controls
+
+The game drives the player's car from the keyboard, the mouse or a PC
+game-port joystick (port 201h). Its control settings name a device for each
+function; in a race each frame 19ED:29BD reads the joystick buttons and
+19ED:2AF6–2CFC turn each device into the player's controls. The page's game
+controller (`spike/lib/joystick.mjs`, `spike/lib/gamepad.mjs`) works through
+this joystick code.
+
+| Address | Meaning | Values / units | Evidence | Conf. |
+| --- | --- | --- | --- | --- |
+| SS:1114–111D, 10 bytes | The controls in force: steering, accelerator, brake, gear up, gear down, 1119–111B (not decoded), 111C, 111D (axis flags) | Steering 0 keys, 1 mouse, 4 joystick A, 6 joystick B; accelerator and brake 0 keys (A, Z), 5 joystick A, 7 joystick B, 9/0Ah mouse buttons, ≥10h joystick button bits; gears 0 Space, 3 Alt, ≥10h button bits. 111D bit 2: an accelerator on joystick B's x axis; bit 4: a brake on its own axis | SC 19ED:2AF6–2CFC; DT: values in a Quick Race | high |
+| SS:111E, 10 bytes × 8 | Control presets, copied into SS:1114 by 6BE7:1D44 | Keyboard `00 00 00 00 00 00 00 00 8C 80`, mouse `01 0A 09 00 00 01 00 00 8C 80`, joystick A `04 05 05 10 10 01 01 01 8C 80`, joystick B `06 07 07 40 40 01 01 01 8C 80` (then the four again for a second player) | DT (read at the main menu) | high |
+| SS:0194, SS:0195 | The player's car+89 and car+3D high nibble, worked out from the controls when a session starts (0:EAC0 → 19ED:291F, 271B) and copied to the car each frame (19ED:295A) | car+89: 80h analogue steering, 40h analogue accelerator, 20h analogue brake, 10h/08h/04h SS:1119/111A/111B set, 02h SS:111C bit 7 clear, 01h SS:111D bit 7 clear; car+3D: 10h separate gear buttons, 80h/40h/20h SS:1119/111A/111B above 1 | SC; DT: FCh/10h with the page's joystick controls, 0/0 with the keyboard's | high |
+| car+7C word | Steering from a joystick or mouse | −4095 (left) to 4095 (right); car+7F bit 04h/08h when beyond ±800h | SC 19ED:2B83; DT: the page's ±0.3 gave ±1247 | high |
+| car+9B, car+5F bytes | Accelerator, brake from an axis | 0–127 (negative on the axis's other side); car+7F bit 01h/02h from 40h | SC 19ED:2BE7, 2C63; DT | high |
+| SS:08F6, 08F8; SS:090E, 0910 words | Joystick A x, y; joystick B x, y: the port's timing counts, scaled (8B6E:06EE) | raw counts | SC | high |
+| SS:08F4 byte | The port's byte (8B6E:06E5, read every frame in a race) | Buttons in bits 4–7, a pressed button clears its bit: 10h, 20h joystick A; 40h, 80h joystick B | SC | high |
+| SS:0902–090C; SS:091A–0924 words | Calibration of joystick A, B: x centre, x minus end, x plus end, y centre, y plus end, y minus end | raw counts | SC 19ED:26B7 | high |
+| SS:08FA–0900; SS:0912–0918 words | Scales of joystick A, B (x minus, x plus, y minus, y plus side), from the calibration when a session starts (0:EB66 → 19ED:26A3): 82080h / (end − centre), the difference at least 20 | signed | SC 19ED:267D; DT: the shipped calibration (centre 105, ends 0) gave −5072 | high |
+| SS:08E9, SS:08EA bytes | Joysticks found and calibrated (bits 0–1 joystick A's axes, 2–3 joystick B's); the axes the race reads (6BE7:1CFD: 3 when both of joystick A's are there) | bits | SC; DT: 0 and 0 after "Use Keys" | medium |
+| DS:0066 byte | The pause key, in the keyboard table's coding (scancode >> 3, & 7): P (31h), or Space (71h) when both gear controls are off the keyboard (0:DCA6, at a session's start) | key code | SC; DT: P stopped pausing with gears on joystick buttons | high |
+
+A steering axis becomes car+7C as ((x − centre) × scale) >> 7, clamped to
+±4095 (19ED:288B, 27ED, 2812); a pedal axis becomes ((y − centre) × scale) >> 12,
+clamped to ±127 (19ED:28FA, 2839, 2861). With the axis read turned into a
+return and the page's calibration (centre 800h, ends 800h ± 400h), the
+page's steering 0.5 and −1 gave 2080 and −4095 in a Quick Race, its
+accelerator 1 and 0.5 gave 127 and 65, and its brake 1 gave 127: 164 to 39
+mph in 2 s, where Z gave 122 to 18 mph (DT; `spike/probes/p5-pad.mjs` drives
+the same path). The game
+will not change up at low revs (in first gear at 5,347 rpm it ignored the
+gear-up button).
+
 ## View and camera
 
 | Address | Meaning | Values / units | Evidence | Conf. |

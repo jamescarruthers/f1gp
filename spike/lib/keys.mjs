@@ -1,5 +1,6 @@
-// The game's keys in a session, for the page's Keys panel (render.html) and
-// the site's landing page. Read from the game: its table of the 36 keys it
+// The game's keys in a session, and a game controller's buttons
+// (lib/gamepad.mjs), for the page's Keys panel (render.html) and the site's
+// landing page. Read from the game: its table of the 36 keys it
 // reads in a session (DS:2FA5, key codes, and DS:2FC9, their bits in
 // DS:2349-234E), the code that tests each bit, and probes that press the keys
 // in a Quick Race (probes/p5-keys.mjs). docs/memory-map.md, "Keys".
@@ -52,6 +53,24 @@ export const KEY_GROUPS = [
       ['D', "Detail of the game's own drawing (Screen: Original game): fewer trackside objects, in four steps"],
       ['=  -', 'Sound up, down: everything, no tyre squeal, off'],
       ['O', 'Processor occupancy: how busy the game is'],
+    ],
+  },
+  {
+    name: 'Game controller',
+    note: 'Any controller the browser sees: press one of its buttons once so that it does. Buttons as on an Xbox pad; on a PlayStation pad A is cross, B circle, X square and Y triangle.',
+    keys: [
+      ['Left stick', 'Steer'],
+      ['RT  LT', 'Accelerate, brake (the right stick up and down does the same)'],
+      ['RB  LB', 'Change gear up, down when Auto Gears is off'],
+      ['A', 'In the pits: drop the car off its jacks'],
+      ['X', 'Ask for a pit stop'],
+      ['Y', 'Chase view'],
+      ['D-pad', 'As the arrow keys: left the TV view, right back to the cockpit, up and down the car ahead and behind'],
+      ['B', 'Back to your own car'],
+      ['Start', 'Pause'],
+      ['Back', 'Leave the session'],
+      ['D-pad  A', 'In the menus: move, choose'],
+      ['B', 'In the menus: Esc (it skips the intro)'],
     ],
   },
 ];
