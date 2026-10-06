@@ -517,19 +517,24 @@ patched in bytes.
   13h, the game port, the AdLib's detection, EMS (the game will not start
   without it), and DOS and BIOS served in Rust on an in-memory drive C.
 - **Time:** the machine's own clock (instructions at `cycles_per_ms`, a HLT
-  skips to the next interrupt), so the same inputs give the same run.
-- **Size:** 194 KB of WebAssembly, against DOSBox's 1.46 MB (with its loader,
+  skips to the next interrupt), so the same inputs give the same run. In the
+  page it keeps that clock up with real time in short tasks of its own, as
+  js-dos runs DOSBox, apart from the drawing: a slow page frame does not slow
+  the game.
+- **Size:** 221 KB of WebAssembly, against DOSBox's 1.46 MB (with its loader,
   1.6 MB).
-- **Speed:** about 55 million instructions a second natively, and in Node's
-  WebAssembly the route from boot to a race took 16 s for 36 s of the game's
-  time at 20,000 instructions a millisecond.
+- **Speed:** 91 million instructions a second in Node's WebAssembly (114
+  million natively), against DOSBox's 55 million; a second of the race at the
+  page's 8,000 cycles takes 0.09 s of the host's CPU, against DOSBox's 0.21 s.
+  In the page the main thread is busy 25-47% of the time on it, 36-60% on
+  DOSBox (`spike/probes/p6-bench.mjs`, `p6-bench-page.mjs`).
 - **Checks:** `spike/probes/p6-pc-route.mjs` boots the game in Node and drives
   `lib/route.cjs` to a Monza Quick Race, reads the state as the page does
   (gp.exe at 01A2h, as under DOSBox) and drives off (CI runs it on every
   push); the page's controller probe passes all 19 checks on it.
 - **Not done:** AdLib synthesis (`sound=adlib` falls back to the Amiga sound),
-  the intro, a mouse, the serial link; it runs in the page's frame loop, so a
-  host slower than the game's time slows the game.
+  the intro, a mouse, the serial link; saving from the game's menus fails the
+  saves probe on it (not yet looked into).
 
 Next (step 2): a hook in the machine that runs a Rust function in place of
 one of the game's routines, and a check that runs both on the same state and

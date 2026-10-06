@@ -35,7 +35,9 @@ const SCAN = (() => {
 
 /**
  * @param {{ wasm: ArrayBuffer|Uint8Array|string|URL, files: Record<string, Uint8Array>,
- *   program?: string, tail?: string, cyclesPerMs?: number }} o
+ *   program?: string, tail?: string, cyclesPerMs?: number, record?: string[] }} o
+ *   record: an array the machine calls are added to (cycles, runs, keys; pc.write() adds its
+ *   writes, and a probe its own lines), for machine/src/bin/replay.rs to run them again natively
  */
 export async function createPC(o) {
   let bytes = o.wasm;
@@ -63,7 +65,8 @@ export async function createPC(o) {
     view().set(data, p);
     withStr(name, (np, nl) => x.mc_add_file(h, np, nl, p, data.length));
   }
-  if (o.cyclesPerMs) x.mc_set_cycles(h, o.cyclesPerMs);
+  const rec = o.record ?? null;
+  if (o.cyclesPerMs) { x.mc_set_cycles(h, o.cyclesPerMs); rec?.push(`c ${o.cyclesPerMs}`); }
   const program = o.program ?? 'GP.EXE', tail = o.tail ?? ' /g';
   const started = withStr(program, (pp, pl) => withStr(tail, (tp, tl) => x.mc_start(h, pp, pl, tp, tl)));
   if (started !== 0) { x.mc_text(h, 0); throw new Error(`the PC could not start ${program}: ${dec.decode(out())}`); }
@@ -74,6 +77,7 @@ export async function createPC(o) {
     /** Run `ms` of the game's time; the exit code once the program has ended, else null. */
     run(ms) {
       if (exited !== null) return exited;
+      rec?.push(`r ${ms}`);
       const c = x.mc_run(h, ms);
       if (c >= 0) exited = c;
       for (const f of frameListeners) f();
@@ -84,13 +88,14 @@ export async function createPC(o) {
     now: () => x.mc_now(h) / 1000,
     /** Instructions run so far. */
     instructions: () => x.mc_count(h),
-    setCycles: (perMs) => x.mc_set_cycles(h, perMs),
+    setCycles: (perMs) => { rec?.push(`c ${perMs}`); x.mc_set_cycles(h, perMs); },
     /** A key (js-dos/GLFW code) down or up. */
     sendKeyEvent(code, down) {
       const s = SCAN[code];
       if (s === undefined) return;
-      if (s > 0xff) x.mc_key(h, 0xe0);
-      x.mc_key(h, (s & 0x7f) | (down ? 0 : 0x80));
+      const key = (b) => { rec?.push(`k ${b.toString(16)}`); x.mc_key(h, b); };
+      if (s > 0xff) key(0xe0);
+      key((s & 0x7f) | (down ? 0 : 0x80));
     },
     /** The screen: RGBA, 320 x 200 (a view: copy it to keep it). */
     screen() {
@@ -107,6 +112,11 @@ export async function createPC(o) {
     ram() {
       const p = x.mc_ram(h);
       return view().subarray(p, p + x.mc_ram_len(h));
+    },
+    /** Write bytes to guest memory at a linear address (recorded, when recording). */
+    write(lin, bytes) {
+      pc.ram().set(bytes, lin);
+      rec?.push(`w ${lin.toString(16)} ${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`);
     },
     /** For lib/f1gp-mem.mjs attach(): the module's memory, with guest RAM inside it. */
     transport: { module: { get HEAPU8() { return view(); } } },
@@ -158,18 +168,46 @@ export function pcDriver(pc, keys) {
 }
 
 /**
- * The PC as the page uses js-dos's CommandInterface (render.html, machine=rust): frame
- * events after each run, persist() for lib/saves.mjs (every file that differs from the
- * bundle: the ones kept from earlier visits and the ones the game writes now), the
- * cycles event of the page's governor, pause and resume. The page calls tick(ms) from its
- * frame loop.
+ * The PC as the page uses js-dos's CommandInterface (render.html, machine=rust): the
+ * machine on its own clock, frame events, persist() for lib/saves.mjs (every file that
+ * differs from the bundle: the ones kept from earlier visits and the ones the game writes
+ * now), the cycles event of the page's governor, pause and resume.
+ *
+ * The machine runs as js-dos runs DOSBox on the main thread: in short tasks that keep the
+ * game's time up with real time, apart from the page's drawing, so a slow page frame does
+ * not slow the game, and the emulation is spread over the frame instead of done in one
+ * block. Each task runs the game in slices of `slice` ms until it has caught up or has
+ * used `budget` ms, then yields (a message, at once, while behind; a timer for the rest
+ * of the time while ahead; a timer set from a message task is not clamped to 4 ms). If
+ * the host falls more than `behind` ms short, that time is dropped and the game slows,
+ * as DOSBox does. The page calls frame() from its frame loop for the screen.
  * @param {Awaited<ReturnType<typeof createPC>>} pc
- * @param {{ zipSync: Function, kept?: string[] }} o  fflate's zipSync; the names loaded from earlier visits
+ * @param {{ zipSync: Function, kept?: string[], slice?: number, budget?: number, behind?: number }} o
+ *   fflate's zipSync; the names loaded from earlier visits
  */
 export function pcCommandInterface(pc, o) {
   const frames = [];
   const kept = new Set((o.kept ?? []).map((n) => n.toUpperCase().replace(/\//g, '\\')));
-  let paused = false;
+  const slice = o.slice ?? 2, budget = o.budget ?? 6, behind = o.behind ?? 200;
+  let paused = false, origin = null, queued = false, dropped = 0;
+  const channel = new MessageChannel();
+  const queue = (ms) => {
+    if (queued) return;
+    queued = true;
+    if (ms > 0) setTimeout(() => channel.port2.postMessage(0), ms);
+    else channel.port2.postMessage(0);
+  };
+  channel.port1.onmessage = () => {
+    queued = false;
+    if (paused || pc.exited !== null) return;
+    const start = performance.now();
+    if (origin === null) origin = start - pc.now();
+    if (start - origin - pc.now() > behind) { dropped += start - origin - pc.now() - behind; origin = start - pc.now() - behind; }
+    const target = start - origin;
+    while (pc.now() < target && performance.now() - start < budget) pc.run(Math.min(slice, target - pc.now()));
+    if (pc.exited !== null) return;
+    queue(pc.now() < target ? 0 : Math.max(1, pc.now() - (performance.now() - origin)));
+  };
   const ci = {
     width: pc.width,
     height: pc.height,
@@ -177,13 +215,13 @@ export function pcCommandInterface(pc, o) {
     transport: pc.transport,
     screenshot: pc.screenshot,
     pc,
-    /** Run the game for `ms` (the page's frame time) and send the frame. */
-    tick(ms) {
-      if (paused || pc.exited !== null) return;
-      pc.run(ms);
+    /** Send the screen as it is now to the frame listeners (from the page's frame loop). */
+    frame() {
       const rgba = pc.screen();
       for (const f of frames) f(null, rgba);
     },
+    /** Real time (ms) the machine could not keep up with, so the game ran slower. */
+    get dropped() { return dropped; },
     events: () => ({
       onFrame: (f) => frames.push(f),
       onSoundPush: () => {},
@@ -203,8 +241,10 @@ export function pcCommandInterface(pc, o) {
       if (m) pc.setCycles(+m[1]);
     },
     pause() { paused = true; },
-    resume() { paused = false; },
-    exit() { paused = true; },
+    // the game's time carries on from where it stopped
+    resume() { if (!paused) return; paused = false; origin = null; queue(0); },
+    exit() { paused = true; channel.port1.close(); },
   };
+  queue(0);
   return ci;
 }

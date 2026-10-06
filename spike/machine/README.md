@@ -19,6 +19,7 @@ the default until it has been tried on real machines.
 | `src/ems.rs` | Expanded memory (LIM EMS 4.0): the EMMXXXX0 device, a page frame at E000h, 4 MB of pages. The game will not start without EMS. |
 | `src/wasm.rs` | The functions the page calls (wasm32 only). |
 | `src/bin/boot.rs` | Boots a program from a folder of files natively and saves the screen each second: for development. |
+| `src/bin/replay.rs` | Runs a recorded session natively (`probes/p6-bench.mjs --record`), instruction for instruction, and checks it ends as the recording did: for timing and profiling the interpreter. |
 | `tests/cpu286.rs` | The CPU against the SingleStepTests 80286 real-mode set. |
 | `tests/pc.rs` | DOS wildcards, the timer, the interrupt controller, EMS, a small program run end to end. |
 
@@ -31,13 +32,59 @@ at the rate the game programs on that clock. `run(ms)` runs that much of the
 game's time, so a run is the same every time for the same inputs, and a probe
 runs the game as fast as the host allows.
 
+In the page (`lib/pc.mjs`, `pcCommandInterface`) the machine keeps that clock
+up with real time on its own, as js-dos runs DOSBox: short tasks on the main
+thread, each running the game in 2 ms slices until it has caught up or has
+used 6 ms, then yielding to the page. Drawing is apart from it: the page takes
+the screen as it is at each of its frames, so a slow frame does not slow the
+game, and the emulation is spread over the frame, not done in one block. If
+the host falls more than 200 ms behind, that time is dropped and the game
+slows, as under DOSBox.
+
+## Speed
+
+On a 2.1 GHz Xeon (4 cores, a VM), the race of `probes/p6-bench.mjs` (Monza,
+30 fps):
+
+| | DOSBox (js-dos, Node) | Ours (WebAssembly, Node) | Ours (native) |
+| --- | --- | --- | --- |
+| Top speed, instructions a second | 55 million | 91 million | 114 million |
+| Host CPU a second of the game: its own 3D, 25,000 cycles | 0.51 s | 0.29 s | |
+| Host CPU a second of the game: the page's fill, 8,000 cycles | 0.21 s | 0.09 s | |
+
+DOSBox's figures include its AdLib synthesis and mixing, which ours does not
+do. In the page (`probes/p6-bench-page.mjs`, headless Chromium, the autopilot
+in a race), the main thread is busy 60% of the time on DOSBox and 47% on ours
+with the game's own picture at 25,000 cycles, and 36% and 25% with the new view
+at 480x300 (8,000 cycles); both keep the game at full speed, and at 1280x720,
+where the software GPU holds the page to 4 frames a second, both still do.
+
+What made it fast (from 53 to 114 million natively, measured on the replay and
+profiled with callgrind): the instruction loop in `Cpu::run` rather than a call
+per instruction from the machine; the small helpers inlined; the check for an
+interrupt only after an instruction that can let one in (STI, POPF, IRET, OUT);
+the arithmetic flags set in one write, without branches.
+
 ## Building and testing
 
 ```
 rustup target add wasm32-unknown-unknown
-node build-machine.mjs                    # dist/machine.wasm (194 KB)
+node build-machine.mjs                    # dist/machine.wasm (221 KB)
 (cd machine && cargo test --release)      # the unit tests
 node probes/p6-pc-route.mjs               # boots gp.exe in Node and drives lib/route.cjs to a race
+```
+
+To time or profile the interpreter natively on a race, record one in Node and
+replay it (the replay checks that it ends as the recording did, so the native
+and WebAssembly builds agree instruction for instruction):
+
+```
+node probes/p6-bench.mjs --record out/p6-bench/race.ops
+mkdir -p out/files && (cd out/files && unzip -o ../../dist/f1gp.jsdos)
+cd machine
+cargo run --release --bin replay -- ../out/files ../out/p6-bench/race.ops
+CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --bin replay
+CALLGRIND=1 valgrind --tool=callgrind --instr-atstart=no target/release/replay ../out/files ../out/p6-bench/race.ops
 ```
 
 The CPU test set is not in the repository (325 MB). With a copy of
@@ -72,6 +119,8 @@ cargo run --release --bin boot -- <files> <out> [seconds] [GP.EXE] [" /g"]
   hand-over to the keyboard and back), all pass.
 - `probes/p5-stutter.mjs --query '{"machine":"rust"}'`: the page through a race
   with the autopilot.
+- `probes/p6-bench.mjs [--machine dosbox]` and `probes/p6-bench-page.mjs
+  [--machine rust]`: the speeds above.
 
 ## Not done yet
 
@@ -80,5 +129,6 @@ cargo run --release --bin boot -- <files> <out> [seconds] [GP.EXE] [" /g"]
   Amiga sound.
 - The intro (PLAYSCR.EXE and the FLI films): the page starts `gp /g`.
 - A mouse, the serial link, VGA's planar modes (the game uses mode 13h only).
-- The machine runs in the page's frame loop, at most 100 ms a frame: a host
-  slower than the game's time slows the game rather than skipping.
+- Saving from the game's menus: `probes/p5-saves.mjs --query
+  '{"machine":"rust"}'` ends in Load Car Setups instead of Save Names (the
+  same probe passes on DOSBox); not yet looked into.
