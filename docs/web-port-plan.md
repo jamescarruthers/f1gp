@@ -569,6 +569,8 @@ at any resolution.
    3,000 made-up calls. With the filler, the edge code and the texture in
    place, the game's own code runs 19–26% of the 3D routine's instructions;
    most of the rest is objects (0F47:9E2A: shapes, effects, bitmaps).
+   The bitmap drawer (0F47:19E8, `bitmap.rs`) is next and exact: with it the
+   game's code runs 14–16%.
 4. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
    projection, each checked the same way, until the whole routine is ours.
 5. **Sharper and smoother:** the same rules at a higher resolution and with

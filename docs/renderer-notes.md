@@ -810,6 +810,29 @@ for each element of the sector's list, in order: polygon / pole / bitmap
   anchor's row. With the game's SS:017E = 2 × SS:017C, a bitmap pixel is size/32
   fine units wide and size/32 Z units tall. Drawn flat at the anchor's depth.
   SC; DT.
+- **Drawing** (19E8 to 1FAC, with 1931 for the colours): the drawer works in
+  the bitmaps' segment: 16 colour words at +0000, each bitmap column's
+  screen x (clamped to 0–320) from +0020 for columns 0 to 127 and down from
+  +0220 for −1 to −128, its variables at +0220–0237. Runs fill from the start
+  column's x up to, not including, the end column's. Rows from SS:[bp+132]
+  down are clipped to the cockpit's window (SS:6364, as the filler does), but
+  a run that spans the window's gap keeps only its part left of the gap. In
+  the mirror (SS:[bp+134] set) the rows go to screen rows 116–137 through the
+  mirror's tables at SS:63DE; there, the loop that skips rows below row 137
+  tests the low word of the bitmap row instead of its row number (a game
+  bug, kept). SC, DT.
+- **Haze** (1931): the level comes from the anchor's depth (SS:016C) plus
+  80h, clamped to 0–3C00h: dry, its high byte less 5, shifted down 3,
+  clamped to 0–4; wet (SS:122E), that depth times SS:0182, bits 15–22,
+  clamped to 1–4. Level 0 uses the palette, levels 1–3 the haze tables at
+  7D70:7BC0 (256 bytes a level); SS:0185 keeps the level less one. SC, DT.
+- **Rewritten:** `spike/machine/src/r3d/bitmap.rs`. All 2,753 calls in the
+  176 caught frames leave the same memory and registers as the game's, the
+  frames are the same, and so are 20,000 made-up calls (`r3d fuzz`: random
+  ids, depths, anchors, mirroring, window and mirror modes, scales and
+  weather; 6,222 of them through the divide-error handler). They ran 619 of
+  its 630 instructions; the arithmetic never reaches the other 11 (a fog
+  level above 3, a zero row step, a negative start row).
 - Bitmap LOD (mask bit 15 clear): the shift word with bit 15 is a fixed bitmap
   id (shape 5's id comes from s+08), mirrored by (a + 4000h) bit 15, with a
   including the column correction. Otherwise the mask holds flags (mode byte;

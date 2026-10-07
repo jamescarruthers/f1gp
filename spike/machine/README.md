@@ -93,11 +93,11 @@ cargo run --release --bin r3d -- footprint ../out/r3d/monza   # the instructions
 ```
 
 `r3d profile <out>` shows where the routine's instructions go, routine by routine (calls, with
-callees, own). `r3d calls <out> [fill|edge|border|ground]` runs our routines (`src/r3d/`: the
-polygon filler, the edge builder, the border edge, the ground texture) against the game's on
-every call in the caught frames: the same memory and registers after each. `r3d fuzz <out>
-[edge|border|ground] [trials]` runs them against the game's on made-up calls, to reach the paths
-races don't. `r3d ours <out>` draws each frame with our routines in place of the game's and
+callees, own). `r3d calls <out> [fill|edge|border|ground|bitmap]` runs our routines
+(`src/r3d/`: the polygon filler, the edge builder, the border edge, the ground texture, the
+bitmap drawer) against the game's on every call in the caught frames: the same memory and
+registers after each. `r3d fuzz <out> [edge|border|ground|bitmap] [trials]` runs them against
+the game's on made-up calls, to reach the paths races don't. `r3d ours <out>` draws each frame with our routines in place of the game's and
 compares the frames. `fills` and `dumpfills` list the filler's calls, the second with the pixels
 each wrote.
 
