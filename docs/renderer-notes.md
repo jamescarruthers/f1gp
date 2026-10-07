@@ -159,6 +159,10 @@ frames and on made-up calls (`r3d calls`, `r3d fuzz`):
 - **The projection** (20D9, 20AB, 2168, with 1FAD for a column whose divide
   overflows): every call and 60,000 made-up ones match; every reachable
   instruction ran.
+- **The road** (`blocks.rs`, `strips.rs`, `road.rs`): the road drawn as
+  polygons or not (49C0, R:00FA), the blocks between crests (4A03), the
+  strips' edges (4C12) and the road's polygons (5470: the road, its lines and
+  edges, the walls, the grass) with the haze (188A). Every call matches.
 
 ## 3. The cross-section
 
@@ -872,7 +876,9 @@ for each element of the sector's list, in order: polygon / pole / bitmap
 ### Drawing order between objects
 
 Objects are drawn far to near with the walk's object lists (sorted by
-0F47:53BF), interleaved with the fences and kerbs of each segment (section 7).
+0F47:53BF), interleaved with the fences and kerbs of each segment (section 7):
+before each strip the far list's objects due by its distance, after it, where
+both fences go on, the near list's.
 The sort key is the segment counter moved by the setting's +0A
 (0F47:5233): farther by (high & 3Fh) + max(low, 2) − 2 segments, or nearer by
 the same amount when seg+26 bit 6 is set. Long buildings carry a large value,
@@ -881,6 +887,11 @@ stripes are often separate objects painted over a building face in this way.
 SC; DT (letting a later object win where two objects are at about the same
 depth raised the 16-circuit agreement from 94.6 % to 95.4 %, most at Phoenix,
 whose buildings carry their window bands this way).
+With +0A's high byte bit 7 an object moved past R:0064 is held at R:0064 − 1
+unless its own distance, less half its low byte, is past it too. An object
+whose +1F has bit 2 keeps to the leading car (518A): its lead is replaced by
+the car's distance (R:006A, or R:006C by the setting's +4 sign) less its own,
+when that is set and within the lead's size plus 15. SC (the rewrite).
 
 ### Cars (for Phase 3)
 
@@ -946,12 +957,49 @@ a segment, the cockpit's start lights, the pit pass's pit-lane walls (the pit
 lane frames lose most there, on the track side, not on the objects), and the
 estimated camera segment of the reference frames.
 
+### Rewritten (objects)
+
+The objects' code is rewritten in Rust and exact (`spike/machine/src/r3d/`),
+checked call by call in the 176 caught frames and on made-up calls:
+
+- **The shape drawer** (831F to 9BDF, `shape.rs`): 88A5 as above, its vertex
+  projector 831F, the pole (878D) and the haze (8801). 831F is inlined twice
+  more in the polygon code (909D, 9526), byte for byte the same but for its
+  jumps. A vertex whose x offset has bit 15 mirrors another: that one is
+  projected first and its record copied with this vertex's own height, the
+  row then taken from the height alone (206E) where 1FAD placed the other.
+  The pole is one pixel wide in SS:2EE4, at one vertex's column, from the
+  other's row less one up to its own. 8801's branch for a haze level of 4 or
+  more (8894) is never reached: both ways clamp the level below it. The
+  bitmap kinds in the game's shapes are 1002h (kind 2, mirrored with 1000h),
+  0C01h (kind 1, with 800h and 400h) and a fixed angle (+1A bit 15); the
+  code for 200h, for kind 2 without 1000h and for kinds above 2 is never
+  reached. 1,722 shape calls at Monza (A30A jumps into 88A5 as well as 9E2A
+  calling it), 12,000 made-up shapes, 5,000 vertices and 5,000 poles match.
+- **The objects** (`scene.rs`): the sort (5149: 51D7 splits, 53BF sorts each
+  list by its key, greatest first; it keeps two words in the code segment,
+  CS:53AC and 53AE), the lists drained (541B), the object (9E2A, with the car
+  path A07D) and the pit lane (9C05, 9BE0, 817A). At A001 a setting with
+  shape 0, 2 or 3 and an offset at +8 is moved by its shape number times the
+  offset, then by that times the offset again: the code loads the object's
+  direction into DX and then multiplies AX. No setting in the caught races
+  takes that path. The pit lane's walk keeps SP (R:0132) for its early exits,
+  so the ports move SP down by what the game pushes on the way to it (6
+  bytes into 9E2A, 22 into 9C05, 80 into the walk).
+- **The fences and kerbs** (6425 to 725B, `road.rs`): the road's rings,
+  four parts like the walls (fences 20h and 10h in the strip's +0E and +0F,
+  kerbs 8 and 4 in R:0248 by +09's low nibble) and two like the lines (the
+  ground between kerb and road edge, R:0248 by the high nibble), with each
+  strip's due objects drawn before it (R:0074) and, where both fences go on,
+  after it (R:0072). Every call matches; so do 3,000 made-up sorts and 12,000
+  made-up objects (other levels of detail, the starting lights, parked cars,
+  cars with parts, the pit lane's way in), and all 176 frames.
+
 ### Open questions (objects)
 
 - The game's edge rasteriser (0F47:0000–0999) in detail.
-- How objects interleave with the fences of their segment (0F47:518A, R:006A–0070)
-  and the +0A high-byte clamp (bit 7).
-- The pit-lane pass 0F47:9C05 (which part of the pit lane, its fences).
+- The pit-lane pass 0F47:9C05 in frames (which part of the pit lane, its
+  fences); its code is rewritten above.
 - The polygon LODs of the car and the cockpit path of the own car; 0F47:8261.
 - Wet-weather haze for objects (SS:0182).
 
@@ -1290,6 +1338,18 @@ floating-point instead of the game's integer arithmetic −1 to −1.5 (polygon)
   codes of the viewed car's pit box (above), not the car's shape record.
 - "Cars (for Phase 3)": 88A5's 8A09–8B9E is the mirror path, not the cockpit
   view of the own car; the colour bit 6 test compares columns, not depths.
+
+### Rewritten (cars)
+
+`spike/machine/src/r3d/cars.rs` has the car drawer (A30A) and its parts
+(A406 placing a part, A2CC and A2D3 drawing it, A19E for the camera's own
+car, A1C1 ordering a part and the car), the parked cars' palette (A7B2) and,
+from segment 0, the pose (14A2, 14D1, 1544), the interpolated sine (03C8) and
+the arctangent (043C). The races call the car drawer, the pose and the sine
+2,800 times, all matching. They never draw a car with parts nor call the
+arctangent, so those are checked on calls made up from the car drawer's and
+the pose's: 3,000 each match, and 329 of the 330 instructions from A19E to
+A532 ran.
 
 ### Open questions (cars)
 

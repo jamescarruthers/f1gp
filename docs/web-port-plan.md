@@ -572,7 +572,12 @@ at any resolution.
    The bitmap drawer (0F47:19E8, `bitmap.rs`) is next and exact: with it the
    game's code runs 14–16%. Then the segment walk with its cross-sections
    and the projection (`walk.rs`, `section.rs`, `track.rs`, `point.rs`):
-   11%, and about half of the routine's code is now ours.
+   11%, and about half of the routine's code is now ours. Then the road's
+   blocks, strips and polygons (`blocks.rs`, `strips.rs`, `road.rs`), the
+   shapes (`shape.rs`), the cars (`cars.rs`) and the objects with their sort,
+   the fences and the pit lane (`scene.rs`): 4.1–5.3%. What is left is the
+   top of the routine (81CE, 802A), the sky and horizon (72BE, segment 19ED)
+   and some small routines around them.
 4. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
    projection, each checked the same way, until the whole routine is ours.
 5. **Sharper and smoother:** the same rules at a higher resolution and with

@@ -21,7 +21,7 @@ the default until it has been tried on real machines.
 | `src/bin/boot.rs` | Boots a program from a folder of files natively and saves the screen each second: for development. |
 | `src/session.rs` | A recorded session (the machine calls a run in Node made, from boot) and how to play it again. |
 | `src/bin/replay.rs` | Runs a recorded session natively (`probes/p6-bench.mjs --record`), instruction for instruction, and checks it ends as the recording did: for timing and profiling the interpreter. |
-| `src/r3d/` | The game's 3D renderer in Rust, a routine at a time: so far the polygon filler (`fill.rs`). |
+| `src/r3d/` | The game's 3D renderer in Rust, a routine at a time: the filler and edge code, the ground texture, bitmaps, the projection, the segment walk and cross-sections, the road and fences, shapes, cars and objects. |
 | `src/bin/r3d.rs` | The game's 3D routine caught in a recorded race, as the reference for rewriting it (below). |
 | `tests/cpu286.rs` | The CPU against the SingleStepTests 80286 real-mode set. |
 | `tests/pc.rs` | DOS wildcards, the timer, the interrupt controller, EMS, a small program run end to end. |
@@ -93,12 +93,11 @@ cargo run --release --bin r3d -- footprint ../out/r3d/monza   # the instructions
 ```
 
 `r3d profile <out>` shows where the routine's instructions go, routine by routine (calls, with
-callees, own). `r3d calls <out> [name]` runs our routines (`src/r3d/`: the polygon filler, the
-edge code, the ground texture, the bitmap drawer, the projection, the segment walk with its
-cross-sections and helpers; the names are in `src/bin/r3d.rs`, OURS and TRACK) against the
-game's on every call in the caught frames: the same memory and registers after each. `r3d fuzz
-<out> [name] [trials]` runs them against the game's on made-up calls, to reach the paths races
-don't. `r3d ours <out>` draws each frame with our routines in place of the game's and
+callees, own). `r3d calls <out> [name]` runs our routines (`src/r3d/`; the names are in
+`src/bin/r3d.rs`, OURS and TRACK) against the game's on every call in the caught frames: the
+same memory (all of it but 1 KB of stack below SP) and registers after each. `r3d fuzz <out>
+[name] [trials]` runs them against the game's on made-up calls, to reach the paths races don't;
+a routine the races never call borrows the calls of one it could stand in for (BORROW). `r3d ours <out>` draws each frame with our routines in place of the game's and
 compares the frames. `fills` and `dumpfills` list the filler's calls, the second with the pixels
 each wrote.
 
