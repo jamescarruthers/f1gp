@@ -89,6 +89,13 @@ export async function createPC(o) {
     /** Instructions run so far. */
     instructions: () => x.mc_count(h),
     setCycles: (perMs) => { rec?.push(`c ${perMs}`); x.mc_set_cycles(h, perMs); },
+    /**
+     * The game's 3D view drawn by our Rust port of its routine (machine/src/r3d/), the same
+     * picture, or by the game's own code. Ours goes in only where the game's routine is.
+     */
+    native3d: (on) => x.mc_native_3d(h, on ? 1 : 0),
+    /** The frames our 3D routine has drawn. */
+    nativeFrames: () => x.mc_native_frames(h),
     /** A key (js-dos/GLFW code) down or up. */
     sendKeyEvent(code, down) {
       const s = SCAN[code];

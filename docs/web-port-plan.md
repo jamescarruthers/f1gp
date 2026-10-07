@@ -580,9 +580,17 @@ at any resolution.
    sky, the cars on their segments, the cockpit's parts) and segment 19ED's
    part (`screen.rs`), the whole 3D routine is ours: all 176 caught frames
    come out with the same memory and registers as the game's, and the game's
-   own code runs none of it. Next it runs in the page, in place of the
-   game's routine, in the WebAssembly machine.
-5. **Sharper and smoother:** the same rules at a higher resolution and with
+   own code runs none of it. Over three whole races (3,193 frames, every
+   call), our routine drawn beside the game's from the same state gives the
+   same frame every time (`r3d shadow`).
+5. **In the page (done).** With `machine=rust`, `r3d=ours` draws the game's
+   3D view with our routine where the game draws its own (`screen=original`):
+   a hook at the routine's entry in the WebAssembly machine. The game then
+   keeps 30 frames a second at 8,000 emulated cycles a millisecond, where its
+   own code needs 25,000 (12 frames a second at 8,000), and the host takes a
+   third of the time (`probes/p8-r3d-native.mjs`: 20 s of racing in 1.7 s
+   against 5.4 s). `cycles=auto` keeps the slow CPU while it does.
+6. **Sharper and smoother:** the same rules at a higher resolution and with
    the camera eased between frames, rasterised in WebGPU compute shaders; the
    WebGL view stays for browsers without WebGPU.
 

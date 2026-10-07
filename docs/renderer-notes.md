@@ -49,8 +49,9 @@ Addresses and evidence codes follow `docs/memory-map.md`. In addition:
 | 11 | A737, 82CC | Takes the cars off their segments; puts the pit box's colour codes back. | SC |
 
 Between steps the renderer calls `lcall 19ED:008C`, the same service the main
-loop calls; it is not part of drawing. It services the sound driver (far
-8D10:0000, as patched into 19ED:0098, with AX 7) when there is one (SS:08DA).
+loop calls; it is not part of drawing. It is the palette step: while a palette
+change is pending (SS:08DA, as when a session fades in) the driver at 8D10 (far
+8D10:0000 as patched into 19ED:0098, AX 7) sends the VGA the next part of it.
 
 ### Rewritten
 
@@ -59,9 +60,11 @@ The whole routine is rewritten in Rust and exact (`spike/machine/src/r3d/`,
 Monaco, Germany) starts in, it leaves the same memory and registers as the
 game's routine, and with it in place the game's own code runs none of the
 3D view. Each routine it calls is also checked on its own, call by call and
-on made-up calls (`r3d calls`, `r3d fuzz`). The sound driver's calls run in
-the machine: the driver is not the renderer's. In these frames BP is 0, so
-SS:[bp+X] and SS:X are the same word.
+on made-up calls (`r3d calls`, `r3d fuzz`). The palette step runs in the
+machine: the frame hands over to it and goes on when it returns. In these
+frames BP is 0, so SS:[bp+X] and SS:X are the same word. Over the three
+recorded races, every frame (3,193) drawn by ours beside the game's from the
+same state is the same (`r3d shadow`).
 
 
 The renderer draws into the back buffer at 50BA (the far pointer R:001C, used

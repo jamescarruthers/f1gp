@@ -45,6 +45,11 @@
                           in Rust (spike/machine, dist/machine.wasm: a 286 with the devices
                           and DOS services gp.exe uses; it starts gp /g, without the intro,
                           and has no AdLib sound: the Amiga sound plays)
+    r3d=game|ours         with machine=rust, where the game draws its own 3D view
+                          (screen=original): its own code (game, the default), or our
+                          Rust port of it (ours, spike/machine/src/r3d/: the same
+                          picture, without emulating the 3D code, so the game keeps
+                          its frame rate on a slower emulated CPU)
     pad=auto|off          auto: a game controller drives (once the browser sees it: press
                           one of its buttons): in a session its left stick steers and its
                           triggers accelerate and brake through the game's own joystick
@@ -92,7 +97,8 @@
                           keeps the game's own setting, 15 in the Quick Race)
     cycles=auto|fixed     auto: the emulated CPU runs slower (8,000 cycles, raised when
                           the game's load climbs) while our view replaces the game's
-                          drawing, and at 25,000 otherwise; fixed: as the bundle says
+                          drawing or our port draws it (r3d=ours), and at 25,000
+                          otherwise; fixed: as the bundle says
     sleep=timer|spin      how the emulator waits out the rest of each millisecond: on a
                           timer (default, lib/dos-sleep.mjs), or as js-dos does, passing
                           messages to itself until the time comes (the main thread busy)
@@ -230,6 +236,8 @@ const opts = {
   pad: q.get('pad') === 'off' ? 'off' : 'auto',
   // the PC the game runs on: js-dos's DOSBox, or ours in Rust (machine/, dist/machine.wasm)
   machine: q.get('machine') === 'rust' ? 'rust' : 'dosbox',
+  // with our PC, the game's 3D drawn by our port of its routine (machine/src/r3d/)
+  r3d: q.get('r3d') === 'ours' ? 'ours' : 'game',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
   fps: q.get('fps') === 'game' ? null : Math.min(30, Math.max(8, +(q.get('fps') ?? 30) || 30)),
@@ -484,6 +492,8 @@ const wheelSpins = new Map(); // each car's wheels' turn (modern style), by slot
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
 const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
 let governor = null;          // the emulated CPU speed (cycles=auto)
+let rustPC = null;            // our PC (machine=rust), for r3d=ours
+const nativeSeen = { n: 0, at: -1e9 }; // the frames our 3D routine drew, and when the count last moved
 let carData = null;           // readCars(mem) for the circuit (source=memory)
 let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
 let sceneOpts = null, markKey = null; // the scene's options, and its markings when built (scene.mjs markingsKey)
@@ -574,9 +584,17 @@ function frame(now) {
   // the game's own 3D drawing: replaced by the fill for the new view, put back for the original
   if (mem && !routine) routine = sceneRoutine(mem, chooseMarker(readPalette(mem)));
   if (routine) {
-    if (opts.screen === 'new' && !routine.installed) { if (routine.install()) log('game-3d-off', { marker: routine.k }); }
+    // (our 3D routine's hook out first: the fill goes in only over the game's own code)
+    if (opts.screen === 'new' && !routine.installed) { rustPC?.native3d(false); if (routine.install()) log('game-3d-off', { marker: routine.k }); }
     else if (opts.screen === 'original' && routine.installed) { routine.uninstall(); log('game-3d-on'); }
   }
+  // where the game draws its 3D: by our port of its routine (r3d=ours) or its own code
+  if (rustPC) {
+    rustPC.native3d(opts.r3d === 'ours' && opts.screen === 'original' && !(routine && routine.installed));
+    const n = rustPC.nativeFrames();
+    if (n !== nativeSeen.n) { if (nativeSeen.n === 0) log('game-3d-ours'); nativeSeen.n = n; nativeSeen.at = now; }
+  }
+  const drawingOurs = now - nativeSeen.at < 500;
   // the game draws a race view while the routine runs (it stops in pause, where the frame stays)
   if (routine && routine.installed) { const c = routine.calls; if (c !== routineSeen.calls) { routineSeen.calls = c; routineSeen.at = now; } }
   // (paused from the latest reading: a paused game makes no new frames, so the last frame kept says running)
@@ -623,7 +641,7 @@ function frame(now) {
         perf.kept++;
         lastGameFrameAt = now;
         // the emulated CPU speed: low while the fill draws nothing, raised when the game's load climbs
-        if (governor) governor.update({ racing: drawing, work: readWorkTicks(mem), ticks: readFrameTicks(mem), now });
+        if (governor) governor.update({ racing: drawing || drawingOurs, work: readWorkTicks(mem), ticks: readFrameTicks(mem), now });
       }
     } else {
       cur = null;
@@ -758,6 +776,7 @@ requestAnimationFrame(frameLoop);
     const files = unzipSync(bundle);
     if (kept) Object.assign(files, unzipSync(kept.zip));
     const pc = await createPC({ wasm: new URL('dist/machine.wasm', location.href), files, tail: ' /g' });
+    rustPC = pc;
     ci = pcCommandInterface(pc, { zipSync, kept: kept?.files });
     if (opts.sound === 'adlib') { opts.sound = 'amiga'; log('adlib-unavailable'); }
     log('machine', { machine: 'rust' });
