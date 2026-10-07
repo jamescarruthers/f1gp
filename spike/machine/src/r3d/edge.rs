@@ -67,14 +67,6 @@ fn off_y(y: u16) -> u16 {
     }
 }
 
-/// DIV of (hi:0) by d; the game never meets the CPU's divide error here.
-fn div(hi: u16, d: u16) -> u16 {
-    let q = ((hi as u32) << 16)
-        .checked_div(d as u32)
-        .unwrap_or(u32::MAX);
-    assert!(q <= 0xffff, "divide error in the edge code");
-    q as u16
-}
 /// MUL, its high word.
 fn mul_hi(a: u16, b: u16) -> u16 {
     ((a as u32 * b as u32) >> 16) as u16
@@ -276,7 +268,7 @@ impl Edge<'_> {
         let d = if (along as i16) < across as i16 {
             self.set_s(0x40, along);
             if (t as i16) < along as i16 {
-                mul_hi(div(t, along), across)
+                mul_hi(self.m.div(t, 0, along).0, across)
             } else {
                 across
             }
@@ -284,7 +276,7 @@ impl Edge<'_> {
             t
         } else {
             self.set_s(0x40, along);
-            mul_hi(div(across, along), t)
+            mul_hi(self.m.div(across, 0, along).0, t)
         };
         let d = if (*cx & 0x80 != 0) == (side != 0) {
             d
@@ -404,13 +396,8 @@ impl Edge<'_> {
         self.set_s(0x54, 8u16.wrapping_sub(self.s(0x54)));
         self.set_s(0x5c, dx);
         self.set_s(0x50, ax);
-        let n = (((self.s(0x54) as i16 as i32) << 16) >> 2) as i64;
-        let t = n.checked_div(dx as i16 as i64).unwrap_or(i64::MAX);
-        assert!(
-            (-0x8000..0x8000).contains(&t),
-            "divide error in the edge code (00CA)"
-        );
-        let t = t as i16 as i32;
+        let n = ((self.s(0x54) as i16 as i32) << 16) >> 2;
+        let t = self.m.idiv((n >> 16) as u16, n as u16, dx).0 as i16 as i32;
         self.set_s(0x54, t as u16);
         // 016D: the cut's camera-space x and y, times 32
         let p = (x_other.wrapping_sub(self.s(0x50)) as i16 as i32).wrapping_mul(t) >> 9;

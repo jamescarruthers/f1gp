@@ -335,13 +335,48 @@ a Monza capture with the aid on, all 668 such segments follow the rule.
   since the last frame: in the cockpit and chase views 7F64 moves it by the
   viewed car's speed (car+10h >> 11, clamped) and yaw rate (car+4Ah); TV views
   take another path (7C5A instead of 7D62).
-  On screen it is faint streaks along the direction of travel. Its exact
-  pattern (0F47:7988, 7C5A, 7D62) is not decoded. `gl-track.mjs` lays a noise
+  On screen it is faint streaks along the direction of travel. The pattern is
+  decoded below (7F64 in Rust). `gl-track.mjs` lays a noise
   texture on the ground instead: along the track on the road (from the scene
   mesh's u, v), in world space on the grass (the ground pass meets each pixel's
   ray with the ground plane under the camera), in the same shades, with a
   finer grain on top; on the road about two pixels in three take a
   neighbouring shade (69 %, by the noise's distribution).
+- **The texture pass (0F47:7F64)**, rewritten in `spike/machine/src/r3d/ground.rs`:
+  - **Which pass:** TV views (DS:0981 80h or C0h), and views from another car
+    facing more than 45° from the camera car's heading, take 7C5A; the rest
+    take 7D62. SC, DT.
+  - **Row tables (7988):** for each row from 163 up to the texture's top row
+    (R:0140, no lower than the horizon row [bp+130], clamped to 8–103), the
+    ground's distance (CS:73B1) and its sideways offset (CS:74F9), worked
+    from the list of ground points at R:0644 to R:0642 (8 bytes each: height
+    from the camera, distance, sideways, the row it reaches up to). A
+    distance whose divide overflows is 7FFFh (the game's divide-error handler
+    sets SS:00C0, below). SC, DT.
+  - **The pattern** is 4,096 bytes at segment 7D70, four 2-bit texels a byte.
+    A road (1Ah) or grass (12h) pixel gets the texel plus FEh (CS:764B) added:
+    −2 to +1. SC, DT.
+  - **TV views (7C5A):** a 64 × 64 tile laid on the ground, each texel 4 × 4
+    units of the camera's position (SS:013C, SS:0140); each row is walked from
+    the middle out along the camera's heading (SS:0154, SS:0156). SC, DT.
+  - **Cockpit and chase views (7D62):** 128 rows of 32 laid along the view.
+    A screen row's pattern row is its distance plus how far the camera has
+    moved (CS:7396), its column its offset plus how far the camera has turned
+    (CS:7394) plus the pixel's distance from the middle times the distance;
+    both scaled down by the speed (|car+10h| >> 11, clamped to 3–8). The
+    distance's step from the row below picks the texel's bits (up to 1, 7,
+    15, 31: bits 0, 2, 4, 6); a row stepping further is left plain. Movement
+    is the camera's change since the last frame turned into the view, a step
+    of ±1 dropped. SC, DT.
+  - **Checked:** the 176 caught frames' calls leave the same memory and
+    registers as the game's, and the frames drawn with it are the same; 3,000
+    made-up calls (views, headings, speeds, horizons and point lists at
+    random), 1,836 of them through the divide-error handler, are the same
+    too. Together they ran all 588 of its instructions.
+- **Divide errors:** the game's handler (19ED:2602, the INT 0 vector) sets
+  SS:00C0, steps over the DIV or IDIV and returns, so AX and DX stay as they
+  were. The texture code relies on it; the ports do the same (`Mem::div`,
+  `Mem::idiv`). SC, DT.
 - **D** cycles DS:0068 through 3, 2, 1, 0 (0:DC94; DT). The renderer uses it
   only to drop trackside objects (0F47:9E2A), from bits of the object
   setting's byte +1: level 3 draws all; 2 skips bit 1; 1 skips bit 1 or bit 6;
@@ -533,7 +568,7 @@ registers as they were (PUSHA, POPA).
   byte the same (`r3d ours`). The races ran 84% of the edge code's instructions, so it was also
   run against the game's code on 20,000 made-up calls of each routine (random points, some flat
   or at 45°, some with outcodes that disagree with their coordinates; `r3d fuzz`): all the same,
-  215 of them a divide error in both. Races and made-up calls together ran 824 of its 850
+  215 of them through the game's divide-error handler (section 4). Races and made-up calls together ran 824 of its 850
   instructions. Of the rest, 16 need 0000 with the cut exactly on the other end, 2 a 32-bit
   negation whose low word is 0, and 8 cannot run.
 
@@ -592,12 +627,10 @@ at Monza, bundle `dist/p2-static-25000.jsdos`):
 - Walks with the camera in the pit-lane array, and the order of the behind
   bands in polygon mode.
 - The crest blocks (0F47:279E, 28D1, 4A03) in detail.
-- The texture pattern (0F47:7988, 7C5A, 7D62).
 - The shape format beyond the header: scale table layout, element encoding,
   bitmap ids; and the purpose of setting fields +02, +0A, +0E.
 - What 0F47:8261 changes on the viewed car, and 0F47:A737.
 - Where the per-circuit shade ramps 10h–1Fh are computed.
-- The edge code's rounding (section 7).
 
 ## Objects: shapes and placement (decoded)
 

@@ -562,11 +562,16 @@ at any resolution.
    memory and registers as the game's, and the frames drawn with it are byte
    for byte the same. So is the edge code it fills from (0F47:0000 to 0998,
    `edge.rs`): 43,966 calls in the same frames, and 40,000 made-up ones that
-   reach the paths races don't. With both in place the game's own code still
-   runs 89–91% of the 3D routine's instructions.
-3. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
+   reach the paths races don't.
+3. **The ground texture (done).** A profile of the routine (`r3d profile`)
+   put 72% of its instructions in the ground texture (0F47:7F64, the T
+   option), so it came next (`ground.rs`): exact on every caught frame and on
+   3,000 made-up calls. With the filler, the edge code and the texture in
+   place, the game's own code runs 19–26% of the 3D routine's instructions;
+   most of the rest is objects (0F47:9E2A: shapes, effects, bitmaps).
+4. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
    projection, each checked the same way, until the whole routine is ours.
-4. **Sharper and smoother:** the same rules at a higher resolution and with
+5. **Sharper and smoother:** the same rules at a higher resolution and with
    the camera eased between frames, rasterised in WebGPU compute shaders; the
    WebGL view stays for browsers without WebGPU.
 

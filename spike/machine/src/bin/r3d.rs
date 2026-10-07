@@ -11,10 +11,12 @@
 //!   r3d check <out dir>
 //!       runs the routine again from each state, alone (interrupts masked, the clock still), and
 //!       compares the frame it leaves with the one caught
-//!   r3d calls <out dir> [fill|edge|border|all] [frames]
+//!   r3d profile <out dir>
+//!       where the routine's instructions go, routine by routine
+//!   r3d calls <out dir> [fill|edge|border|ground|all] [frames]
 //!       our routines (OURS) against the game's, call by call
-//!   r3d fuzz <out dir> [trials 20000]
-//!       our edge code against the game's on made-up calls
+//!   r3d fuzz <out dir> [edge|border|ground|all] [trials 20000]
+//!       our near routines against the game's on made-up calls
 //!   r3d ours <out dir>
 //!       each caught frame drawn with our routines in place of the game's, against the one caught
 //!
@@ -226,6 +228,95 @@ fn footprint(out: &Path) {
     }
 }
 
+/// Where the routine's instructions go, from each caught state: a call stack kept beside the
+/// CPU's (a call pushes its target, a return past the SP it was called at pops it) gives each
+/// routine its calls, its instructions with what it calls (inclusive) and without (its own).
+fn profile(out: &Path) {
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Row {
+        calls: u64,
+        all: u64,
+        own: u64,
+        callers: HashMap<(u16, u16), u64>,
+    }
+    let mut rows: HashMap<(u16, u16), Row> = HashMap::new();
+    let mut total = 0u64;
+    for p in caught(out) {
+        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+        let mut m = Machine::new();
+        m.restore(&snap);
+        let sp = m.cpu.r[4].wrapping_sub(4);
+        m.cpu.r[4] = sp;
+        let a = lin(m.cpu.s[2], sp) as usize;
+        m.hw.mem[a..a + 4].copy_from_slice(&[RETURN_AT as u8, (RETURN_AT >> 8) as u8, 0x00, 0xf0]);
+        m.hw.pic.imr = 0xff;
+        let top = (m.cpu.s[1].wrapping_sub(IMAGE), m.cpu.ip);
+        // (routine, SP before the call, instructions run when it was called)
+        let mut stack: Vec<((u16, u16), u16, u64)> = vec![(top, m.cpu.r[4].wrapping_add(4), 0)];
+        rows.entry(top).or_default().calls += 1;
+        let start = m.cpu.count;
+        loop {
+            let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
+            if cs == 0xf000 && ip == RETURN_AT {
+                break;
+            }
+            let at = lin(cs, ip) as usize;
+            let mut k = at;
+            while matches!(m.hw.mem[k], 0x26 | 0x2e | 0x36 | 0x3e) {
+                k += 1;
+            }
+            let call = match m.hw.mem[k] {
+                0xe8 | 0x9a => true,
+                0xff => matches!((m.hw.mem[k + 1] >> 3) & 7, 2 | 3),
+                _ => false,
+            };
+            let sp_before = m.cpu.r[4];
+            rows.get_mut(&stack.last().unwrap().0).unwrap().own += 1;
+            if let f1gp_machine::cpu::Event::Callback(n) = m.cpu.step(&mut m.hw) {
+                panic!("callback {n:02x} at {cs:04x}:{ip:04x}");
+            }
+            if call {
+                let to = (m.cpu.s[1].wrapping_sub(IMAGE), m.cpu.ip);
+                let from = stack.last().unwrap().0;
+                let r = rows.entry(to).or_default();
+                r.calls += 1;
+                *r.callers.entry(from).or_default() += 1;
+                stack.push((to, sp_before, m.cpu.count));
+            } else {
+                while stack.len() > 1 && m.cpu.r[4] >= stack.last().unwrap().1 {
+                    let (f, _, n) = stack.pop().unwrap();
+                    rows.get_mut(&f).unwrap().all += m.cpu.count - n;
+                }
+            }
+        }
+        let n = m.cpu.count - start;
+        rows.get_mut(&top).unwrap().all += n;
+        total += n;
+    }
+    let mut v: Vec<_> = rows.into_iter().collect();
+    v.sort_by_key(|r| std::cmp::Reverse(r.1.all));
+    println!(
+        "{total} instructions; routine (image-relative), calls, with callees, own, top callers"
+    );
+    for ((seg, off), r) in v.iter().take(70) {
+        let mut c: Vec<_> = r.callers.iter().collect();
+        c.sort_by(|a, b| b.1.cmp(a.1));
+        let callers: Vec<String> = c
+            .iter()
+            .take(3)
+            .map(|((s, o), n)| format!("{s:04x}:{o:04x} x{n}"))
+            .collect();
+        println!(
+            "{seg:04x}:{off:04x} {:7} {:5.1}% {:5.1}%  {}",
+            r.calls,
+            100.0 * r.all as f64 / total as f64,
+            100.0 * r.own as f64 / total as f64,
+            callers.join(", ")
+        );
+    }
+}
+
 /// The polygon filler (0F47:0999, a far routine): R:000C/R:0010 its list of 4-byte entries (a
 /// flags word, a pointer to a 10-byte edge record), R:0640 its mode, R:02F4 its colour.
 const FILL: u16 = 0x0999;
@@ -246,7 +337,10 @@ struct Ours {
     run: fn(&mut Machine),
 }
 
-const OURS: [Ours; 3] = [
+/// The ground texture (0F47:7F64), a near routine run after the scene with the T option on.
+const GROUND: u16 = 0x7f64;
+
+const OURS: [Ours; 4] = [
     Ours {
         name: "fill",
         off: FILL,
@@ -281,6 +375,15 @@ const OURS: [Ours; 3] = [
                 r[6],
                 r[7],
             );
+        },
+    },
+    Ours {
+        name: "ground",
+        off: GROUND,
+        near: true,
+        run: |m| {
+            let bp = m.cpu.r[5];
+            r3d::ground::ground(r3d::Mem::of(m), bp);
         },
     },
 ];
@@ -492,7 +595,7 @@ fn calls_check(out: &Path, which: &str, frames: usize) {
                 }
                 let sp = lin(c.before.cpu.s[2], c.before.cpu.r[4]) as usize;
                 let differ: Vec<usize> = (0..m.hw.mem.len())
-                    .filter(|&a| !(sp - 64..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
+                    .filter(|&a| !(sp - 128..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
                     .collect();
                 let regs = m.cpu.r == c.after.cpu.r
                     && m.cpu.s == c.after.cpu.s
@@ -552,21 +655,20 @@ fn calls_check(out: &Path, which: &str, frames: usize) {
 }
 
 /// The game's near routine run from `start` (at its first instruction), a step at a time, until
-/// it returns: the state then, or None if it left its code segment (a divide error, to the
-/// handler) or ran on. The offsets of the instructions it ran go into `seen`.
+/// it returns (its divide errors through the game's handler, as in a race): the state then, or
+/// None if it ran on. The offsets of the instructions it ran in its own segment go into `seen`.
 fn game_near(start: &Snapshot, seen: &mut std::collections::BTreeSet<u16>) -> Option<Snapshot> {
     let mut m = Machine::new();
     m.restore(start);
     let (cs, sp) = (m.cpu.s[1], m.cpu.r[4]);
     let ret = rd16(&m, lin(m.cpu.s[2], sp));
     for _ in 0..2_000_000 {
-        if m.cpu.s[1] != cs {
-            return None;
+        if m.cpu.s[1] == cs {
+            if m.cpu.ip == ret && m.cpu.r[4] == sp.wrapping_add(2) {
+                return Some(m.snapshot());
+            }
+            seen.insert(m.cpu.ip);
         }
-        if m.cpu.ip == ret && m.cpu.r[4] == sp.wrapping_add(2) {
-            return Some(m.snapshot());
-        }
-        seen.insert(m.cpu.ip);
         if let f1gp_machine::cpu::Event::Callback(_) = m.cpu.step(&mut m.hw) {
             return None;
         }
@@ -574,13 +676,133 @@ fn game_near(start: &Snapshot, seen: &mut std::collections::BTreeSet<u16>) -> Op
     None
 }
 
-/// Our edge code against the game's on made-up edges: `trials` of each routine, from the first
-/// caught frame's calls with the two points (or the one) replaced by random ones, so that the
-/// paths races rarely take (the cut on the screen, the records full, the clip cases) are run
-/// too. Both must leave the same memory and registers, or both fail (a divide error). The
-/// offsets of the game's instructions run go to FOOTPRINT_OUT if set.
-fn fuzz(out: &Path, trials: usize) {
-    let snap = Snapshot::from_bytes(&std::fs::read(&caught(out)[0]).unwrap()).unwrap();
+/// A made-up call of the edge builder or the border edge: its points replaced by random ones.
+fn made_up_edge(m: &mut Machine, o: &Ours, rng: &mut impl FnMut(i32) -> i32) {
+    let r = m.cpu.r;
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], r[5]);
+    let points = rd16(m, lin(ss, bp.wrapping_add(0x30)));
+    let set = |m: &mut Machine, off: u16, v: i32| {
+        m.hw.wr16(lin(ds, off), v as u16);
+    };
+    let mut ends = vec![points.wrapping_add(r[2])];
+    if o.off == EDGE {
+        ends.push(points.wrapping_add(r[1]));
+    }
+    // some edges flat, some at 45 degrees, some with outcodes that disagree with
+    // their points (which the game's own points never do)
+    let (flat, diagonal, odd) = (rng(10) == 0, rng(8) == 0, rng(8) == 0);
+    let mut first = (0, 0);
+    for (k, &p) in ends.iter().enumerate() {
+        let behind = rng(4) == 0;
+        let mut px = if rng(2) == 0 {
+            rng(320)
+        } else {
+            rng(2400) - 1000
+        };
+        let mut py = if rng(2) == 0 {
+            rng(164)
+        } else {
+            rng(1000) - 400
+        };
+        if k == 0 {
+            first = (px, py);
+        } else if flat {
+            py = first.1;
+        } else if diagonal {
+            let d = rng(600) - 300;
+            (px, py) = (first.0 + d, first.1 + if rng(2) == 0 { d } else { -d });
+        }
+        let near_axis = rng(3) == 0;
+        let span = if near_axis { 40 } else { 4000 };
+        let mut code = match px {
+            ..0 => 8,
+            320.. => 4,
+            _ => 0,
+        } | match py {
+            ..0 => 2,
+            164.. => 1,
+            _ => 0,
+        };
+        if behind {
+            code = 0x10 | if rng(4) == 0 { code } else { 0 };
+        }
+        if odd {
+            code ^= rng(16);
+        }
+        if rng(3) == 0 {
+            code |= 0x8000;
+        }
+        set(m, p.wrapping_sub(6), rng(span) - span / 2);
+        set(m, p.wrapping_sub(4), rng(span / 4) - span / 8);
+        let depth = if behind {
+            rng(110) - 100
+        } else {
+            8 + rng(3000)
+        };
+        set(m, p.wrapping_sub(2), depth);
+        set(m, p, px);
+        set(m, p.wrapping_add(2), py);
+        set(m, p.wrapping_add(4), code);
+    }
+    set(m, 0x2a4, if rng(4) == 0 { 0x8000 } else { 0 });
+    if rng(30) == 0 {
+        set(m, 0x2aa, 0xd58c + rng(100));
+    }
+    if o.off == BORDER {
+        m.cpu.r[1] = [4, 8, rng(16) as u16][rng(3) as usize];
+        m.cpu.r[3] = [0, 0x40, rng(256) as u16][rng(3) as usize];
+        let rec = lin(ds, r[6].wrapping_add(6)) as usize;
+        m.hw.mem[rec] ^= (rng(2) as u8) << 7;
+        set(m, 0x13e, rng(2) * 0x8000);
+        set(m, 0x136, rng(164));
+    }
+}
+
+/// A made-up call of the ground texture: the view, the camera car's heading, speed and yaw
+/// rate, the horizon, the texture's top row and the ground points' list end changed at random.
+fn made_up_ground(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (cs, ss, bp) = (m.cpu.s[1], m.cpu.s[2], m.cpu.r[5]);
+    let ds = rd16(m, lin(ss, 0xf0));
+    let r = rd16(m, lin(ss, 0xf4));
+    let put = |m: &mut Machine, s: u16, o: u16, v: i32| m.hw.wr16(lin(s, o), v as u16);
+    let putb = |m: &mut Machine, s: u16, o: u16, v: i32| m.hw.mem[lin(s, o) as usize] = v as u8;
+    let view = [0, 0, 0x40, 0x80, 0xc0, rng(256)][rng(6) as usize];
+    putb(m, ds, 0x981, view);
+    let car = rd16(m, lin(ds, 0x97f));
+    put(m, ds, car, rng(65536));
+    put(m, ds, 0x60, rng(65536));
+    put(m, ds, car.wrapping_add(0x10), rng(80000) - 40000);
+    put(m, ds, car.wrapping_add(0x4a), rng(4000) - 2000);
+    putb(m, ss, bp.wrapping_add(0x16e), rng(2) * 0x80);
+    put(m, ss, 0x136, rng(2) * 0x8000);
+    if rng(3) == 0 {
+        put(m, ss, bp.wrapping_add(0x130), rng(240) - 40);
+    }
+    if rng(3) == 0 {
+        put(m, r, 0x140, rng(240) - 40);
+    }
+    if rng(6) == 0 {
+        put(m, r, 0x642, 0x644 + 8 * rng(3));
+    }
+    if rng(4) == 0 {
+        putb(m, cs, 0x73b0, rng(2));
+    }
+    if rng(3) == 0 {
+        put(m, cs, 0x7398, rng(65536));
+        put(m, cs, 0x739a, rng(65536));
+    }
+}
+
+/// Our near routines against the game's on made-up calls: `trials` of each, from caught calls
+/// with their input changed at random (made_up_edge, made_up_ground), so that the paths races
+/// rarely take are run too. Both must leave the same memory and registers. The offsets of the game's instructions
+/// run go to FOOTPRINT_OUT if set.
+fn fuzz(out: &Path, which: &str, trials: usize) {
+    let snaps: Vec<Snapshot> = caught(out)
+        .iter()
+        .take(12)
+        .map(|p| Snapshot::from_bytes(&std::fs::read(p).unwrap()).unwrap())
+        .collect();
     let mut x = 0x2545_f491_4f6c_dd1du64;
     let mut rng = move |n: i32| -> i32 {
         x ^= x >> 12;
@@ -591,90 +813,31 @@ fn fuzz(out: &Path, trials: usize) {
     let mut seen = std::collections::BTreeSet::new();
     let mut failed = false;
     std::panic::set_hook(Box::new(|_| {}));
-    for o in OURS.iter().filter(|o| o.near) {
-        let calls = calls_in(&snap, o.off, true);
+    for o in OURS
+        .iter()
+        .filter(|o| o.near && (which == "all" || which == o.name))
+    {
+        // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
+        let calls: Vec<Call> = if o.off == GROUND {
+            snaps
+                .iter()
+                .flat_map(|s| calls_in(s, o.off, true))
+                .collect()
+        } else {
+            calls_in(&snaps[0], o.off, true)
+        };
         let (mut same, mut faults) = (0, 0);
         for t in 0..trials {
             let mut m = Machine::new();
             m.restore(&calls[t % calls.len()].before);
-            let r = m.cpu.r;
-            let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], r[5]);
-            let points = rd16(&m, lin(ss, bp.wrapping_add(0x30)));
-            let set = |m: &mut Machine, off: u16, v: i32| {
-                m.hw.wr16(lin(ds, off), v as u16);
-            };
-            let mut ends = vec![points.wrapping_add(r[2])];
-            if o.off == EDGE {
-                ends.push(points.wrapping_add(r[1]));
+            if o.off == GROUND {
+                made_up_ground(&mut m, &mut rng);
+            } else {
+                made_up_edge(&mut m, o, &mut rng);
             }
-            // some edges flat, some at 45 degrees, some with outcodes that disagree with
-            // their points (which the game's own points never do)
-            let (flat, diagonal, odd) = (rng(10) == 0, rng(8) == 0, rng(8) == 0);
-            let mut first = (0, 0);
-            for (k, &p) in ends.iter().enumerate() {
-                let behind = rng(4) == 0;
-                let mut px = if rng(2) == 0 {
-                    rng(320)
-                } else {
-                    rng(2400) - 1000
-                };
-                let mut py = if rng(2) == 0 {
-                    rng(164)
-                } else {
-                    rng(1000) - 400
-                };
-                if k == 0 {
-                    first = (px, py);
-                } else if flat {
-                    py = first.1;
-                } else if diagonal {
-                    let d = rng(600) - 300;
-                    (px, py) = (first.0 + d, first.1 + if rng(2) == 0 { d } else { -d });
-                }
-                let near_axis = rng(3) == 0;
-                let span = if near_axis { 40 } else { 4000 };
-                let mut code = match px {
-                    ..0 => 8,
-                    320.. => 4,
-                    _ => 0,
-                } | match py {
-                    ..0 => 2,
-                    164.. => 1,
-                    _ => 0,
-                };
-                if behind {
-                    code = 0x10 | if rng(4) == 0 { code } else { 0 };
-                }
-                if odd {
-                    code ^= rng(16);
-                }
-                if rng(3) == 0 {
-                    code |= 0x8000;
-                }
-                set(&mut m, p.wrapping_sub(6), rng(span) - span / 2);
-                set(&mut m, p.wrapping_sub(4), rng(span / 4) - span / 8);
-                let depth = if behind {
-                    rng(110) - 100
-                } else {
-                    8 + rng(3000)
-                };
-                set(&mut m, p.wrapping_sub(2), depth);
-                set(&mut m, p, px);
-                set(&mut m, p.wrapping_add(2), py);
-                set(&mut m, p.wrapping_add(4), code);
-            }
-            set(&mut m, 0x2a4, if rng(4) == 0 { 0x8000 } else { 0 });
-            if rng(30) == 0 {
-                set(&mut m, 0x2aa, 0xd58c + rng(100));
-            }
-            if o.off == BORDER {
-                m.cpu.r[1] = [4, 8, rng(16) as u16][rng(3) as usize];
-                m.cpu.r[3] = [0, 0x40, rng(256) as u16][rng(3) as usize];
-                let rec = lin(ds, r[6].wrapping_add(6)) as usize;
-                m.hw.mem[rec] ^= (rng(2) as u8) << 7;
-                set(&mut m, 0x13e, rng(2) * 0x8000);
-                set(&mut m, 0x136, rng(164));
-            }
+            // SS:00C0 clear, to count the calls in which the game's divide-error handler ran
+            let flag = lin(m.cpu.s[2], 0xc0) as usize;
+            m.hw.mem[flag] = 0;
             let start = m.snapshot();
             let game = game_near(&start, &mut seen);
             let ours = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -686,14 +849,11 @@ fn fuzz(out: &Path, trials: usize) {
             }))
             .ok();
             let ok = match (&game, &ours) {
-                (None, None) => {
-                    faults += 1;
-                    true
-                }
                 (Some(g), Some(m)) => {
+                    faults += g.mem[flag] as usize;
                     let sp = lin(start.cpu.s[2], start.cpu.r[4]) as usize;
                     (0..m.hw.mem.len())
-                        .all(|a| (sp - 64..sp).contains(&a) || m.hw.mem[a] == g.mem[a])
+                        .all(|a| (sp - 128..sp).contains(&a) || m.hw.mem[a] == g.mem[a])
                         && m.cpu.r == g.cpu.r
                         && m.cpu.s == g.cpu.s
                         && m.cpu.ip == g.cpu.ip
@@ -708,13 +868,13 @@ fn fuzz(out: &Path, trials: usize) {
                 println!(
                     "{} trial {t}: the game's {} and ours {} (state in fuzz-fail.snap)",
                     o.name,
-                    if game.is_some() { "returned" } else { "failed" },
+                    if game.is_some() { "returned" } else { "ran on" },
                     if ours.is_some() { "returned" } else { "failed" }
                 );
             }
         }
         println!(
-            "{}: {same} of {trials} made-up calls the same ({faults} a divide error in both)",
+            "{}: {same} of {trials} made-up calls the same ({faults} through the divide-error handler)",
             o.name
         );
     }
@@ -794,6 +954,7 @@ fn main() {
         ),
         Some("check") => check(Path::new(&a[2])),
         Some("footprint") => footprint(Path::new(&a[2])),
+        Some("profile") => profile(Path::new(&a[2])),
         Some("ours") => ours_check(Path::new(&a[2])),
         Some("calls") => calls_check(
             Path::new(&a[2]),
@@ -802,7 +963,8 @@ fn main() {
         ),
         Some("fuzz") => fuzz(
             Path::new(&a[2]),
-            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(20_000),
+            a.get(3).map(|s| s.as_str()).unwrap_or("all"),
+            a.get(4).map(|s| s.parse().unwrap()).unwrap_or(20_000),
         ),
         Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
         Some("fills") => fill_calls(
