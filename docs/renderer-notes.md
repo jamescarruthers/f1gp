@@ -459,12 +459,83 @@ the state before it and the pixels it writes, found by running it alone on two b
   row, the larger y; the last row is drawn, the first is not), its x at each end, then the x of
   each row it covers, from the first row less one up to the last, ending with 8000h. So the edge
   rasteriser rounds each row's x before the filler runs; the filler does no arithmetic on edges. DT.
-- **The fill:** each row from the left side's x (drawn) to the right side's x (not drawn), in the
-  colour. Edges flagged 40h are on the right side, the others on the left. This alone gives the
-  exact pixels of 3,540 of the 4,212 calls (84%). DT.
-- **Not decoded yet:** the other 16%, polygons with edges on the screen's borders (x 0 or 320,
-  row 164; the flags' low bits and the mode's low nibble) and some with several edges a side,
-  which 0F47:0A86–0D25 handle; and how the edge code (0F47:0000–0998) rounds each row's x.
+- **The fill:** from the polygon's lowest vertex up, each row from the left side's x (drawn) to
+  the right side's x (not drawn), in the colour (R:0048, the colour twice). The left side walks the
+  ring forward (R:000C, its entry's flags in R:0014), the right side backward (R:0010, R:0018);
+  an entry flagged 40h runs its edge the other way. R:063C counts the ring's bytes still to walk;
+  a side's next edge must start on the row where the last ended, or the polygon is done. DT.
+- **The screen's edges.** Where the polygon runs along the screen's edge a side has no edge for
+  some rows; the filler then reads a border list in place of an edge's x list: R:04A8 ends a list
+  of 0s (the left border), R:063A a list of 320s (the right), entered at the row the border part
+  starts. Entry flags 10h and 20h mark an edge ending on a border; the mode R:0640 allows the
+  rest (1: start from the bottom row, 164; 2 and 8: a border list from the top, row 0, for the
+  right and the left side; 4: the right border from the bottom row). R:063E notes which side is on
+  a border list (80h left, 40h right). SC, DT.
+- **The cockpit's window.** Rows below SS:0132 (row 103 in the cockpit view) are drawn through the
+  window's row tables at SS:6364, indexed by row − 103: the row's offset in the back buffer (0:
+  hidden), its left and right limits (+1F2h, +298h) and the gap between its two openings (+0A6h,
+  +14Ch). SC, DT.
+- **The crowd.** Colour 1Bh is the crowd: in a race (SS:124A ≠ 0) each row copies pixels from the
+  crowd strip (the far pointer R:0004, or R:0000 when SS:0185 is negative), starting at the last
+  row's end plus a step from the 64-byte table R:02B4, wrapped at 200h; otherwise colour 0Ah. SC, DT.
+- **Mode 0** walks the ring without border lists or the checks above. SC.
+- **Rewritten:** `spike/machine/src/r3d/fill.rs` does the same, checked call by call against the
+  game's: 11,925 calls in 176 frames at Monza (race), Monaco and Germany (practice) leave the same
+  memory and registers, and the 176 frames drawn with it in place of the game's are byte for
+  byte the same. 84% of the routine's instructions ran in those frames; the rest are its error
+  exits and mirror cases, and one crowd case (the strip at R:0000) no frame reached.
+
+### The edge code (0F47:0000–0998)
+
+Near routines that write the edge records the filler reads: 03E9, the edge builder (28 calls in
+the shape and road code), and 02E4, the border edge (2 calls). Each takes a 4-byte slot of the
+polygon's ring (at DI + AX), writes its record at R:02AA and moves R:02AA past it, and leaves the
+registers as they were (PUSHA, POPA).
+
+- **A point** is a record in R at [bp+30] plus an offset: its screen x and y at +0 and +2, its
+  outcode at +4, and just before it its camera-space x, y and depth (−6, −4, −2). Outcode bits: 1
+  y ≥ 164, 2 y < 0, 4 x ≥ 320, 8 x < 0, 10h behind the near plane, 8000h the finer coordinates
+  (R:02A4 bit 15, above). SC, DT.
+- **Both ends on the screen:** the record runs from the lower end up; an edge given upper end
+  first is flagged 40h. A flat edge (both ends on one row) is flagged 80h and gets no record, as
+  does any edge once R:02AA reaches D58Ch. SC, DT.
+- **Off the screen:** ends off the same side get their slot's flags from the table R:0264 (by the
+  sides) and no record. Otherwise the slot takes bits from R:0274 (by the lower end's sides) and
+  R:0284 (the upper's), and the edge is clipped: the lower end onto row 164 if it is below, the
+  upper onto row 0 if it is above (after each, if both ends now lie off the same side, flags 81h
+  or 84h, 82h or 88h, and no record), then each end onto x 0 or 320. A clip moves the other
+  coordinate by the slope times the distance, worked in 16.16 with one DIV and one MUL and kept
+  to the whole part; it always divides the longer of run and rise into the shorter, so the
+  quotient fits. SC, DT.
+- **One end behind the near plane:** 00CA cuts the edge at depth 8. t = (8 − depth) × 2¹⁴ /
+  (the other end's depth − depth, at least 8), by IDIV; the cut's camera-space x and y are the
+  end's plus t times the difference, times 32 (y a further 3 bits down unless both ends have the
+  finer coordinates), halved together until both are under 7000h, then projected as the game's
+  projection does: x + 160, and y = [bp+130] − (y × SS:017C × 2) / 65536. Where only one end has
+  the finer coordinates, its x and depth are shifted down 3 bits to match the other's; if it is
+  the end in front and then lies no further than depth 8, nothing is drawn and SS:[bp+BC] gets
+  bit 80h. SC, DT.
+- **The rows** (0856): a line from the lower end up, stepped with an error term that starts at
+  NOT(longer ÷ 2). Steep: each row stores x, and the term gains the run, x stepping when it
+  carries. Shallow: x steps each time, and a row's x is stored when the term (gaining the rise)
+  carries. SC, DT.
+- **The border edge** (02E4) writes a one-row record from x 0 (CX 8) or 320 to the point's x
+  (clamped to the screen) on the point's row. The row is kept at R:0136 or below when the point
+  is off the left or right, or when the segment record says so for that side (bit 80h of
+  [si+6]; R:013E's sign picks the side). A point above the screen is first moved to row 0 (its
+  outcode's bits 1 and 2 cleared, in the point itself). SC, DT.
+- **0000**, called by 00CA when the cut lands on the screen, leaves the cut where it is: its loop
+  subtracts the cut from its step vector instead of stepping the cut, five times. No race frame
+  reached it. SC.
+- **Rewritten:** `spike/machine/src/r3d/edge.rs`. In the same 176 frames, 43,146 edge-builder
+  calls and 820 border-edge calls leave the same memory and registers as the game's
+  (`r3d calls`), and the frames drawn with it and our filler in place of the game's are byte for
+  byte the same (`r3d ours`). The races ran 84% of the edge code's instructions, so it was also
+  run against the game's code on 20,000 made-up calls of each routine (random points, some flat
+  or at 45°, some with outcodes that disagree with their coordinates; `r3d fuzz`): all the same,
+  215 of them a divide error in both. Races and made-up calls together ran 824 of its 850
+  instructions. Of the rest, 16 need 0000 with the cut exactly on the other end, 2 a 32-bit
+  negation whose low word is 0, and 8 cannot run.
 
 ## 8. The palette
 
@@ -526,7 +597,7 @@ at Monza, bundle `dist/p2-static-25000.jsdos`):
   bitmap ids; and the purpose of setting fields +02, +0A, +0E.
 - What 0F47:8261 changes on the viewed car, and 0F47:A737.
 - Where the per-circuit shade ramps 10h–1Fh are computed.
-- The polygon filler's border cases, and the edge code's rounding (section 7).
+- The edge code's rounding (section 7).
 
 ## Objects: shapes and placement (decoded)
 

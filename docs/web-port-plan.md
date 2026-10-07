@@ -556,10 +556,14 @@ at any resolution.
    routine gives the same 64,000 bytes every time, so a rewrite can be held to
    exactly that. Over those frames the routine runs 12,217 distinct
    instructions, 11,637 of them in the renderer's segment.
-2. **The rasteriser.** The polygon filler (0F47:0999, a far routine to about
-   1729h, called from 27 places) and the edge lists it fills from (0F47:0000
-   to 0998): the last unknown in `docs/renderer-notes.md`. Rewritten in Rust
-   and checked call by call against the game's.
+2. **The rasteriser.** The polygon filler (0F47:0999, a far routine to
+   1835h, called from 27 places) is rewritten (`spike/machine/src/r3d/fill.rs`):
+   11,925 calls in 176 frames at Monza, Monaco and Germany leave the same
+   memory and registers as the game's, and the frames drawn with it are byte
+   for byte the same. So is the edge code it fills from (0F47:0000 to 0998,
+   `edge.rs`): 43,966 calls in the same frames, and 40,000 made-up ones that
+   reach the paths races don't. With both in place the game's own code still
+   runs 89–91% of the 3D routine's instructions.
 3. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
    projection, each checked the same way, until the whole routine is ours.
 4. **Sharper and smoother:** the same rules at a higher resolution and with

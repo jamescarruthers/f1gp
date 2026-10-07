@@ -413,6 +413,13 @@ impl Machine {
         self.cpu.r[cpu::SP] = self.cpu.r[cpu::SP].wrapping_add(4);
     }
 
+    /// Return from a near call, as RET does.
+    pub fn ret(&mut self) {
+        let a = lin(self.cpu.s[cpu::SS as usize], self.cpu.r[cpu::SP]);
+        self.cpu.ip = self.hw.rd16(a);
+        self.cpu.r[cpu::SP] = self.cpu.r[cpu::SP].wrapping_add(2);
+    }
+
     /// Run the routine at cs:ip as a far call, alone: interrupts masked at the controllers and
     /// the clock still, until it returns (the instructions it took), runs `limit` instructions
     /// (an error), or halts. BIOS and DOS services work as usual; a hook calls `on_hook` with
