@@ -6,6 +6,7 @@
 
 pub mod edge;
 pub mod fill;
+pub mod ground;
 
 use crate::pc::Machine;
 
@@ -16,15 +17,18 @@ pub struct Mem<'a> {
     pub r: u16,
     /// the game's stack segment (SS), where `[bp+...]` reads
     pub ss: u16,
+    /// the renderer's code segment (CS), which also holds some of its variables
+    pub cs: u16,
 }
 
 impl<'a> Mem<'a> {
     pub fn of(m: &'a mut Machine) -> Mem<'a> {
-        let (r, ss) = (m.cpu.s[3], m.cpu.s[2]);
+        let (r, ss, cs) = (m.cpu.s[3], m.cpu.s[2], m.cpu.s[1]);
         Mem {
             mem: &mut m.hw.mem,
             r,
             ss,
+            cs,
         }
     }
     #[inline]
@@ -67,6 +71,29 @@ impl<'a> Mem<'a> {
     #[inline]
     pub fn set_rb(&mut self, off: u16, v: u8) {
         self.set_b(self.r, off, v)
+    }
+    /// DIV of dx:ax by d: (AX, DX) after it. On a divide error the game's handler (19ED:2602)
+    /// sets SS:00C0 and skips the instruction, so AX and DX stay as they were.
+    pub fn div(&mut self, dx: u16, ax: u16, d: u16) -> (u16, u16) {
+        let n = (dx as u32) << 16 | ax as u32;
+        match n.checked_div(d as u32) {
+            Some(q) if q <= 0xffff => (q as u16, (n % d as u32) as u16),
+            _ => self.divide_error(ax, dx),
+        }
+    }
+    /// IDIV of dx:ax by d, likewise.
+    pub fn idiv(&mut self, dx: u16, ax: u16, d: u16) -> (u16, u16) {
+        let n = ((dx as u32) << 16 | ax as u32) as i32 as i64;
+        let d = d as i16 as i64;
+        match n.checked_div(d) {
+            Some(q) if (-0x8000..0x8000).contains(&q) => (q as u16, (n % d) as u16),
+            _ => self.divide_error(ax, dx),
+        }
+    }
+    fn divide_error(&mut self, ax: u16, dx: u16) -> (u16, u16) {
+        let ss = self.ss;
+        self.set_b(ss, 0xc0, 1);
+        (ax, dx)
     }
     /// A far pointer in R: (segment, offset).
     #[inline]
