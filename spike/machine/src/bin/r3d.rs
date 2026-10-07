@@ -332,9 +332,27 @@ const AT_BACK: u8 = HOOKS + 3;
 /// ours, which does its work on the machine as the game's would from its first instruction.
 struct Ours {
     name: &'static str,
+    /// image-relative segment
+    seg: u16,
     off: u16,
     near: bool,
-    run: fn(&mut Machine),
+    run: Run,
+}
+
+/// A port, run on the machine at the routine's first instruction.
+#[derive(Clone, Copy)]
+enum Run {
+    Machine(fn(&mut Machine)),
+    Cpu(fn(&mut r3d::regs::Cpu)),
+}
+
+impl Ours {
+    fn run(&self, m: &mut Machine) {
+        match self.run {
+            Run::Machine(f) => f(m),
+            Run::Cpu(f) => f(&mut r3d::regs::Cpu::of(m)),
+        }
+    }
 }
 
 /// The ground texture (0F47:7F64), a near routine run after the scene with the T option on.
@@ -356,30 +374,65 @@ fn with_regs(m: &mut Machine, f: impl FnOnce(r3d::Mem, &mut [u16; 8])) {
     m.cpu.r = r;
 }
 
+/// The segment walk's helpers (src/r3d/track.rs).
+const TRACK: [(&str, u16, u16, bool, fn(&mut r3d::regs::Cpu)); 9] = [
+    ("sqrt", 0, 0x024e, false, r3d::track::sqrt),
+    ("shifted", SEG, 0x206e, true, r3d::track::shifted),
+    ("raise", SEG, 0x2334, true, r3d::track::raise),
+    ("crestl", SEG, 0x279e, true, |c| {
+        r3d::track::crest(c, &r3d::track::LEFT)
+    }),
+    ("crestr", SEG, 0x28d1, true, |c| {
+        r3d::track::crest(c, &r3d::track::RIGHT)
+    }),
+    ("groundpt", SEG, 0x78c1, true, r3d::track::ground_point),
+    ("colours", SEG, 0x32c3, true, r3d::track::colours),
+    ("markers", SEG, 0x3306, true, r3d::track::markers),
+    ("shade", SEG, 0x226b, true, r3d::track::shade),
+];
+
+/// Every port: OURS, then TRACK.
+fn ours() -> Vec<Ours> {
+    let mut v: Vec<Ours> = OURS.into_iter().collect();
+    for (name, seg, off, near, f) in TRACK {
+        v.push(Ours {
+            name,
+            seg,
+            off,
+            near,
+            run: Run::Cpu(f),
+        });
+    }
+    v
+}
+
 const OURS: [Ours; 8] = [
     Ours {
         name: "fill",
+        seg: SEG,
         off: FILL,
         near: false,
-        run: |m| {
+        run: Run::Machine(|m| {
             let bp = m.cpu.r[5];
             m.cpu.r[0] = r3d::fill::fill(r3d::Mem::of(m), bp);
-        },
+        }),
     },
     Ours {
         name: "edge",
+        seg: SEG,
         off: EDGE,
         near: true,
-        run: |m| {
+        run: Run::Machine(|m| {
             let r = m.cpu.r;
             r3d::edge::edge(r3d::Mem::of(m), r[5], r[0], r[1], r[2], r[7]);
-        },
+        }),
     },
     Ours {
         name: "border",
+        seg: SEG,
         off: BORDER,
         near: true,
-        run: |m| {
+        run: Run::Machine(|m| {
             let r = m.cpu.r;
             r3d::edge::border(
                 r3d::Mem::of(m),
@@ -391,47 +444,56 @@ const OURS: [Ours; 8] = [
                 r[6],
                 r[7],
             );
-        },
+        }),
     },
     Ours {
         name: "ground",
+        seg: SEG,
         off: GROUND,
         near: true,
-        run: |m| {
+        run: Run::Machine(|m| {
             let bp = m.cpu.r[5];
             r3d::ground::ground(r3d::Mem::of(m), bp);
-        },
+        }),
     },
     Ours {
         name: "bitmap",
+        seg: SEG,
         off: BITMAP,
         near: true,
-        run: |m| {
+        run: Run::Machine(|m| {
             let r = m.cpu.r;
             r3d::bitmap::bitmap(r3d::Mem::of(m), r[5], r[0], r[1], r[2]);
-        },
+        }),
     },
     Ours {
         name: "point",
+        seg: SEG,
         off: POINT,
         near: true,
-        run: |m| with_regs(m, |m, r| r3d::point::point(m, r, r3d::point::Entry::World)),
+        run: Run::Machine(|m| {
+            with_regs(m, |m, r| r3d::point::point(m, r, r3d::point::Entry::World))
+        }),
     },
     Ours {
         name: "pointnear",
+        seg: SEG,
         off: POINT_NEAR,
         near: true,
-        run: |m| with_regs(m, |m, r| r3d::point::point(m, r, r3d::point::Entry::Near)),
+        run: Run::Machine(|m| {
+            with_regs(m, |m, r| r3d::point::point(m, r, r3d::point::Entry::Near))
+        }),
     },
     Ours {
         name: "project",
+        seg: SEG,
         off: PROJECT,
         near: true,
-        run: |m| {
+        run: Run::Machine(|m| {
             with_regs(m, |m, r| {
                 r3d::point::point(m, r, r3d::point::Entry::Projected)
             })
-        },
+        }),
     },
 ];
 
@@ -444,8 +506,8 @@ struct Call {
 
 /// Every call of the routine at SEG:`off` (`near` or far) while the 3D routine draws a caught
 /// frame: a hook at its entry, and for each call another at the return address it was given.
-fn calls_in(snap: &Snapshot, off: u16, near: bool) -> Vec<Call> {
-    let at = lin(SEG + IMAGE, off);
+fn calls_in(snap: &Snapshot, seg: u16, off: u16, near: bool) -> Vec<Call> {
+    let at = lin(seg + IMAGE, off);
     let mut m = Machine::new();
     m.restore(snap);
     let old = m.hook(at, AT_CALL);
@@ -479,7 +541,7 @@ fn calls_in(snap: &Snapshot, off: u16, near: bool) -> Vec<Call> {
 fn fill_calls(out: &Path, frames: usize) {
     for p in caught(out).into_iter().take(frames) {
         let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
-        let calls = calls_in(&snap, FILL, false);
+        let calls = calls_in(&snap, SEG, FILL, false);
         println!(
             "{}: {} calls",
             p.file_name().unwrap().to_string_lossy(),
@@ -542,7 +604,7 @@ fn dump_fills(out: &Path, frames: usize, file: &Path) {
     let mut n = 0;
     for p in caught(out).into_iter().take(frames) {
         let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
-        for c in calls_in(&snap, FILL, false) {
+        for c in calls_in(&snap, SEG, FILL, false) {
             let mem = &c.before.mem;
             let w = |a: u32| mem[a as usize] as u16 | (mem[a as usize + 1] as u16) << 8;
             let r = c.before.cpu.s[3];
@@ -625,16 +687,16 @@ fn dump_fills(out: &Path, frames: usize, file: &Path) {
 /// the stack below SP, where the game's pushes land) and the same registers.
 fn calls_check(out: &Path, which: &str, frames: usize) {
     let mut failed = false;
-    for o in OURS.iter().filter(|o| which == "all" || which == o.name) {
+    for o in ours().iter().filter(|o| which == "all" || which == o.name) {
         let (mut same, mut total) = (0, 0);
         let mut shown = 0;
         for p in caught(out).into_iter().take(frames) {
             let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
-            for (i, c) in calls_in(&snap, o.off, o.near).iter().enumerate() {
+            for (i, c) in calls_in(&snap, o.seg, o.off, o.near).iter().enumerate() {
                 total += 1;
                 let mut m = Machine::new();
                 m.restore(&c.before);
-                (o.run)(&mut m);
+                o.run(&mut m);
                 if o.near {
                     m.ret();
                 } else {
@@ -969,7 +1031,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
     let mut seen = std::collections::BTreeSet::new();
     let mut failed = false;
     std::panic::set_hook(Box::new(|_| {}));
-    for o in OURS
+    for o in ours()
         .iter()
         .filter(|o| o.near && (which == "all" || which == o.name))
     {
@@ -977,10 +1039,10 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
         let calls: Vec<Call> = if [GROUND, BITMAP, POINT, POINT_NEAR, PROJECT].contains(&o.off) {
             snaps
                 .iter()
-                .flat_map(|s| calls_in(s, o.off, true))
+                .flat_map(|s| calls_in(s, o.seg, o.off, true))
                 .collect()
         } else {
-            calls_in(&snaps[0], o.off, true)
+            calls_in(&snaps[0], o.seg, o.off, true)
         };
         let (mut same, mut faults) = (0, 0);
         for t in 0..trials {
@@ -1003,7 +1065,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
             let ours = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut m = Machine::new();
                 m.restore(&start);
-                (o.run)(&mut m);
+                o.run(&mut m);
                 m.ret();
                 m
             }))
@@ -1065,14 +1127,15 @@ fn ours_check(out: &Path) {
         theirs += n_game;
         let mut m = Machine::new();
         m.restore(&snap);
-        for (k, o) in OURS.iter().enumerate() {
-            m.hook(lin(SEG + IMAGE, o.off), AT_CALL + k as u8);
+        let all = ours();
+        for (k, o) in all.iter().enumerate() {
+            m.hook(lin(o.seg + IMAGE, o.off), AT_CALL + k as u8);
         }
         let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
         let n = m
             .call_far(cs, ip, 50_000_000, &mut |m, n| {
-                let o = &OURS[(n - AT_CALL) as usize];
-                (o.run)(m);
+                let o = &all[(n - AT_CALL) as usize];
+                o.run(m);
                 if o.near {
                     m.ret();
                 } else {

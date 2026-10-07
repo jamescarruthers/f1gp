@@ -9,6 +9,8 @@ pub mod edge;
 pub mod fill;
 pub mod ground;
 pub mod point;
+pub mod regs;
+pub mod track;
 
 use crate::pc::Machine;
 
