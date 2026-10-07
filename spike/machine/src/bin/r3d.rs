@@ -11,10 +11,17 @@
 //!   r3d check <out dir>
 //!       runs the routine again from each state, alone (interrupts masked, the clock still), and
 //!       compares the frame it leaves with the one caught
+//!   r3d calls <out dir> [fill|edge|border|all] [frames]
+//!       our routines (OURS) against the game's, call by call
+//!   r3d fuzz <out dir> [trials 20000]
+//!       our edge code against the game's on made-up calls
+//!   r3d ours <out dir>
+//!       each caught frame drawn with our routines in place of the game's, against the one caught
 //!
 //! Probes/p7-r3d-record.mjs records a session for it.
 
 use f1gp_machine::pc::{Machine, Snapshot, HOOKS, RETURN_AT};
+use f1gp_machine::r3d;
 use f1gp_machine::session::{self, Op};
 use std::path::{Path, PathBuf};
 
@@ -223,36 +230,96 @@ fn footprint(out: &Path) {
 /// flags word, a pointer to a 10-byte edge record), R:0640 its mode, R:02F4 its colour.
 const FILL: u16 = 0x0999;
 
-/// One call of a routine: the state before it, and after the game's own code ran it alone.
+/// The edge builder (0F47:03E9) and the border edge (02E4): near routines that write the edge
+/// records the filler reads.
+const EDGE: u16 = 0x03e9;
+const BORDER: u16 = 0x02e4;
+const AT_CALL: u8 = HOOKS + 2;
+const AT_BACK: u8 = HOOKS + 3;
+
+/// A routine we have rewritten: the game's (its offset in SEG, whether it is called near), and
+/// ours, which does its work on the machine as the game's would from its first instruction.
+struct Ours {
+    name: &'static str,
+    off: u16,
+    near: bool,
+    run: fn(&mut Machine),
+}
+
+const OURS: [Ours; 3] = [
+    Ours {
+        name: "fill",
+        off: FILL,
+        near: false,
+        run: |m| {
+            let bp = m.cpu.r[5];
+            m.cpu.r[0] = r3d::fill::fill(r3d::Mem::of(m), bp);
+        },
+    },
+    Ours {
+        name: "edge",
+        off: EDGE,
+        near: true,
+        run: |m| {
+            let r = m.cpu.r;
+            r3d::edge::edge(r3d::Mem::of(m), r[5], r[0], r[1], r[2], r[7]);
+        },
+    },
+    Ours {
+        name: "border",
+        off: BORDER,
+        near: true,
+        run: |m| {
+            let r = m.cpu.r;
+            r3d::edge::border(
+                r3d::Mem::of(m),
+                r[5],
+                r[0],
+                r[3] as u8,
+                r[1],
+                r[2],
+                r[6],
+                r[7],
+            );
+        },
+    },
+];
+
+/// One call of a routine: the state at its first instruction, and back at its caller after the
+/// game's own code ran it.
 struct Call {
     before: Snapshot,
     after: Snapshot,
 }
 
-/// Every call of the routine at SEG:`off` (a far routine) while the 3D routine draws a caught
-/// frame: the state before each, and after the game's code.
-fn calls_in(snap: &Snapshot, off: u16) -> Vec<Call> {
+/// Every call of the routine at SEG:`off` (`near` or far) while the 3D routine draws a caught
+/// frame: a hook at its entry, and for each call another at the return address it was given.
+fn calls_in(snap: &Snapshot, off: u16, near: bool) -> Vec<Call> {
     let at = lin(SEG + IMAGE, off);
     let mut m = Machine::new();
     m.restore(snap);
-    let old = m.hook(at, HOOKS + 2);
+    let old = m.hook(at, AT_CALL);
     let mut calls = Vec::new();
+    let mut back: Option<(u32, [u8; 3], Snapshot)> = None;
     let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
-    m.call_far(cs, ip, 50_000_000, &mut |m, _| {
+    m.call_far(cs, ip, 50_000_000, &mut |m, n| {
         m.cpu.ip = m.cpu.ip.wrapping_sub(3);
-        m.unhook(at, old);
-        let mut before = m.snapshot();
-        before.mem[at as usize..at as usize + 3].copy_from_slice(&old);
-        m.call_far(SEG + IMAGE, off, 5_000_000, &mut |_, n| {
-            panic!("hook {n:02x}")
-        })
-        .unwrap();
-        calls.push(Call {
-            before,
-            after: m.snapshot(),
-        });
-        m.hook(at, HOOKS + 2);
-        m.retf();
+        if n == AT_CALL {
+            m.unhook(at, old);
+            let before = m.snapshot();
+            let sp = lin(m.cpu.s[2], m.cpu.r[4]);
+            let cs = if near { m.cpu.s[1] } else { rd16(m, sp + 2) };
+            let ret = lin(cs, rd16(m, sp));
+            back = Some((ret, m.hook(ret, AT_BACK), before));
+        } else {
+            let (ret, bytes, before) = back.take().expect("a return with no call");
+            m.unhook(ret, bytes);
+            calls.push(Call {
+                before,
+                after: m.snapshot(),
+            });
+            m.hook(at, AT_CALL);
+        }
     })
     .unwrap();
     calls
@@ -262,7 +329,7 @@ fn calls_in(snap: &Snapshot, off: u16) -> Vec<Call> {
 fn fill_calls(out: &Path, frames: usize) {
     for p in caught(out).into_iter().take(frames) {
         let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
-        let calls = calls_in(&snap, FILL);
+        let calls = calls_in(&snap, FILL, false);
         println!(
             "{}: {} calls",
             p.file_name().unwrap().to_string_lossy(),
@@ -325,7 +392,7 @@ fn dump_fills(out: &Path, frames: usize, file: &Path) {
     let mut n = 0;
     for p in caught(out).into_iter().take(frames) {
         let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
-        for c in calls_in(&snap, FILL) {
+        for c in calls_in(&snap, FILL, false) {
             let mem = &c.before.mem;
             let w = |a: u32| mem[a as usize] as u16 | (mem[a as usize + 1] as u16) << 8;
             let r = c.before.cpu.s[3];
@@ -403,67 +470,263 @@ fn dump_fills(out: &Path, frames: usize, file: &Path) {
     println!("{n} calls to {}", file.display());
 }
 
-/// Our filler (r3d::fill) against the game's, call by call in the first `frames` caught frames:
-/// from the state before each call, both must leave the same memory (all of it but the stack
-/// below SP, where the game's pushes land) and the same registers.
-fn fill_check(out: &Path, frames: usize) {
-    let (mut same, mut total) = (0, 0);
-    let mut shown = 0;
-    for p in caught(out).into_iter().take(frames) {
-        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
-        for (i, c) in calls_in(&snap, FILL).iter().enumerate() {
-            total += 1;
-            let mut m = Machine::new();
-            m.restore(&c.before);
-            let bp = m.cpu.r[5];
-            let ax = f1gp_machine::r3d::fill::fill(f1gp_machine::r3d::Mem::of(&mut m), bp);
-            m.cpu.r[0] = ax;
-            let sp = lin(c.before.cpu.s[2], c.before.cpu.r[4]) as usize;
-            let differ: Vec<usize> = (0..m.hw.mem.len())
-                .filter(|&a| !(sp - 64..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
-                .collect();
-            // CS is not compared: the game's routine returns to the machine's stub
-            let regs = m.cpu.r == c.after.cpu.r
-                && [0, 2, 3].iter().all(|&k| m.cpu.s[k] == c.after.cpu.s[k]);
-            if differ.is_empty() && regs {
-                same += 1;
-            } else if shown < 12 {
-                shown += 1;
-                let r = (c.before.cpu.s[3] as usize) << 4;
-                let first: Vec<String> = differ
-                    .iter()
-                    .take(8)
-                    .map(|&a| {
-                        let what = if a >= r && a < r + 0x10000 {
-                            format!("R:{:04x}", a - r)
-                        } else {
-                            format!("{a:05x}")
-                        };
-                        format!(
-                            "{what} ours {:02x} game {:02x}",
-                            m.hw.mem[a], c.after.mem[a]
-                        )
-                    })
+/// Our routines (OURS, or the one named) against the game's, call by call in the first `frames`
+/// caught frames: from the state before each call, both must leave the same memory (all of it but
+/// the stack below SP, where the game's pushes land) and the same registers.
+fn calls_check(out: &Path, which: &str, frames: usize) {
+    let mut failed = false;
+    for o in OURS.iter().filter(|o| which == "all" || which == o.name) {
+        let (mut same, mut total) = (0, 0);
+        let mut shown = 0;
+        for p in caught(out).into_iter().take(frames) {
+            let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+            for (i, c) in calls_in(&snap, o.off, o.near).iter().enumerate() {
+                total += 1;
+                let mut m = Machine::new();
+                m.restore(&c.before);
+                (o.run)(&mut m);
+                if o.near {
+                    m.ret();
+                } else {
+                    m.retf();
+                }
+                let sp = lin(c.before.cpu.s[2], c.before.cpu.r[4]) as usize;
+                let differ: Vec<usize> = (0..m.hw.mem.len())
+                    .filter(|&a| !(sp - 64..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
                     .collect();
+                let regs = m.cpu.r == c.after.cpu.r
+                    && m.cpu.s == c.after.cpu.s
+                    && m.cpu.ip == c.after.cpu.ip;
+                if differ.is_empty() && regs {
+                    same += 1;
+                } else if shown < 12 {
+                    shown += 1;
+                    let r = (c.before.cpu.s[3] as usize) << 4;
+                    let s = (c.before.cpu.s[2] as usize) << 4;
+                    let first: Vec<String> = differ
+                        .iter()
+                        .take(8)
+                        .map(|&a| {
+                            let what = if a >= r && a < r + 0x10000 {
+                                format!("R:{:04x}", a - r)
+                            } else if a >= s && a < s + 0x10000 {
+                                format!("SS:{:04x}", a - s)
+                            } else {
+                                format!("{a:05x}")
+                            };
+                            format!(
+                                "{what} ours {:02x} game {:02x}",
+                                m.hw.mem[a], c.after.mem[a]
+                            )
+                        })
+                        .collect();
+                    println!(
+                        "{} {} call {i}: {} bytes differ{} {:?}",
+                        o.name,
+                        p.file_name().unwrap().to_string_lossy(),
+                        differ.len(),
+                        if regs {
+                            String::new()
+                        } else {
+                            format!(
+                                "; registers ours {:04x?} {:04x?} {:04x} game {:04x?} {:04x?} {:04x}",
+                                m.cpu.r,
+                                m.cpu.s,
+                                m.cpu.ip,
+                                c.after.cpu.r,
+                                c.after.cpu.s,
+                                c.after.cpu.ip
+                            )
+                        },
+                        first
+                    );
+                }
+            }
+        }
+        println!("{}: {same} of {total} calls the same", o.name);
+        failed |= same != total;
+    }
+    if failed {
+        std::process::exit(1);
+    }
+}
+
+/// The game's near routine run from `start` (at its first instruction), a step at a time, until
+/// it returns: the state then, or None if it left its code segment (a divide error, to the
+/// handler) or ran on. The offsets of the instructions it ran go into `seen`.
+fn game_near(start: &Snapshot, seen: &mut std::collections::BTreeSet<u16>) -> Option<Snapshot> {
+    let mut m = Machine::new();
+    m.restore(start);
+    let (cs, sp) = (m.cpu.s[1], m.cpu.r[4]);
+    let ret = rd16(&m, lin(m.cpu.s[2], sp));
+    for _ in 0..2_000_000 {
+        if m.cpu.s[1] != cs {
+            return None;
+        }
+        if m.cpu.ip == ret && m.cpu.r[4] == sp.wrapping_add(2) {
+            return Some(m.snapshot());
+        }
+        seen.insert(m.cpu.ip);
+        if let f1gp_machine::cpu::Event::Callback(_) = m.cpu.step(&mut m.hw) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Our edge code against the game's on made-up edges: `trials` of each routine, from the first
+/// caught frame's calls with the two points (or the one) replaced by random ones, so that the
+/// paths races rarely take (the cut on the screen, the records full, the clip cases) are run
+/// too. Both must leave the same memory and registers, or both fail (a divide error). The
+/// offsets of the game's instructions run go to FOOTPRINT_OUT if set.
+fn fuzz(out: &Path, trials: usize) {
+    let snap = Snapshot::from_bytes(&std::fs::read(&caught(out)[0]).unwrap()).unwrap();
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut rng = move |n: i32| -> i32 {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        ((x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) % n as u64) as i32
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut failed = false;
+    std::panic::set_hook(Box::new(|_| {}));
+    for o in OURS.iter().filter(|o| o.near) {
+        let calls = calls_in(&snap, o.off, true);
+        let (mut same, mut faults) = (0, 0);
+        for t in 0..trials {
+            let mut m = Machine::new();
+            m.restore(&calls[t % calls.len()].before);
+            let r = m.cpu.r;
+            let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], r[5]);
+            let points = rd16(&m, lin(ss, bp.wrapping_add(0x30)));
+            let set = |m: &mut Machine, off: u16, v: i32| {
+                m.hw.wr16(lin(ds, off), v as u16);
+            };
+            let mut ends = vec![points.wrapping_add(r[2])];
+            if o.off == EDGE {
+                ends.push(points.wrapping_add(r[1]));
+            }
+            // some edges flat, some at 45 degrees, some with outcodes that disagree with
+            // their points (which the game's own points never do)
+            let (flat, diagonal, odd) = (rng(10) == 0, rng(8) == 0, rng(8) == 0);
+            let mut first = (0, 0);
+            for (k, &p) in ends.iter().enumerate() {
+                let behind = rng(4) == 0;
+                let mut px = if rng(2) == 0 {
+                    rng(320)
+                } else {
+                    rng(2400) - 1000
+                };
+                let mut py = if rng(2) == 0 {
+                    rng(164)
+                } else {
+                    rng(1000) - 400
+                };
+                if k == 0 {
+                    first = (px, py);
+                } else if flat {
+                    py = first.1;
+                } else if diagonal {
+                    let d = rng(600) - 300;
+                    (px, py) = (first.0 + d, first.1 + if rng(2) == 0 { d } else { -d });
+                }
+                let near_axis = rng(3) == 0;
+                let span = if near_axis { 40 } else { 4000 };
+                let mut code = match px {
+                    ..0 => 8,
+                    320.. => 4,
+                    _ => 0,
+                } | match py {
+                    ..0 => 2,
+                    164.. => 1,
+                    _ => 0,
+                };
+                if behind {
+                    code = 0x10 | if rng(4) == 0 { code } else { 0 };
+                }
+                if odd {
+                    code ^= rng(16);
+                }
+                if rng(3) == 0 {
+                    code |= 0x8000;
+                }
+                set(&mut m, p.wrapping_sub(6), rng(span) - span / 2);
+                set(&mut m, p.wrapping_sub(4), rng(span / 4) - span / 8);
+                let depth = if behind {
+                    rng(110) - 100
+                } else {
+                    8 + rng(3000)
+                };
+                set(&mut m, p.wrapping_sub(2), depth);
+                set(&mut m, p, px);
+                set(&mut m, p.wrapping_add(2), py);
+                set(&mut m, p.wrapping_add(4), code);
+            }
+            set(&mut m, 0x2a4, if rng(4) == 0 { 0x8000 } else { 0 });
+            if rng(30) == 0 {
+                set(&mut m, 0x2aa, 0xd58c + rng(100));
+            }
+            if o.off == BORDER {
+                m.cpu.r[1] = [4, 8, rng(16) as u16][rng(3) as usize];
+                m.cpu.r[3] = [0, 0x40, rng(256) as u16][rng(3) as usize];
+                let rec = lin(ds, r[6].wrapping_add(6)) as usize;
+                m.hw.mem[rec] ^= (rng(2) as u8) << 7;
+                set(&mut m, 0x13e, rng(2) * 0x8000);
+                set(&mut m, 0x136, rng(164));
+            }
+            let start = m.snapshot();
+            let game = game_near(&start, &mut seen);
+            let ours = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut m = Machine::new();
+                m.restore(&start);
+                (o.run)(&mut m);
+                m.ret();
+                m
+            }))
+            .ok();
+            let ok = match (&game, &ours) {
+                (None, None) => {
+                    faults += 1;
+                    true
+                }
+                (Some(g), Some(m)) => {
+                    let sp = lin(start.cpu.s[2], start.cpu.r[4]) as usize;
+                    (0..m.hw.mem.len())
+                        .all(|a| (sp - 64..sp).contains(&a) || m.hw.mem[a] == g.mem[a])
+                        && m.cpu.r == g.cpu.r
+                        && m.cpu.s == g.cpu.s
+                        && m.cpu.ip == g.cpu.ip
+                }
+                _ => false,
+            };
+            if ok {
+                same += 1;
+            } else if !failed {
+                failed = true;
+                std::fs::write("fuzz-fail.snap", start.to_bytes()).unwrap();
                 println!(
-                    "{} call {i}: {} bytes differ{} {:?}",
-                    p.file_name().unwrap().to_string_lossy(),
-                    differ.len(),
-                    if regs {
-                        String::new()
-                    } else {
-                        format!(
-                            "; registers ours {:04x?} game {:04x?}",
-                            m.cpu.r, c.after.cpu.r
-                        )
-                    },
-                    first
+                    "{} trial {t}: the game's {} and ours {} (state in fuzz-fail.snap)",
+                    o.name,
+                    if game.is_some() { "returned" } else { "failed" },
+                    if ours.is_some() { "returned" } else { "failed" }
                 );
             }
         }
+        println!(
+            "{}: {same} of {trials} made-up calls the same ({faults} a divide error in both)",
+            o.name
+        );
     }
-    println!("{same} of {total} calls the same");
-    if same != total {
+    let _ = std::panic::take_hook();
+    if let Ok(file) = std::env::var("FOOTPRINT_OUT") {
+        let lines: Vec<String> = seen
+            .iter()
+            .map(|ip| format!("{SEG:04x}:{ip:04x}"))
+            .collect();
+        std::fs::write(file, lines.join("\n") + "\n").unwrap();
+    }
+    if failed {
         std::process::exit(1);
     }
 }
@@ -482,15 +745,19 @@ fn ours_check(out: &Path) {
         theirs += n_game;
         let mut m = Machine::new();
         m.restore(&snap);
-        let fill_at = lin(SEG + IMAGE, FILL);
-        m.hook(fill_at, HOOKS + 2);
+        for (k, o) in OURS.iter().enumerate() {
+            m.hook(lin(SEG + IMAGE, o.off), AT_CALL + k as u8);
+        }
         let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
         let n = m
-            .call_far(cs, ip, 50_000_000, &mut |m, _| {
-                let bp = m.cpu.r[5];
-                let ax = f1gp_machine::r3d::fill::fill(f1gp_machine::r3d::Mem::of(m), bp);
-                m.cpu.r[0] = ax;
-                m.retf();
+            .call_far(cs, ip, 50_000_000, &mut |m, n| {
+                let o = &OURS[(n - AT_CALL) as usize];
+                (o.run)(m);
+                if o.near {
+                    m.ret();
+                } else {
+                    m.retf();
+                }
             })
             .unwrap();
         left += n;
@@ -528,9 +795,14 @@ fn main() {
         Some("check") => check(Path::new(&a[2])),
         Some("footprint") => footprint(Path::new(&a[2])),
         Some("ours") => ours_check(Path::new(&a[2])),
-        Some("fillcheck") => fill_check(
+        Some("calls") => calls_check(
             Path::new(&a[2]),
-            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(usize::MAX),
+            a.get(3).map(|s| s.as_str()).unwrap_or("all"),
+            a.get(4).map(|s| s.parse().unwrap()).unwrap_or(usize::MAX),
+        ),
+        Some("fuzz") => fuzz(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(20_000),
         ),
         Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
         Some("fills") => fill_calls(

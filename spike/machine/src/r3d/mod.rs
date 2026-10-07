@@ -4,6 +4,7 @@
 //! the same layout, so that it can stand in for the game's routine; the aim is the original
 //! picture drawn by us, then drawn sharper and smoother.
 
+pub mod edge;
 pub mod fill;
 
 use crate::pc::Machine;

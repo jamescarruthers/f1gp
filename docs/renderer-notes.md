@@ -484,7 +484,58 @@ the state before it and the pixels it writes, found by running it alone on two b
   memory and registers, and the 176 frames drawn with it in place of the game's are byte for
   byte the same. 84% of the routine's instructions ran in those frames; the rest are its error
   exits and mirror cases, and one crowd case (the strip at R:0000) no frame reached.
-- **Not decoded yet:** how the edge code (0F47:0000–0998) rounds each row's x.
+
+### The edge code (0F47:0000–0998)
+
+Near routines that write the edge records the filler reads: 03E9, the edge builder (28 calls in
+the shape and road code), and 02E4, the border edge (2 calls). Each takes a 4-byte slot of the
+polygon's ring (at DI + AX), writes its record at R:02AA and moves R:02AA past it, and leaves the
+registers as they were (PUSHA, POPA).
+
+- **A point** is a record in R at [bp+30] plus an offset: its screen x and y at +0 and +2, its
+  outcode at +4, and just before it its camera-space x, y and depth (−6, −4, −2). Outcode bits: 1
+  y ≥ 164, 2 y < 0, 4 x ≥ 320, 8 x < 0, 10h behind the near plane, 8000h the finer coordinates
+  (R:02A4 bit 15, above). SC, DT.
+- **Both ends on the screen:** the record runs from the lower end up; an edge given upper end
+  first is flagged 40h. A flat edge (both ends on one row) is flagged 80h and gets no record, as
+  does any edge once R:02AA reaches D58Ch. SC, DT.
+- **Off the screen:** ends off the same side get their slot's flags from the table R:0264 (by the
+  sides) and no record. Otherwise the slot takes bits from R:0274 (by the lower end's sides) and
+  R:0284 (the upper's), and the edge is clipped: the lower end onto row 164 if it is below, the
+  upper onto row 0 if it is above (after each, if both ends now lie off the same side, flags 81h
+  or 84h, 82h or 88h, and no record), then each end onto x 0 or 320. A clip moves the other
+  coordinate by the slope times the distance, worked in 16.16 with one DIV and one MUL and kept
+  to the whole part; it always divides the longer of run and rise into the shorter, so the
+  quotient fits. SC, DT.
+- **One end behind the near plane:** 00CA cuts the edge at depth 8. t = (8 − depth) × 2¹⁴ /
+  (the other end's depth − depth, at least 8), by IDIV; the cut's camera-space x and y are the
+  end's plus t times the difference, times 32 (y a further 3 bits down unless both ends have the
+  finer coordinates), halved together until both are under 7000h, then projected as the game's
+  projection does: x + 160, and y = [bp+130] − (y × SS:017C × 2) / 65536. Where only one end has
+  the finer coordinates, its x and depth are shifted down 3 bits to match the other's; if it is
+  the end in front and then lies no further than depth 8, nothing is drawn and SS:[bp+BC] gets
+  bit 80h. SC, DT.
+- **The rows** (0856): a line from the lower end up, stepped with an error term that starts at
+  NOT(longer ÷ 2). Steep: each row stores x, and the term gains the run, x stepping when it
+  carries. Shallow: x steps each time, and a row's x is stored when the term (gaining the rise)
+  carries. SC, DT.
+- **The border edge** (02E4) writes a one-row record from x 0 (CX 8) or 320 to the point's x
+  (clamped to the screen) on the point's row. The row is kept at R:0136 or below when the point
+  is off the left or right, or when the segment record says so for that side (bit 80h of
+  [si+6]; R:013E's sign picks the side). A point above the screen is first moved to row 0 (its
+  outcode's bits 1 and 2 cleared, in the point itself). SC, DT.
+- **0000**, called by 00CA when the cut lands on the screen, leaves the cut where it is: its loop
+  subtracts the cut from its step vector instead of stepping the cut, five times. No race frame
+  reached it. SC.
+- **Rewritten:** `spike/machine/src/r3d/edge.rs`. In the same 176 frames, 43,146 edge-builder
+  calls and 820 border-edge calls leave the same memory and registers as the game's
+  (`r3d calls`), and the frames drawn with it and our filler in place of the game's are byte for
+  byte the same (`r3d ours`). The races ran 84% of the edge code's instructions, so it was also
+  run against the game's code on 20,000 made-up calls of each routine (random points, some flat
+  or at 45°, some with outcodes that disagree with their coordinates; `r3d fuzz`): all the same,
+  215 of them a divide error in both. Races and made-up calls together ran 824 of its 850
+  instructions. Of the rest, 16 need 0000 with the cut exactly on the other end, 2 a 32-bit
+  negation whose low word is 0, and 8 cannot run.
 
 ## 8. The palette
 

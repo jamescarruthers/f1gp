@@ -92,10 +92,12 @@ cargo run --release --bin r3d -- check ../out/r3d/monza       # each caught stat
 cargo run --release --bin r3d -- footprint ../out/r3d/monza   # the instructions it runs
 ```
 
-`r3d fillcheck <out>` runs our polygon filler (`src/r3d/fill.rs`) against the game's on every
-call in the caught frames (the same memory and registers after each); `r3d ours <out>` draws each
-frame with our routines in place of the game's and compares the frames; `fills` and `dumpfills`
-list the filler's calls, the second with the pixels each wrote.
+`r3d calls <out> [fill|edge|border]` runs our routines (`src/r3d/`: the polygon filler, the edge
+builder, the border edge) against the game's on every call in the caught frames: the same memory
+and registers after each. `r3d fuzz <out> [trials]` runs our edge code against the game's on
+made-up calls, to reach the paths races don't. `r3d ours <out>` draws each frame with our
+routines in place of the game's and compares the frames. `fills` and `dumpfills` list the
+filler's calls, the second with the pixels each wrote.
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`
