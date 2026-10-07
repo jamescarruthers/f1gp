@@ -378,10 +378,16 @@ fn with_regs(m: &mut Machine, f: impl FnOnce(r3d::Mem, &mut [u16; 8])) {
 const HAZE: u16 = 0x188a;
 const WALK: u16 = 0x3b32;
 const WALK_PITS: u16 = 0x3aab;
+const SHAPE: u16 = 0x88a5;
+const VERTEX: u16 = 0x831f;
+const POLE: u16 = 0x878d;
+
+/// The stack below SP left out of the comparisons: what the game's pushes leave there.
+const STACK: usize = 0x400;
 
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 21] = [
+const TRACK: [Port; 25] = [
     ("haze", SEG, HAZE, true, r3d::road::haze),
     ("road", SEG, 0x5470, true, r3d::road::road),
     ("mode", SEG, 0x49c0, true, r3d::blocks::mode),
@@ -415,6 +421,10 @@ const TRACK: [Port; 21] = [
     ("colours", SEG, 0x32c3, true, r3d::track::colours),
     ("markers", SEG, 0x3306, true, r3d::track::markers),
     ("shade", SEG, 0x226b, true, r3d::track::shade),
+    ("vertex", SEG, VERTEX, true, r3d::shape::vertex),
+    ("pole", SEG, POLE, true, r3d::shape::pole),
+    ("shapehaze", SEG, 0x8801, true, r3d::shape::haze),
+    ("shape", SEG, SHAPE, true, r3d::shape::shape),
 ];
 
 /// Every port: OURS, then TRACK.
@@ -730,7 +740,7 @@ fn calls_check(out: &Path, which: &str, frames: usize) {
                 }
                 let sp = lin(c.before.cpu.s[2], c.before.cpu.r[4]) as usize;
                 let differ: Vec<usize> = (0..m.hw.mem.len())
-                    .filter(|&a| !(sp - 128..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
+                    .filter(|&a| !(sp - STACK..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
                     .collect();
                 let regs = m.cpu.r == c.after.cpu.r
                     && m.cpu.s == c.after.cpu.s
@@ -1003,6 +1013,134 @@ fn made_up_point(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
 
 /// A made-up call of the segment walk: its bands' lengths, its direction, the road drawn as
 /// polygons or not, the mirror's flag and the camera's segment at random; some walks long enough
+/// A vertex's call (831F): the vertex it mirrors (if it mirrors one) made already projected half
+/// the time, with its record at random (its depth, its flags with 1FAD's shift and the near
+/// bit); the horizon, the scale, the shape's height and the finer coordinates at random some of
+/// the time, to reach the row's overflows.
+fn made_up_vertex(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (es, ss, ds, bp) = (m.cpu.s[0], m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    let at = |o: u16| lin(ss, bp.wrapping_add(o));
+    let put = |m: &mut Machine, a: u32, v: i32| m.hw.wr16(a, v as u16);
+    let vt = rd16(m, at(0xa0));
+    let x = rd16(m, lin(es, vt.wrapping_add(m.cpu.r[3] << 3)));
+    if x & 0x8000 != 0 && rng(2) == 0 {
+        let v = x & 0x7fff;
+        m.hw.mem[lin(ds, v.wrapping_add(0xf10)) as usize] = 0x80;
+        let rec = (v << 4).wrapping_add(0x830);
+        let depth = match rng(3) {
+            0 => rng(40) - 8,
+            1 => rng(0x800),
+            _ => rng(65536),
+        };
+        put(m, lin(ds, rec + 4), depth);
+        let mut fl = rng(16);
+        if rng(2) == 0 {
+            fl |= rng(32) << 8;
+        }
+        if rng(3) == 0 {
+            fl |= 0x10;
+        }
+        if rng(4) == 0 {
+            fl |= 0x8000;
+        }
+        put(m, lin(ds, rec + 0xa), fl);
+        put(m, lin(ds, rec + 6), rng(65536));
+        put(m, lin(ds, rec + 8), rng(65536));
+    }
+    if rng(3) == 0 {
+        put(m, at(0x130), rng(65536));
+    }
+    if rng(3) == 0 {
+        put(m, at(0x17c), rng(65536));
+    }
+    if rng(4) == 0 {
+        put(m, lin(ds, 0x2e), rng(65536));
+    }
+    if rng(4) == 0 {
+        put(m, lin(ds, 0x2a4), rng(2) * 0x8000);
+    }
+}
+
+/// A pole's call (878D): both vertices' columns, rows and outcodes at random, and the top row.
+fn made_up_pole(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    for rec in [m.cpu.r[3], m.cpu.r[7]] {
+        let a = |o: u16| lin(ds, rec.wrapping_add(0x830 + o));
+        m.hw.wr16(a(6), (rng(0x180) - 0x20) as u16);
+        let row = if rng(2) == 0 {
+            rng(0xe0) - 0x20
+        } else {
+            rng(65536)
+        };
+        m.hw.wr16(a(8), row as u16);
+        m.hw.wr16(a(0xa), if rng(3) == 0 { rng(32) } else { 0 } as u16);
+    }
+    if rng(2) == 0 {
+        m.hw.wr16(lin(ss, bp.wrapping_add(0x132)), (rng(0xd0) - 0x10) as u16);
+    }
+}
+
+/// A shape's call (88A5) with its position at random about the camera (near often, to reach the
+/// projection's overflows), and its heading, height, pitch, the steering, the haze (wet or dry),
+/// the horizon, the scale and the poles' top at random some of the time.
+fn made_up_shape(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, bp) = (m.cpu.s[2], m.cpu.r[5]);
+    let at = |o: u16| lin(ss, bp.wrapping_add(o));
+    let put = |m: &mut Machine, o: u16, v: i32| m.hw.wr16(at(o), v as u16);
+    for (o, cam) in [(0x10u16, 0x142u16), (0x14, 0x14a)] {
+        if rng(3) != 0 {
+            let d = match rng(4) {
+                0 => rng(0x400) - 0x200,
+                1 => rng(0x8000) - 0x4000,
+                2 => rng(0x80000) - 0x40000,
+                _ => rng(65536) << 8 ^ rng(256),
+            };
+            let c = rd16(m, at(cam)) as u32 | (rd16(m, at(cam + 2)) as u32) << 16;
+            let v = c.wrapping_add(d as u32);
+            put(m, o, v as i32);
+            put(m, o + 2, (v >> 16) as i32);
+        }
+    }
+    if rng(2) == 0 {
+        m.cpu.r[2] = rng(65536) as u16;
+    }
+    if rng(3) == 0 {
+        m.cpu.r[1] = (rng(0x1000) - 0x800) as u16;
+    }
+    if rng(3) == 0 {
+        put(m, 8, if rng(2) == 0 { 0 } else { rng(65536) });
+    }
+    if rng(4) == 0 {
+        put(m, 0x16a, rng(0x1000) - 0x800);
+    }
+    if rng(4) == 0 {
+        m.hw.mem[at(0x178) as usize] = rng(256) as u8;
+    }
+    if rng(8) == 0 {
+        put(m, 0x168, rng(65536));
+    }
+    if rng(4) == 0 {
+        put(m, 0x190, rng(65536));
+    }
+    if rng(3) == 0 {
+        m.hw.wr16(lin(ss, 0x122e), rng(2) as u16);
+        m.hw.wr16(lin(ss, 0x182), rng(65536) as u16);
+    }
+    if rng(4) == 0 {
+        put(m, 0x130, if rng(2) == 0 { rng(65536) } else { rng(200) });
+    }
+    if rng(4) == 0 {
+        put(m, 0x17c, rng(65536));
+    }
+    if rng(4) == 0 {
+        put(m, 0x132, rng(0xc0));
+    }
+    if rng(6) == 0 {
+        let game = rd16(m, lin(ss, 0xf0));
+        m.hw.mem[lin(game, 0x981) as usize] = rng(2) as u8;
+    }
+}
+
 /// to fill the strip list.
 fn made_up_walk(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
     let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
@@ -1104,7 +1242,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
     {
         // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
         let calls: Vec<Call> = if [
-            GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS, HAZE,
+            GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS, HAZE, SHAPE, VERTEX, POLE,
         ]
         .contains(&o.off)
         {
@@ -1127,6 +1265,12 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                 made_up_point(&mut m, &mut rng);
             } else if [WALK, WALK_PITS].contains(&o.off) {
                 made_up_walk(&mut m, &mut rng);
+            } else if o.off == VERTEX {
+                made_up_vertex(&mut m, &mut rng);
+            } else if o.off == POLE {
+                made_up_pole(&mut m, &mut rng);
+            } else if o.off == SHAPE {
+                made_up_shape(&mut m, &mut rng);
             } else if o.off == HAZE {
                 // the colour and distance at random, wet half the time
                 m.cpu.r[0] = rng(65536) as u16;
@@ -1155,7 +1299,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                     faults += g.mem[flag] as usize;
                     let sp = lin(start.cpu.s[2], start.cpu.r[4]) as usize;
                     (0..m.hw.mem.len())
-                        .all(|a| (sp - 128..sp).contains(&a) || m.hw.mem[a] == g.mem[a])
+                        .all(|a| (sp - STACK..sp).contains(&a) || m.hw.mem[a] == g.mem[a])
                         && m.cpu.r == g.cpu.r
                         && m.cpu.s == g.cpu.s
                         && m.cpu.ip == g.cpu.ip

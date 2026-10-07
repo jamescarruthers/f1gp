@@ -114,6 +114,20 @@ impl<'a> Cpu<'a> {
     pub fn bpb(&self, o: u16) -> u8 {
         self.b(self.s[SS], self.r[BP].wrapping_add(o))
     }
+    #[inline]
+    pub fn set_bpb(&mut self, o: u16, v: u8) {
+        self.set_b(self.s[SS], self.r[BP].wrapping_add(o), v)
+    }
+    /// SS:[bp+o], 32-bit
+    #[inline]
+    pub fn bp32(&self, o: u16) -> u32 {
+        join(self.bp(o.wrapping_add(2)), self.bp(o))
+    }
+    #[inline]
+    pub fn set_bp32(&mut self, o: u16, v: u32) {
+        self.set_bp(o, v as u16);
+        self.set_bp(o.wrapping_add(2), (v >> 16) as u16);
+    }
     /// SS:o
     #[inline]
     pub fn ss(&self, o: u16) -> u16 {
