@@ -388,17 +388,24 @@ const PART_OWN: u16 = 0xa2cc;
 const PART_SHAPE: u16 = 0xa2d3;
 const OBJECT: u16 = 0x9e2a;
 const SORT: u16 = 0x5149;
+const SKY: u16 = 0x72be;
+const DRAW: u16 = 0x802a;
+const GRASS: u16 = 0x18e1;
+const CARS_ON: u16 = 0xa533;
+const SIGNALS: u16 = 0xa944;
+const PIT_BOX: u16 = 0x8261;
 
 /// Routines the caught races never call, made up from the calls of one they could be called
 /// in place of (the same segment and stack: SEG, the routine, the one lent, near): the car's
 /// parts from the car drawer's, the arctangent from the pose's.
-const BORROW: [(u16, u16, u16, bool); 6] = [
+const BORROW: [(u16, u16, u16, bool); 7] = [
     (SEG, PART, CAR, true),
     (SEG, PART_OWN, CAR, true),
     (SEG, PART_SHAPE, CAR, true),
     (SEG, 0xa19e, CAR, true),
     (SEG, 0xa1c1, CAR, true),
     (0, 0x043c, 0x14a2, false),
+    (SEG, SIGNALS, DRAW, true),
 ];
 
 /// The stack below SP left out of the comparisons: what the game's pushes leave there.
@@ -406,7 +413,7 @@ const STACK: usize = 0x400;
 
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 42] = [
+const TRACK: [Port; 57] = [
     ("haze", SEG, HAZE, true, r3d::road::haze),
     ("road", SEG, 0x5470, true, r3d::road::road),
     ("mode", SEG, 0x49c0, true, r3d::blocks::mode),
@@ -461,11 +468,33 @@ const TRACK: [Port; 42] = [
     ("drain", SEG, 0x541b, true, r3d::scene::drain),
     ("sort", SEG, SORT, true, r3d::scene::sort),
     ("sides", SEG, 0x6425, true, r3d::road::fences),
+    ("rows", 0x19ed, 0x3112, false, r3d::screen::rows),
+    ("skyrows", 0x19ed, 0x314a, false, r3d::screen::sky_rows),
+    ("scenery", 0x19ed, 0x39ed, false, r3d::screen::scenery),
+    ("cockpitsides", 0x19ed, 0x3afa, false, r3d::screen::sides),
+    ("lights", 0x19ed, 0x3b46, false, r3d::screen::start_lights),
+    ("gauges", 0x19ed, 0x3c1a, false, r3d::screen::gauges),
+    ("sky", SEG, SKY, true, r3d::frame::sky),
+    ("draw", SEG, DRAW, true, r3d::frame::draw),
+    ("pitbox", SEG, PIT_BOX, true, r3d::frame::pit_box),
+    ("pitboxoff", SEG, 0x82cc, true, r3d::frame::pit_box_off),
+    ("grass", SEG, GRASS, true, r3d::frame::colours),
+    ("wetview", SEG, 0xa783, true, r3d::frame::wet_view),
+    ("carson", SEG, CARS_ON, true, r3d::frame::cars_on),
+    ("carsoff", SEG, 0xa737, true, r3d::frame::cars_off),
+    ("signals", SEG, SIGNALS, true, r3d::frame::signals),
 ];
 
 /// Every port: OURS, then TRACK.
 fn ours() -> Vec<Ours> {
     let mut v: Vec<Ours> = OURS.into_iter().collect();
+    v.push(Ours {
+        name: "frame",
+        seg: SEG,
+        off: 0x81ce,
+        near: false,
+        run: Run::Machine(r3d::frame::frame),
+    });
     for (name, seg, off, near, f) in TRACK {
         v.push(Ours {
             name,
@@ -837,11 +866,11 @@ fn calls_check(out: &Path, which: &str, frames: usize) {
 
 /// The game's routine (near, or far) run from `start` (at its first instruction), a step at a
 /// time, until it returns (its divide errors through the game's handler, as in a race): the state then, or
-/// None if it ran on. The offsets of the instructions it ran in its own segment go into `seen`.
+/// None if it ran on. The instructions it ran (image-relative segment, offset) go into `seen`.
 fn game_near(
     start: &Snapshot,
     near: bool,
-    seen: &mut std::collections::BTreeSet<u16>,
+    seen: &mut std::collections::BTreeSet<(u16, u16)>,
 ) -> Option<Snapshot> {
     let mut m = Machine::new();
     m.restore(start);
@@ -859,9 +888,7 @@ fn game_near(
         if m.cpu.s[1] == ret_cs && m.cpu.ip == ret && m.cpu.r[4] == ret_sp {
             return Some(m.snapshot());
         }
-        if m.cpu.s[1] == cs {
-            seen.insert(m.cpu.ip);
-        }
+        seen.insert((m.cpu.s[1].wrapping_sub(IMAGE), m.cpu.ip));
         if let f1gp_machine::cpu::Event::Callback(_) = m.cpu.step(&mut m.hw) {
             return None;
         }
@@ -1061,6 +1088,150 @@ fn made_up_point(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
 
 /// A made-up call of the segment walk: its bands' lengths, its direction, the road drawn as
 /// polygons or not, the mirror's flag and the camera's segment at random; some walks long enough
+/// A call of the frame's own routines: wet or dry (SS:122E, [bp+122E], the level [bp+184]), the
+/// view (G:0981: cockpit 0, A0h, or as caught), the texture on or off ([bp+11A6]), the start
+/// lights (G:290D, G:2923), the cars to place (G:2225, R:0186, the view's direction, the pit
+/// lane drawn or not, the camera in the pits), and the viewed car's pit stop: its crew's signals
+/// (+97 bits 3 to 6), its state (+67) and their swings (G:2919 to G:291F).
+fn made_up_view(m: &mut Machine, off: u16, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    let g = rd16(m, lin(ss, 0xf0));
+    let at = |o: u16| lin(ss, bp.wrapping_add(o));
+    let b = |m: &mut Machine, a: u32, v: i32| m.hw.mem[a as usize] = v as u8;
+    if rng(2) == 0 {
+        let wet = rng(2) as u16;
+        m.hw.wr16(lin(ss, 0x122e), wet);
+        m.hw.wr16(at(0x122e), wet);
+        m.hw.wr16(lin(ss, 0x182), rng(0x200) as u16);
+        b(m, at(0x184), rng(6) - 1);
+    }
+    if rng(3) == 0 {
+        b(m, lin(g, 0x981), [0, 0xa0, 0xc0][rng(3) as usize]);
+    }
+    if rng(3) == 0 {
+        b(m, at(0x11a6), rng(2) * 0x80);
+    }
+    if rng(3) == 0 {
+        m.hw.wr16(lin(g, 0x290d), rng(9) as u16);
+        b(m, lin(g, 0x2923), rng(4));
+    }
+    if off == CARS_ON || off == PIT_BOX {
+        if rng(2) == 0 {
+            m.hw.wr16(lin(g, 0x2225), rng(27) as u16);
+        }
+        if rng(3) == 0 {
+            m.hw.wr16(lin(ds, 0x186), rng(0x4000) as u16);
+        }
+        if rng(3) == 0 {
+            let v = rd16(m, at(0x136)) ^ 0x8000;
+            m.hw.wr16(at(0x136), v);
+        }
+        if rng(3) == 0 {
+            m.hw.wr16(
+                at(0x170),
+                if rng(2) == 0 {
+                    0x8000
+                } else {
+                    rng(2) as u16 * 0x10
+                },
+            );
+        }
+        if rng(4) == 0 {
+            m.hw.mem[lin(g, 0x16e) as usize] ^= 0x80;
+        }
+        if rng(4) == 0 {
+            m.hw.mem[lin(g, 0x256) as usize] ^= 0x80;
+        }
+        if rng(2) == 0 {
+            // some cars moved: into the pit lane's array (G:8799), onto the track's segments
+            // where the pit lane joins (+26 bits 0 and 1), or anywhere on the track (G:87A1)
+            let w = |m: &Machine, o: u16| rd16(m, lin(g, o));
+            let (track, lane) = (w(m, 0x87a1), w(m, 0x8799));
+            let (t0, t1) = (w(m, 0x879f), w(m, 0x18a));
+            let (l0, l1) = (w(m, 0x8797), w(m, 0x182));
+            let joins: Vec<u16> = (0..t1.wrapping_add(0x900).wrapping_sub(t0) / 0x2e)
+                .map(|k| t0 + 0x2e * k)
+                .filter(|&d| m.hw.mem[lin(track, d + 0x26) as usize] & 3 != 0)
+                .collect();
+            for _ in 0..1 + rng(4) {
+                let car = 0xd1b + 0xc0 * rng(26) as u16;
+                let (di, es) = match rng(3) {
+                    0 if l1 > l0 => (
+                        l0 + 0x2e * rng(((l1 - l0) / 0x2e).max(1) as i32) as u16,
+                        lane,
+                    ),
+                    1 if !joins.is_empty() => (joins[rng(joins.len() as i32) as usize], track),
+                    _ => (
+                        t0 + 0x2e * rng(((t1.wrapping_sub(t0)) / 0x2e).max(1) as i32) as u16,
+                        track,
+                    ),
+                };
+                m.hw.wr16(lin(g, car + 0x12), di);
+                m.hw.wr16(lin(g, car + 0x14), es);
+            }
+        }
+        for k in 0..26u16 {
+            if rng(8) == 0 {
+                let car = 0xd1b + k * 0xc0;
+                m.hw.mem[lin(g, car + 0x96) as usize] ^= 0x80;
+                m.hw.mem[lin(g, car + 0x9a) as usize] ^= 8;
+            }
+        }
+    }
+    if off == SIGNALS || off == DRAW {
+        let car = rd16(m, lin(g, 0x97f));
+        if off == SIGNALS {
+            m.cpu.s[3] = g;
+            m.cpu.r[6] = car;
+        }
+        let f = lin(g, car + 0x97) as usize;
+        m.hw.mem[f] = m.hw.mem[f] & 0x87 | (rng(16) << 3) as u8;
+        b(m, lin(g, car + 0x67), rng(9));
+        for o in [0x2919u16, 0x291b, 0x291d] {
+            let v = match rng(3) {
+                0 => 0x8000,
+                1 => rng(0x20),
+                _ => rng(0x900),
+            };
+            m.hw.wr16(lin(g, o), v as u16);
+        }
+        m.hw.wr16(lin(g, 0x291f), rng(0x100) as u16);
+        b(m, at(0x124a), rng(2) * 0x80);
+        m.hw.wr16(at(0x88), rng(0x140) as u16);
+    }
+}
+
+/// A call into segment 19ED: rows and colours at random (some off the screen), the cockpit's
+/// top, the horizon, the sky's lowest row, wet or dry and the heading for the scenery, the
+/// lights lit and which lamp.
+fn made_up_screen(m: &mut Machine, off: u16, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    let g = rd16(m, lin(ss, 0xf0));
+    let at = |o: u16| lin(ss, bp.wrapping_add(o));
+    match off {
+        0x3112 | 0x314a => {
+            m.cpu.r[1] = (rng(0xc0) - 0x10) as u16;
+            m.cpu.r[2] = (rng(0xc0) - 0x10) as u16;
+            m.cpu.r[0] = rng(65536) as u16;
+            if rng(2) == 0 {
+                m.hw.wr16(at(0x132), (0x60 + rng(0x50)) as u16);
+            }
+        }
+        0x39ed => {
+            m.hw.wr16(at(0x130), rng(0xb0) as u16);
+            m.hw.wr16(lin(ds, 0x140), (rng(0xc0) - 0x10) as u16);
+            m.hw.wr16(lin(g, 0x2261), rng(65536) as u16);
+            m.hw.wr16(lin(ss, 0x122e), rng(2) as u16);
+            m.hw.mem[at(0x184) as usize] = (rng(6) - 1) as u8;
+        }
+        0x3b46 => {
+            m.hw.wr16(lin(g, 0x290d), rng(9) as u16);
+            m.cpu.r[0] = rng(65536) as u16;
+        }
+        _ => {}
+    }
+}
+
 /// An object's call (9E2A): the level of detail (G:0068) at random some of the time; the object
 /// made the starting lights or another setting's; a parked car's records pointed at cars (or
 /// none); a setting given an offset its shape number multiplies (A001).
@@ -1490,10 +1661,11 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                 .collect()
         } else if [
             GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS, HAZE, SHAPE, VERTEX, POLE,
-            CAR, PARKED, OBJECT, SORT,
+            CAR, PARKED, OBJECT, SORT, SKY, DRAW, GRASS, CARS_ON, PIT_BOX,
         ]
         .contains(&o.off)
             || o.seg == 0
+            || o.seg == 0x19ed
         {
             snaps
                 .iter()
@@ -1515,6 +1687,10 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
             }
             if o.seg == 0 {
                 made_up_pose(&mut m, o.off, &mut rng);
+            } else if o.seg == 0x19ed {
+                made_up_screen(&mut m, o.off, &mut rng);
+            } else if [SKY, DRAW, GRASS, CARS_ON, PIT_BOX, SIGNALS].contains(&o.off) {
+                made_up_view(&mut m, o.off, &mut rng);
             } else if o.off == OBJECT {
                 made_up_object(&mut m, &mut rng);
             } else if o.off == SORT {
@@ -1559,17 +1735,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
             let flag = lin(m.cpu.s[2], 0xc0) as usize;
             m.hw.mem[flag] = 0;
             let start = m.snapshot();
-            // (the footprint is the renderer's segment's alone)
-            let mut elsewhere = std::collections::BTreeSet::new();
-            let game = game_near(
-                &start,
-                o.near,
-                if o.seg == SEG {
-                    &mut seen
-                } else {
-                    &mut elsewhere
-                },
-            );
+            let game = game_near(&start, o.near, &mut seen);
             let ours = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut m = Machine::new();
                 m.restore(&start);
@@ -1616,7 +1782,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
     if let Ok(file) = std::env::var("FOOTPRINT_OUT") {
         let lines: Vec<String> = seen
             .iter()
-            .map(|ip| format!("{SEG:04x}:{ip:04x}"))
+            .map(|(seg, ip)| format!("{seg:04x}:{ip:04x}"))
             .collect();
         std::fs::write(file, lines.join("\n") + "\n").unwrap();
     }
