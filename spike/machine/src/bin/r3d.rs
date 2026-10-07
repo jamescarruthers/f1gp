@@ -375,9 +375,14 @@ fn with_regs(m: &mut Machine, f: impl FnOnce(r3d::Mem, &mut [u16; 8])) {
 }
 
 /// The segment walk's helpers (src/r3d/track.rs).
+const WALK: u16 = 0x3b32;
+const WALK_PITS: u16 = 0x3aab;
+
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 14] = [
+const TRACK: [Port; 16] = [
+    ("walk", SEG, WALK, true, r3d::walk::walk),
+    ("walkpits", SEG, WALK_PITS, true, r3d::walk::walk_pits),
     ("walls", SEG, 0x2a04, true, |c| {
         r3d::section::section(c, r3d::section::Entry::Walls)
     }),
@@ -990,6 +995,47 @@ fn made_up_point(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
     m.hw.wr16(lin(ds, 0x2a4), (rng(2) * 0x8000) as u16);
 }
 
+/// A made-up call of the segment walk: its bands' lengths, its direction, the road drawn as
+/// polygons or not, the mirror's flag and the camera's segment at random; some walks long enough
+/// to fill the strip list.
+fn made_up_walk(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    let put = |m: &mut Machine, seg: u16, o: u16, v: i32| m.hw.wr16(lin(seg, o), v as u16);
+    let bpo = |o: u16| bp.wrapping_add(o);
+    let long = rng(4) == 0;
+    let mut d = 0;
+    for o in [0x1c2u16, 0x1c6, 0x1ca, 0x1ce, 0x1d2] {
+        if rng(2) == 0 {
+            d += rng(6);
+            put(m, ds, o, d * 0x2e);
+        }
+    }
+    let mut d = 0;
+    for o in [0x1d6u16, 0x1da, 0x1de, 0x1e2] {
+        if rng(2) == 0 || long {
+            d += if long { 20 + rng(30) } else { rng(12) };
+            put(m, ds, o, d * 0x2e);
+        }
+    }
+    if rng(3) == 0 {
+        let v = rd16(m, lin(ss, bpo(0x136))) ^ 0x8000;
+        put(m, ss, bpo(0x136), v as i32);
+    }
+    if rng(3) == 0 {
+        m.hw.mem[lin(ds, 0xfa) as usize] = (rng(2) * 0x80) as u8;
+    }
+    if rng(6) == 0 {
+        m.hw.mem[lin(ss, bpo(0x172)) as usize] = [0, 0x80, 1][rng(3) as usize];
+    }
+    if rng(3) == 0 {
+        // the camera on another segment of the circuit
+        let game = rd16(m, lin(ss, 0xf0));
+        let end = rd16(m, lin(ss, bpo(0x15c)));
+        let n = (end.saturating_sub(0x30) / 0x2e).max(1) as i32;
+        put(m, game, 0x96f, 0x30 + 0x2e * rng(n));
+    }
+}
+
 /// A made-up call of the ground texture: the view, the camera car's heading, speed and yaw
 /// rate, the horizon, the texture's top row and the ground points' list end changed at random.
 fn made_up_ground(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
@@ -1051,14 +1097,15 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
         .filter(|o| o.near && (which == "all" || which == o.name))
     {
         // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
-        let calls: Vec<Call> = if [GROUND, BITMAP, POINT, POINT_NEAR, PROJECT].contains(&o.off) {
-            snaps
-                .iter()
-                .flat_map(|s| calls_in(s, o.seg, o.off, true))
-                .collect()
-        } else {
-            calls_in(&snaps[0], o.seg, o.off, true)
-        };
+        let calls: Vec<Call> =
+            if [GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS].contains(&o.off) {
+                snaps
+                    .iter()
+                    .flat_map(|s| calls_in(s, o.seg, o.off, true))
+                    .collect()
+            } else {
+                calls_in(&snaps[0], o.seg, o.off, true)
+            };
         let (mut same, mut faults) = (0, 0);
         for t in 0..trials {
             let mut m = Machine::new();
@@ -1069,6 +1116,8 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                 made_up_bitmap(&mut m, &mut rng);
             } else if [POINT, POINT_NEAR, PROJECT].contains(&o.off) {
                 made_up_point(&mut m, &mut rng);
+            } else if [WALK, WALK_PITS].contains(&o.off) {
+                made_up_walk(&mut m, &mut rng);
             } else {
                 made_up_edge(&mut m, o, &mut rng);
             }

@@ -12,6 +12,7 @@ pub mod point;
 pub mod regs;
 pub mod section;
 pub mod track;
+pub mod walk;
 
 use crate::pc::Machine;
 
