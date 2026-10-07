@@ -21,6 +21,7 @@ the default until it has been tried on real machines.
 | `src/bin/boot.rs` | Boots a program from a folder of files natively and saves the screen each second: for development. |
 | `src/session.rs` | A recorded session (the machine calls a run in Node made, from boot) and how to play it again. |
 | `src/bin/replay.rs` | Runs a recorded session natively (`probes/p6-bench.mjs --record`), instruction for instruction, and checks it ends as the recording did: for timing and profiling the interpreter. |
+| `src/r3d/` | The game's 3D renderer in Rust, a routine at a time: so far the polygon filler (`fill.rs`). |
 | `src/bin/r3d.rs` | The game's 3D routine caught in a recorded race, as the reference for rewriting it (below). |
 | `tests/cpu286.rs` | The CPU against the SingleStepTests 80286 real-mode set. |
 | `tests/pc.rs` | DOS wildcards, the timer, the interrupt controller, EMS, a small program run end to end. |
@@ -90,6 +91,11 @@ cargo run --release --bin r3d -- capture ../out/files ../out/r3d/monza.ops ../ou
 cargo run --release --bin r3d -- check ../out/r3d/monza       # each caught state, the routine run again alone
 cargo run --release --bin r3d -- footprint ../out/r3d/monza   # the instructions it runs
 ```
+
+`r3d fillcheck <out>` runs our polygon filler (`src/r3d/fill.rs`) against the game's on every
+call in the caught frames (the same memory and registers after each); `r3d ours <out>` draws each
+frame with our routines in place of the game's and compares the frames; `fills` and `dumpfills`
+list the filler's calls, the second with the pixels each wrote.
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`

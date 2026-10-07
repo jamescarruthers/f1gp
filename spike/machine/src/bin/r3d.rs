@@ -202,6 +202,13 @@ fn footprint(out: &Path) {
         }
     }
     println!("{steps} instructions run in all");
+    if let Ok(file) = std::env::var("FOOTPRINT_OUT") {
+        let lines: Vec<String> = seen
+            .iter()
+            .flat_map(|(seg, ips)| ips.iter().map(move |ip| format!("{seg:04x}:{ip:04x}")))
+            .collect();
+        std::fs::write(file, lines.join("\n") + "\n").unwrap();
+    }
     for (seg, ips) in &seen {
         println!(
             "segment {seg:04x}: {} distinct instructions, from {:04x} to {:04x}",
@@ -396,6 +403,118 @@ fn dump_fills(out: &Path, frames: usize, file: &Path) {
     println!("{n} calls to {}", file.display());
 }
 
+/// Our filler (r3d::fill) against the game's, call by call in the first `frames` caught frames:
+/// from the state before each call, both must leave the same memory (all of it but the stack
+/// below SP, where the game's pushes land) and the same registers.
+fn fill_check(out: &Path, frames: usize) {
+    let (mut same, mut total) = (0, 0);
+    let mut shown = 0;
+    for p in caught(out).into_iter().take(frames) {
+        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+        for (i, c) in calls_in(&snap, FILL).iter().enumerate() {
+            total += 1;
+            let mut m = Machine::new();
+            m.restore(&c.before);
+            let bp = m.cpu.r[5];
+            let ax = f1gp_machine::r3d::fill::fill(f1gp_machine::r3d::Mem::of(&mut m), bp);
+            m.cpu.r[0] = ax;
+            let sp = lin(c.before.cpu.s[2], c.before.cpu.r[4]) as usize;
+            let differ: Vec<usize> = (0..m.hw.mem.len())
+                .filter(|&a| !(sp - 64..sp).contains(&a) && m.hw.mem[a] != c.after.mem[a])
+                .collect();
+            // CS is not compared: the game's routine returns to the machine's stub
+            let regs = m.cpu.r == c.after.cpu.r
+                && [0, 2, 3].iter().all(|&k| m.cpu.s[k] == c.after.cpu.s[k]);
+            if differ.is_empty() && regs {
+                same += 1;
+            } else if shown < 12 {
+                shown += 1;
+                let r = (c.before.cpu.s[3] as usize) << 4;
+                let first: Vec<String> = differ
+                    .iter()
+                    .take(8)
+                    .map(|&a| {
+                        let what = if a >= r && a < r + 0x10000 {
+                            format!("R:{:04x}", a - r)
+                        } else {
+                            format!("{a:05x}")
+                        };
+                        format!(
+                            "{what} ours {:02x} game {:02x}",
+                            m.hw.mem[a], c.after.mem[a]
+                        )
+                    })
+                    .collect();
+                println!(
+                    "{} call {i}: {} bytes differ{} {:?}",
+                    p.file_name().unwrap().to_string_lossy(),
+                    differ.len(),
+                    if regs {
+                        String::new()
+                    } else {
+                        format!(
+                            "; registers ours {:04x?} game {:04x?}",
+                            m.cpu.r, c.after.cpu.r
+                        )
+                    },
+                    first
+                );
+            }
+        }
+    }
+    println!("{same} of {total} calls the same");
+    if same != total {
+        std::process::exit(1);
+    }
+}
+
+/// Each caught frame drawn with our routines in place of the game's (through hooks: the Rust
+/// does the work and returns), against the frame caught: the same 64,000 bytes, and the
+/// instructions the game's code still ran.
+fn ours_check(out: &Path) {
+    let (mut same, mut total) = (0, 0);
+    let (mut theirs, mut left) = (0u64, 0u64);
+    for p in caught(out) {
+        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+        let want = std::fs::read(p.with_extension("frame")).unwrap();
+        total += 1;
+        let (_, _, n_game) = rerun(&snap, &mut |_, n| panic!("hook {n:02x}?")).unwrap();
+        theirs += n_game;
+        let mut m = Machine::new();
+        m.restore(&snap);
+        let fill_at = lin(SEG + IMAGE, FILL);
+        m.hook(fill_at, HOOKS + 2);
+        let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
+        let n = m
+            .call_far(cs, ip, 50_000_000, &mut |m, _| {
+                let bp = m.cpu.r[5];
+                let ax = f1gp_machine::r3d::fill::fill(f1gp_machine::r3d::Mem::of(m), bp);
+                m.cpu.r[0] = ax;
+                m.retf();
+            })
+            .unwrap();
+        left += n;
+        let bb = back_buffer(&m) as usize;
+        let diff = m.hw.mem[bb..bb + FRAME]
+            .iter()
+            .zip(&want[4..])
+            .filter(|(a, b)| a != b)
+            .count();
+        if diff == 0 {
+            same += 1;
+        } else {
+            println!(
+                "{}: {diff} of 64000 bytes differ",
+                p.file_name().unwrap().to_string_lossy()
+            );
+        }
+    }
+    println!("{same} of {total} frames the same with our routines; the game's code ran {left} of {theirs} instructions ({:.1}%)", 100.0 * left as f64 / theirs as f64);
+    if same != total {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -408,6 +527,11 @@ fn main() {
         ),
         Some("check") => check(Path::new(&a[2])),
         Some("footprint") => footprint(Path::new(&a[2])),
+        Some("ours") => ours_check(Path::new(&a[2])),
+        Some("fillcheck") => fill_check(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(usize::MAX),
+        ),
         Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
         Some("fills") => fill_calls(
             Path::new(&a[2]),

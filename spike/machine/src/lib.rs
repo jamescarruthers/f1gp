@@ -8,6 +8,7 @@ pub mod dos;
 pub mod ems;
 pub mod pc;
 pub mod png;
+pub mod r3d;
 pub mod session;
 
 #[cfg(target_arch = "wasm32")]

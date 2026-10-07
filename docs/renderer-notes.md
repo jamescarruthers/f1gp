@@ -459,12 +459,32 @@ the state before it and the pixels it writes, found by running it alone on two b
   row, the larger y; the last row is drawn, the first is not), its x at each end, then the x of
   each row it covers, from the first row less one up to the last, ending with 8000h. So the edge
   rasteriser rounds each row's x before the filler runs; the filler does no arithmetic on edges. DT.
-- **The fill:** each row from the left side's x (drawn) to the right side's x (not drawn), in the
-  colour. Edges flagged 40h are on the right side, the others on the left. This alone gives the
-  exact pixels of 3,540 of the 4,212 calls (84%). DT.
-- **Not decoded yet:** the other 16%, polygons with edges on the screen's borders (x 0 or 320,
-  row 164; the flags' low bits and the mode's low nibble) and some with several edges a side,
-  which 0F47:0A86–0D25 handle; and how the edge code (0F47:0000–0998) rounds each row's x.
+- **The fill:** from the polygon's lowest vertex up, each row from the left side's x (drawn) to
+  the right side's x (not drawn), in the colour (R:0048, the colour twice). The left side walks the
+  ring forward (R:000C, its entry's flags in R:0014), the right side backward (R:0010, R:0018);
+  an entry flagged 40h runs its edge the other way. R:063C counts the ring's bytes still to walk;
+  a side's next edge must start on the row where the last ended, or the polygon is done. DT.
+- **The screen's edges.** Where the polygon runs along the screen's edge a side has no edge for
+  some rows; the filler then reads a border list in place of an edge's x list: R:04A8 ends a list
+  of 0s (the left border), R:063A a list of 320s (the right), entered at the row the border part
+  starts. Entry flags 10h and 20h mark an edge ending on a border; the mode R:0640 allows the
+  rest (1: start from the bottom row, 164; 2 and 8: a border list from the top, row 0, for the
+  right and the left side; 4: the right border from the bottom row). R:063E notes which side is on
+  a border list (80h left, 40h right). SC, DT.
+- **The cockpit's window.** Rows below SS:0132 (row 103 in the cockpit view) are drawn through the
+  window's row tables at SS:6364, indexed by row − 103: the row's offset in the back buffer (0:
+  hidden), its left and right limits (+1F2h, +298h) and the gap between its two openings (+0A6h,
+  +14Ch). SC, DT.
+- **The crowd.** Colour 1Bh is the crowd: in a race (SS:124A ≠ 0) each row copies pixels from the
+  crowd strip (the far pointer R:0004, or R:0000 when SS:0185 is negative), starting at the last
+  row's end plus a step from the 64-byte table R:02B4, wrapped at 200h; otherwise colour 0Ah. SC, DT.
+- **Mode 0** walks the ring without border lists or the checks above. SC.
+- **Rewritten:** `spike/machine/src/r3d/fill.rs` does the same, checked call by call against the
+  game's: 11,925 calls in 176 frames at Monza (race), Monaco and Germany (practice) leave the same
+  memory and registers, and the 176 frames drawn with it in place of the game's are byte for
+  byte the same. 84% of the routine's instructions ran in those frames; the rest are its error
+  exits and mirror cases, and one crowd case (the strip at R:0000) no frame reached.
+- **Not decoded yet:** how the edge code (0F47:0000–0998) rounds each row's x.
 
 ## 8. The palette
 
@@ -526,7 +546,7 @@ at Monza, bundle `dist/p2-static-25000.jsdos`):
   bitmap ids; and the purpose of setting fields +02, +0A, +0E.
 - What 0F47:8261 changes on the viewed car, and 0F47:A737.
 - Where the per-circuit shade ramps 10h–1Fh are computed.
-- The polygon filler's border cases, and the edge code's rounding (section 7).
+- The edge code's rounding (section 7).
 
 ## Objects: shapes and placement (decoded)
 
