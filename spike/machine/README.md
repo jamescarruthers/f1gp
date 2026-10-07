@@ -19,7 +19,9 @@ the default until it has been tried on real machines.
 | `src/ems.rs` | Expanded memory (LIM EMS 4.0): the EMMXXXX0 device, a page frame at E000h, 4 MB of pages. The game will not start without EMS. |
 | `src/wasm.rs` | The functions the page calls (wasm32 only). |
 | `src/bin/boot.rs` | Boots a program from a folder of files natively and saves the screen each second: for development. |
+| `src/session.rs` | A recorded session (the machine calls a run in Node made, from boot) and how to play it again. |
 | `src/bin/replay.rs` | Runs a recorded session natively (`probes/p6-bench.mjs --record`), instruction for instruction, and checks it ends as the recording did: for timing and profiling the interpreter. |
+| `src/bin/r3d.rs` | The game's 3D routine caught in a recorded race, as the reference for rewriting it (below). |
 | `tests/cpu286.rs` | The CPU against the SingleStepTests 80286 real-mode set. |
 | `tests/pc.rs` | DOS wildcards, the timer, the interrupt controller, EMS, a small program run end to end. |
 
@@ -64,6 +66,37 @@ profiled with callgrind): the instruction loop in `Cpu::run` rather than a call
 per instruction from the machine; the small helpers inlined; the check for an
 interrupt only after an instruction that can let one in (STI, POPF, IRET, OUT);
 the arithmetic flags set in one write, without branches.
+
+## Rewriting the game's routines
+
+The machine can stop at any routine of the game and let Rust look at the state or do the
+routine's work (step 2 of the rewrite):
+
+- `Machine::hook(address, n)` puts the bytes FE 38 n (n from `HOOKS`, C0h) at a routine;
+  `run_until` stops there with the hook's number. The owner can put the bytes back and run on,
+  or do the routine's work and `retf`. The hook's own bytes are not counted, so a run with hooks
+  keeps the same clock as the recording it plays.
+- `Machine::call_far(cs, ip, limit, on_hook)` runs a routine alone, as a far call: interrupts
+  masked, the clock still, until it returns.
+- `Machine::snapshot`, `restore`: the CPU and memory, also as bytes (`Snapshot::to_bytes`).
+
+The first routine is the game's 3D view (0F47:81CE, `docs/renderer-notes.md`), so that the
+original picture can be drawn by us, then sharper and smoother:
+
+```
+node probes/p7-r3d-record.mjs                   # a Monza race: cockpit, chase and TV views, the autopilot driving
+cd machine
+cargo run --release --bin r3d -- capture ../out/files ../out/r3d/monza.ops ../out/r3d/monza 18 60
+cargo run --release --bin r3d -- check ../out/r3d/monza       # each caught state, the routine run again alone
+cargo run --release --bin r3d -- footprint ../out/r3d/monza   # the instructions it runs
+```
+
+`capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
+the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`
+runs the game's routine again from each state, alone: all 58 frames come out byte for byte the
+same, so a rewrite can be held to exactly that. The routine takes 460,000 to 940,000
+instructions a frame; over the 58 frames it runs 12,217 distinct instructions: 11,637 in the
+renderer's segment (0F47), 345 in 19ED (the palette step, the mirror backdrop), 235 in segment 0.
 
 ## Building and testing
 

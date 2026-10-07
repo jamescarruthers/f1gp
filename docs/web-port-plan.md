@@ -538,10 +538,33 @@ patched in bytes.
   the intro, a mouse, the serial link; saving from the game's menus fails the
   saves probe on it (not yet looked into).
 
-Next (step 2): a hook in the machine that runs a Rust function in place of
-one of the game's routines, and a check that runs both on the same state and
-compares the memory they leave; then the routines in turn, starting with the
-ones already decoded.
+## Step 2: the original 3D view, ours, then sharper and smoother (started)
+
+The aim: the game's own picture, drawn by us, exactly; then the same rules at
+the screen's resolution, and at its frame rate with the camera eased between
+the game's frames. A GPU's triangle rules cannot match the game's (it fills
+flat polygons span by span, from its own edge lists, far to near), which is
+why our WebGL view matches about 88% of object pixels where the game's rules
+in software reach 95.6%. Compute shaders (WebGPU) can rasterise the game's way
+at any resolution.
+
+1. **A reference (done).** The machine can hook any of the game's routines,
+   run one alone, and save and restore its state. `machine/src/bin/r3d.rs`
+   catches the 3D routine (0F47:81CE) in a recorded race: 58 frames over the
+   cockpit, chase and TV views at Monza, each the state the routine starts
+   from and the frame it leaves. Run again alone from each state, the game's
+   routine gives the same 64,000 bytes every time, so a rewrite can be held to
+   exactly that. Over those frames the routine runs 12,217 distinct
+   instructions, 11,637 of them in the renderer's segment.
+2. **The rasteriser.** The polygon filler (0F47:0999, a far routine to about
+   1729h, called from 27 places) and the edge lists it fills from (0F47:0000
+   to 0998): the last unknown in `docs/renderer-notes.md`. Rewritten in Rust
+   and checked call by call against the game's.
+3. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
+   projection, each checked the same way, until the whole routine is ours.
+4. **Sharper and smoother:** the same rules at a higher resolution and with
+   the camera eased between frames, rasterised in WebGPU compute shaders; the
+   WebGL view stays for browsers without WebGPU.
 
 ## Risks and open questions
 

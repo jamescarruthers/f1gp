@@ -23,6 +23,14 @@ const INT9_AT: u16 = 0xf100;
 const INT16_AT: u16 = 0xf200;
 const IRQ_EOI_AT: u16 = 0xf300;
 const IRET_AT: u16 = 0xff53;
+/// The return address `Machine::call_far` leaves on the stack: a stub that ends the call.
+pub const RETURN_AT: u16 = 0xf400;
+
+/// Callbacks (FE 38 nn) from this number up are hooks (`Machine::hook`): they stop the machine
+/// so that its owner can look at the state, or do a routine's work in Rust.
+pub const HOOKS: u8 = 0xc0;
+/// The hook at RETURN_AT.
+const RETURN_HOOK: u8 = 0xff;
 
 /// The interrupts served in Rust.
 const SERVED: [u8; 15] = [
@@ -142,6 +150,47 @@ pub struct Machine {
     pub exited: Option<u8>,
     /// the screen as RGBA, 320 x 200 (render())
     pub frame: Vec<u8>,
+    /// the hook the CPU reached (`run_until` stops there)
+    hit: Option<u8>,
+}
+
+/// The CPU's registers and the memory: a point to come back to (`Machine::restore`), or to save.
+#[derive(Clone)]
+pub struct Snapshot {
+    pub cpu: Cpu,
+    pub mem: Vec<u8>,
+}
+
+impl Snapshot {
+    /// As bytes: "F1S1", AX..DI, ES CS SS DS, IP, FLAGS (16 bits each, little-endian), then the memory.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let c = &self.cpu;
+        let mut b = b"F1S1".to_vec();
+        for v in c.r.iter().chain(c.s.iter()).chain([c.ip, c.flags].iter()) {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&self.mem);
+        b
+    }
+    pub fn from_bytes(b: &[u8]) -> Result<Snapshot, String> {
+        if b.len() != 4 + 28 + RAM || &b[..4] != b"F1S1" {
+            return Err("not a snapshot".into());
+        }
+        let w = |i: usize| u16::from_le_bytes([b[4 + 2 * i], b[5 + 2 * i]]);
+        let mut cpu = Cpu::new();
+        for i in 0..8 {
+            cpu.r[i] = w(i);
+        }
+        for i in 0..4 {
+            cpu.s[i] = w(8 + i);
+        }
+        cpu.ip = w(12);
+        cpu.load_flags(w(13));
+        Ok(Snapshot {
+            cpu,
+            mem: b[32..].to_vec(),
+        })
+    }
 }
 
 impl Default for Machine {
@@ -180,6 +229,7 @@ impl Machine {
             cycles_per_ms: 20000.0,
             exited: None,
             frame: vec![0; 320 * 200 * 4],
+            hit: None,
         };
         m.bios_init();
         m
@@ -243,6 +293,7 @@ impl Machine {
             &[0xfb, 0xfe, 0x38, 0x16, 0x75, 0x03, 0xf4, 0xeb, 0xf7, 0xcf],
         );
         self.set_vector(0x16, BIOS, INT16_AT);
+        self.put(BIOS, RETURN_AT, &[0xfe, 0x38, RETURN_HOOK]);
         // the BIOS date (lib/f1gp-mem.mjs finds guest RAM by it) and the model byte (AT)
         self.put(BIOS, 0xfff5, b"01/01/92");
         self.put(BIOS, 0xfffe, &[0xfc]);
@@ -279,9 +330,15 @@ impl Machine {
 
     /// Run for `ms` of emulated time.
     pub fn run(&mut self, ms: f64) {
-        let target = self.hw.now + ms * 1000.0;
+        self.run_until(self.hw.now + ms * 1000.0);
+    }
+
+    /// Run to the emulated time `target` (µs), or until the CPU reaches a hook: then the hook's
+    /// number, with IP just past its three bytes (put the bytes back, move IP back three and run
+    /// on; or do the routine's work and `retf`).
+    pub fn run_until(&mut self, target: f64) -> Option<u8> {
         let per_us = self.cycles_per_ms / 1000.0;
-        while self.hw.now < target && self.exited.is_none() {
+        while self.hw.now < target && self.exited.is_none() && self.hit.is_none() {
             self.update_devices();
             let mut next = target.min(self.hw.pit.next_irq);
             if !self.hw.kbd.queue.is_empty() && !self.hw.kbd.full {
@@ -308,6 +365,13 @@ impl Machine {
                         idle = true;
                         break;
                     }
+                    Event::Callback(n) if n >= HOOKS => {
+                        // the hook's own bytes are not the game's: not counted, so that a run with
+                        // hooks keeps the same clock as one without
+                        self.cpu.count -= 1;
+                        self.hit = Some(n);
+                        break;
+                    }
                     Event::Callback(n) => {
                         self.service(n);
                         if self.exited.is_some() {
@@ -324,6 +388,99 @@ impl Machine {
             };
         }
         self.update_devices();
+        self.hit.take()
+    }
+
+    /// Put hook `n` (HOOKS up to FEh) at a linear address: the bytes FE 38 n, which stop the
+    /// machine when the CPU reaches them. Returns the three bytes they replace.
+    pub fn hook(&mut self, at: u32, n: u8) -> [u8; 3] {
+        let a = at as usize;
+        let old = [self.hw.mem[a], self.hw.mem[a + 1], self.hw.mem[a + 2]];
+        self.hw.mem[a..a + 3].copy_from_slice(&[0xfe, 0x38, n]);
+        old
+    }
+    /// Put back the bytes a hook replaced.
+    pub fn unhook(&mut self, at: u32, old: [u8; 3]) {
+        let a = at as usize;
+        self.hw.mem[a..a + 3].copy_from_slice(&old);
+    }
+
+    /// Return from a far call, as RETF does: after doing a hooked routine's work in Rust.
+    pub fn retf(&mut self) {
+        let a = lin(self.cpu.s[cpu::SS as usize], self.cpu.r[cpu::SP]);
+        self.cpu.ip = self.hw.rd16(a);
+        self.cpu.s[cpu::CS as usize] = self.hw.rd16(a + 2);
+        self.cpu.r[cpu::SP] = self.cpu.r[cpu::SP].wrapping_add(4);
+    }
+
+    /// Run the routine at cs:ip as a far call, alone: interrupts masked at the controllers and
+    /// the clock still, until it returns (the instructions it took), runs `limit` instructions
+    /// (an error), or halts. BIOS and DOS services work as usual; a hook calls `on_hook` with
+    /// the machine stopped just past it.
+    pub fn call_far(
+        &mut self,
+        cs: u16,
+        ip: u16,
+        limit: u64,
+        on_hook: &mut dyn FnMut(&mut Machine, u8),
+    ) -> Result<u64, String> {
+        let sp = self.cpu.r[cpu::SP].wrapping_sub(4);
+        self.cpu.r[cpu::SP] = sp;
+        let a = lin(self.cpu.s[cpu::SS as usize], sp);
+        self.hw.wr16(a, RETURN_AT);
+        self.hw.wr16(a + 2, BIOS);
+        self.cpu.s[cpu::CS as usize] = cs;
+        self.cpu.ip = ip;
+        self.cpu.halted = false;
+        let masks = (self.hw.pic.imr, self.hw.pic2.imr);
+        self.hw.pic.imr = 0xff;
+        self.hw.pic2.imr = 0xff;
+        let start = self.cpu.count;
+        let r = loop {
+            if self.cpu.count - start >= limit {
+                break Err(format!(
+                    "no return after {} instructions (at {:04x}:{:04x})",
+                    limit,
+                    self.cpu.s[cpu::CS as usize],
+                    self.cpu.ip
+                ));
+            }
+            match self.cpu.run(&mut self.hw, start + limit) {
+                Event::Ok => {}
+                Event::Halt => {
+                    break Err(format!(
+                        "HLT at {:04x}:{:04x}",
+                        self.cpu.s[cpu::CS as usize],
+                        self.cpu.ip
+                    ))
+                }
+                // the stub's and the hooks' own bytes are not counted (as in run_until)
+                Event::Callback(RETURN_HOOK) => {
+                    self.cpu.count -= 1;
+                    break Ok(self.cpu.count - start);
+                }
+                Event::Callback(n) if n >= HOOKS => {
+                    self.cpu.count -= 1;
+                    on_hook(self, n)
+                }
+                Event::Callback(n) => self.service(n),
+            }
+        };
+        (self.hw.pic.imr, self.hw.pic2.imr) = masks;
+        r
+    }
+
+    /// The CPU and memory as they are now.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            cpu: self.cpu.clone(),
+            mem: self.hw.mem.clone(),
+        }
+    }
+    /// Back to a snapshot's CPU and memory (the devices stay as they are).
+    pub fn restore(&mut self, s: &Snapshot) {
+        self.cpu = s.cpu.clone();
+        self.hw.mem.copy_from_slice(&s.mem);
     }
 
     fn update_devices(&mut self) {
