@@ -11,6 +11,7 @@ pub mod fill;
 pub mod ground;
 pub mod point;
 pub mod regs;
+pub mod road;
 pub mod section;
 pub mod strips;
 pub mod track;

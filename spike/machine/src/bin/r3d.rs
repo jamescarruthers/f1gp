@@ -375,12 +375,15 @@ fn with_regs(m: &mut Machine, f: impl FnOnce(r3d::Mem, &mut [u16; 8])) {
 }
 
 /// The segment walk's helpers (src/r3d/track.rs).
+const HAZE: u16 = 0x188a;
 const WALK: u16 = 0x3b32;
 const WALK_PITS: u16 = 0x3aab;
 
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 19] = [
+const TRACK: [Port; 21] = [
+    ("haze", SEG, HAZE, true, r3d::road::haze),
+    ("road", SEG, 0x5470, true, r3d::road::road),
     ("mode", SEG, 0x49c0, true, r3d::blocks::mode),
     ("blocks", SEG, 0x4a03, true, r3d::blocks::blocks),
     ("strips", SEG, 0x4c12, true, r3d::strips::strips),
@@ -1100,15 +1103,18 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
         .filter(|o| o.near && (which == "all" || which == o.name))
     {
         // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
-        let calls: Vec<Call> =
-            if [GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS].contains(&o.off) {
-                snaps
-                    .iter()
-                    .flat_map(|s| calls_in(s, o.seg, o.off, true))
-                    .collect()
-            } else {
-                calls_in(&snaps[0], o.seg, o.off, true)
-            };
+        let calls: Vec<Call> = if [
+            GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS, HAZE,
+        ]
+        .contains(&o.off)
+        {
+            snaps
+                .iter()
+                .flat_map(|s| calls_in(s, o.seg, o.off, true))
+                .collect()
+        } else {
+            calls_in(&snaps[0], o.seg, o.off, true)
+        };
         let (mut same, mut faults) = (0, 0);
         for t in 0..trials {
             let mut m = Machine::new();
@@ -1121,6 +1127,13 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                 made_up_point(&mut m, &mut rng);
             } else if [WALK, WALK_PITS].contains(&o.off) {
                 made_up_walk(&mut m, &mut rng);
+            } else if o.off == HAZE {
+                // the colour and distance at random, wet half the time
+                m.cpu.r[0] = rng(65536) as u16;
+                m.cpu.r[3] = (rng(400) - 100) as u16;
+                let (ss, bp) = (m.cpu.s[2], m.cpu.r[5]);
+                m.hw.wr16(lin(ss, bp.wrapping_add(0x122e)), rng(2) as u16);
+                m.hw.wr16(lin(ss, bp.wrapping_add(0x182)), rng(65536) as u16);
             } else {
                 made_up_edge(&mut m, o, &mut rng);
             }
