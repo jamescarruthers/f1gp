@@ -375,7 +375,22 @@ fn with_regs(m: &mut Machine, f: impl FnOnce(r3d::Mem, &mut [u16; 8])) {
 }
 
 /// The segment walk's helpers (src/r3d/track.rs).
-const TRACK: [(&str, u16, u16, bool, fn(&mut r3d::regs::Cpu)); 9] = [
+type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
+
+const TRACK: [Port; 14] = [
+    ("walls", SEG, 0x2a04, true, |c| {
+        r3d::section::section(c, r3d::section::Entry::Walls)
+    }),
+    ("kerbs", SEG, 0x2d12, true, |c| {
+        r3d::section::section(c, r3d::section::Entry::Kerbs)
+    }),
+    ("fences", SEG, 0x2f7c, true, |c| {
+        r3d::section::section(c, r3d::section::Entry::Fences)
+    }),
+    ("edges", SEG, 0x3181, true, |c| {
+        r3d::section::section(c, r3d::section::Entry::Edges)
+    }),
+    ("along", SEG, 0x25d3, false, r3d::section::along),
     ("sqrt", 0, 0x024e, false, r3d::track::sqrt),
     ("shifted", SEG, 0x206e, true, r3d::track::shifted),
     ("raise", SEG, 0x2334, true, r3d::track::raise),
