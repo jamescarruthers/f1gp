@@ -147,6 +147,10 @@ impl<'a> Cpu<'a> {
         self.w(self.s[CS], o)
     }
     #[inline]
+    pub fn set_c(&mut self, o: u16, v: u16) {
+        self.set_w(self.s[CS], o, v)
+    }
+    #[inline]
     pub fn set_cb(&mut self, o: u16, v: u8) {
         self.set_b(self.s[CS], o, v)
     }

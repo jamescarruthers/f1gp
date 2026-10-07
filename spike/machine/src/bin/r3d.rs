@@ -386,6 +386,8 @@ const PARKED: u16 = 0xa7b2;
 const PART: u16 = 0xa406;
 const PART_OWN: u16 = 0xa2cc;
 const PART_SHAPE: u16 = 0xa2d3;
+const OBJECT: u16 = 0x9e2a;
+const SORT: u16 = 0x5149;
 
 /// Routines the caught races never call, made up from the calls of one they could be called
 /// in place of (the same segment and stack: SEG, the routine, the one lent, near): the car's
@@ -404,7 +406,7 @@ const STACK: usize = 0x400;
 
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 35] = [
+const TRACK: [Port; 42] = [
     ("haze", SEG, HAZE, true, r3d::road::haze),
     ("road", SEG, 0x5470, true, r3d::road::road),
     ("mode", SEG, 0x49c0, true, r3d::blocks::mode),
@@ -452,6 +454,13 @@ const TRACK: [Port; 35] = [
     ("ownpart", SEG, 0xa19e, true, r3d::cars::own_part),
     ("partcar", SEG, 0xa1c1, true, r3d::cars::part_and_car),
     ("parked", SEG, PARKED, true, r3d::cars::parked),
+    ("object", SEG, OBJECT, true, r3d::scene::object),
+    ("pits", SEG, 0x9c05, true, r3d::scene::pits),
+    ("reset", SEG, 0x9be0, true, r3d::scene::reset),
+    ("scene", SEG, 0x817a, true, r3d::scene::scene),
+    ("drain", SEG, 0x541b, true, r3d::scene::drain),
+    ("sort", SEG, SORT, true, r3d::scene::sort),
+    ("sides", SEG, 0x6425, true, r3d::road::fences),
 ];
 
 /// Every port: OURS, then TRACK.
@@ -1052,6 +1061,112 @@ fn made_up_point(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
 
 /// A made-up call of the segment walk: its bands' lengths, its direction, the road drawn as
 /// polygons or not, the mirror's flag and the camera's segment at random; some walks long enough
+/// An object's call (9E2A): the level of detail (G:0068) at random some of the time; the object
+/// made the starting lights or another setting's; a parked car's records pointed at cars (or
+/// none); a setting given an offset its shape number multiplies (A001).
+fn made_up_object(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (es, ss, di) = (m.cpu.s[0], m.cpu.s[2], m.cpu.r[7]);
+    let g = rd16(m, lin(ss, 0xf0));
+    if rng(3) == 0 {
+        m.hw.mem[lin(g, 0x68) as usize] = rng(5) as u8;
+    }
+    let at = lin(es, di.wrapping_add(0x1e)) as usize;
+    match rng(10) {
+        0 => m.hw.mem[at] = 2,
+        1 => m.hw.mem[at] = (2 + rng(38)) as u8,
+        2 => m.hw.mem[at] = rng(2) as u8,
+        3 => m.hw.mem[at] = (0xb4 + rng(4)) as u8,
+        _ => {}
+    }
+    if rng(5) == 0 {
+        m.hw.mem[at] = (0x80 + 2 * rng(13)) as u8;
+    }
+    let kind = m.hw.mem[at];
+    if (0x80..0xb4).contains(&kind) && rng(2) == 0 {
+        // a car with parts: in front (+97 bit 7), or by +9A bits 4 and 2; the camera's own
+        let si = rd16(m, lin(g, 0xc65 + (kind & 0x7f) as u16)).wrapping_add(0xd1b);
+        let f97 = lin(g, si.wrapping_add(0x97)) as usize;
+        m.hw.mem[f97] = m.hw.mem[f97] & 0x7f | (rng(2) * 0x80) as u8;
+        let f9a = lin(g, si.wrapping_add(0x9a)) as usize;
+        m.hw.mem[f9a] = m.hw.mem[f9a] & 0x0b
+            | ((rng(2) * 0x10) | (rng(2) * 4)) as u8
+            | [0, 0x80, 0xc0, 0xe0][rng(4) as usize];
+        if rng(3) == 0 {
+            m.hw.wr16(lin(g, 0x97d), si);
+        }
+        if rng(3) == 0 {
+            m.hw.wr16(lin(g, 0x2943), 0);
+            m.hw.wr16(lin(g, 0x2945), 0);
+        }
+    }
+    if kind >= 0xb4 && rng(2) == 0 {
+        let b = (kind as u16 - 0xb4) * 4;
+        for o in [0xb01u16, 0xb03] {
+            let car = if rng(4) == 0 {
+                0xffff
+            } else {
+                rd16(m, lin(g, 0xc65 + 2 * rng(13) as u16))
+            };
+            m.hw.wr16(lin(g, o + b), car);
+        }
+    }
+    if kind < 0x80 && rng(8) == 0 {
+        let t = rd16(m, lin(g, 0x23a)).wrapping_add(16 * kind as u16);
+        m.hw.mem[lin(g, t) as usize] = [0, 2, 3][rng(3) as usize];
+        m.hw.wr16(lin(g, t.wrapping_add(8)), (1 + rng(0x1ff)) as u16);
+    }
+}
+
+/// A sort's call (5149): no objects, or the pit lane's sort, some of the time; the limits
+/// (R:0064, R:006A, R:006C, R:0068) and the objects' kinds and flags (+1F bit 2, +26 bit 6) at
+/// random some of the time.
+fn made_up_sort(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    let g = rd16(m, lin(ss, 0xf0));
+    if rng(6) == 0 {
+        let v = rd16(m, lin(ds, 0xf2));
+        m.hw.wr16(lin(ds, 0xf6), v);
+    }
+    if rng(4) == 0 {
+        m.hw.mem[lin(ss, bp.wrapping_add(0x172)) as usize] = 0x80;
+    }
+    for o in [0x64u16, 0x6a, 0x6c] {
+        if rng(3) == 0 {
+            let v = if rng(3) == 0 { 0 } else { rng(400) - 100 };
+            m.hw.wr16(lin(ds, o), v as u16);
+        }
+    }
+    if rng(4) == 0 {
+        m.hw.wr16(lin(ds, 0x68), rng(40) as u16);
+    }
+    if rng(6) == 0 {
+        m.hw.mem[lin(g, 0x981) as usize] = 0xc0;
+    }
+    let (from, to) = (rd16(m, lin(ds, 0xf2)), rd16(m, lin(ds, 0xf6)));
+    let mut si = from;
+    while si < to {
+        let (di, es) = (rd16(m, lin(ds, si + 4)), rd16(m, lin(ds, si + 6)));
+        if rng(4) == 0 {
+            let k = match rng(3) {
+                0 => 0x80 + 2 * rng(13),
+                1 => 0xb4 + rng(4),
+                _ => 2 + rng(38),
+            };
+            m.hw.mem[lin(es, di.wrapping_add(0x1e)) as usize] = k as u8;
+        }
+        if rng(4) == 0 {
+            m.hw.mem[lin(es, di.wrapping_add(0x1f)) as usize] ^= 4;
+        }
+        if rng(4) == 0 {
+            m.hw.mem[lin(es, di.wrapping_add(0x26)) as usize] ^= 0x40;
+        }
+        if rng(3) == 0 {
+            m.hw.wr16(lin(ds, si), (rng(200) - 20) as u16);
+        }
+        si = si.wrapping_add(8);
+    }
+}
+
 /// A car's call (A30A, or one of its parts' in its place): its parts' flags (+9A bits 5 to 7)
 /// and heading at random, its place about the camera often; for a part, which (DI, and BX its
 /// table entry), and the place kept at G:350D near the car's.
@@ -1375,7 +1490,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                 .collect()
         } else if [
             GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS, HAZE, SHAPE, VERTEX, POLE,
-            CAR, PARKED,
+            CAR, PARKED, OBJECT, SORT,
         ]
         .contains(&o.off)
             || o.seg == 0
@@ -1400,6 +1515,10 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
             }
             if o.seg == 0 {
                 made_up_pose(&mut m, o.off, &mut rng);
+            } else if o.off == OBJECT {
+                made_up_object(&mut m, &mut rng);
+            } else if o.off == SORT {
+                made_up_sort(&mut m, &mut rng);
             } else if o.off == PARKED {
                 // which car, sometimes the camera's
                 let ds = m.cpu.s[3];

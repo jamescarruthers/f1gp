@@ -13,6 +13,7 @@ pub mod ground;
 pub mod point;
 pub mod regs;
 pub mod road;
+pub mod scene;
 pub mod section;
 pub mod shape;
 pub mod strips;

@@ -1,7 +1,8 @@
-//! The road (gp.exe 0F47:5470 to 6424, with 188A, the haze; docs/renderer-notes.md, sections 3 and
+//! The road and its fences (gp.exe 0F47:5470 to 725B, with 188A, the haze; docs/renderer-notes.md, sections 3 and
 //! 7): the polygons along a block's strips, from the edges 4C12 made (30 slots of 4 bytes a strip,
 //! from DI, 78h bytes on each strip): the road itself when it is drawn as polygons (R:00FA), its
-//! lines, its edges, the outer walls, then the grass beside it.
+//! lines, its edges, the outer walls, then the grass beside it; then (6425) the fences and kerbs,
+//! strip by strip with the objects due before and after each.
 //!
 //! Each part's polygon is a ring of edge slots kept in the work area at [bp+34] (13 rings of
 //! 106h bytes: the left list's start at +0, growing down; the right list's end at +2, growing up;
@@ -15,6 +16,7 @@
 
 use super::fill;
 use super::regs::*;
+use super::scene::objects;
 
 /// One push onto a ring: the edge slot, the list (left or right), and whether it is turned.
 #[derive(Clone, Copy)]
@@ -232,8 +234,16 @@ fn inner(
     restart(c, ring, slots[2], w.restart_turn);
 }
 
-/// An outer part (the walls, bits 80h and 40h): two edges in, the third the cross edge.
-fn outer(c: &mut Cpu, w: &Way, ring: u16, bit: u16, slots: [u16; 3], high: bool) {
+/// An outer part (the walls, bits 80h and 40h; the fences and kerbs): two edges in, the third the
+/// cross edge; its colour, distance and fill mode from `colour`.
+fn outer(
+    c: &mut Cpu,
+    w: &Way,
+    ring: u16,
+    bit: u16,
+    slots: [u16; 3],
+    colour: fn(&Cpu) -> (u8, u16, u16),
+) {
     let (cx, dx) = (c.r[CX], c.r[DX]);
     if cx & bit == 0 {
         return;
@@ -251,14 +261,28 @@ fn outer(c: &mut Cpu, w: &Way, ring: u16, bit: u16, slots: [u16; 3], high: bool)
         return;
     }
     push(c, ring, (w.close)(slots[2]));
-    // 58B7: the wall's colour from R:0230 by the strip's +0B nibble
+    let (col, d, mode) = colour(c);
+    fill_ring(c, ring, col, d, mode);
+    restart(c, ring, slots[2], w.restart_turn);
+}
+
+/// 58B7: a wall's colour from R:0230 by the strip's +0B nibble.
+fn wall(c: &Cpu, high: bool) -> (u8, u16, u16) {
     let b = c.db(c.r[SI].wrapping_add(0xb));
     let k = if high { b >> 4 } else { b & 0xf };
-    let col = c.db(0x230 + k as u16);
-    c.r[BX] = k as u16;
-    let d = depth(c, 4);
-    fill_ring(c, ring, col, d, 0);
-    restart(c, ring, slots[2], w.restart_turn);
+    (c.db(0x230 + k as u16), depth(c, 4), 0)
+}
+
+/// A fence's colour from the strip's +0E or +0F.
+fn fence(c: &Cpu, k: u16) -> (u8, u16, u16) {
+    (c.db(c.r[SI].wrapping_add(k)), depth(c, 5), 5)
+}
+
+/// A kerb's colour from R:0248 by the strip's +09 nibble.
+fn kerb(c: &Cpu, high: bool) -> (u8, u16, u16) {
+    let b = c.db(c.r[SI].wrapping_add(9));
+    let k = if high { b >> 4 } else { b & 0xf };
+    (c.db(0x248 + k as u16), depth(c, 1), 5)
 }
 
 /// A grass part: `skip` the R:0152 bit that leaves it out, `side` the road edge's bit, the edge in
@@ -339,8 +363,8 @@ pub fn road(c: &mut Cpu) {
             inner(c, w, 0, 1, 0x100, 1, [0x58, 0x5c, 0x60], |c| {
                 (c.db(c.r[SI].wrapping_add(8)) >> 4, depth(c, 2), 0)
             });
-            outer(c, w, 0x72a, 0x80, [4, 8, 0xc], false);
-            outer(c, w, 0x624, 0x40, [0x10, 0x14, 0x18], true);
+            outer(c, w, 0x72a, 0x80, [4, 8, 0xc], |c| wall(c, false));
+            outer(c, w, 0x624, 0x40, [0x10, 0x14, 0x18], |c| wall(c, true));
         });
     }
     // 5A42: the grass
@@ -392,4 +416,45 @@ pub fn road(c: &mut Cpu) {
         });
     }
     c.r[BX] = bx0;
+}
+
+/// 6425: the fences (bits 20h and 10h, coloured by the strip's +0E and +0F) and the kerbs (8 and
+/// 4, with the parts between them and the road's edges, A3Ch and 936h), strip by strip from SI
+/// to R:00EE; before each strip the objects of the R:0074 list due by then (by their distance
+/// against the strip's +0C), after it, where both fences go on, those of the R:0072 list. SI
+/// and DI are left past the last strip.
+pub fn fences(c: &mut Cpu) {
+    let reversed = (c.bp(0x136) as i16) < 0;
+    let w = if reversed { &REVERSED } else { &FORWARD };
+    if c.r[SI] > c.d(0xee) {
+        return;
+    }
+    loop {
+        let due = c.d(c.r[SI].wrapping_add(0xc));
+        objects(c, 0x74, Some(due));
+        let si = c.r[SI];
+        c.r[DX] = c.d(si.wrapping_add(2));
+        c.r[CX] = c.d(si);
+        outer(c, w, 0x51e, 0x20, [0x20, 0x1c, 0x24], |c| fence(c, 0xe));
+        outer(c, w, 0x418, 0x10, [0x28, 0x2c, 0x30], |c| fence(c, 0xf));
+        outer(c, w, 0x312, 8, [0x34, 0x38, 0x3c], |c| kerb(c, false));
+        inner(c, w, 0xa3c, 8, 0x200, 8, [0x38, 0x4c, 0x64], |c| {
+            kerb(c, true)
+        });
+        outer(c, w, 0x20c, 4, [0x40, 0x44, 0x48], |c| kerb(c, false));
+        inner(c, w, 0x936, 0x100, 4, 4, [0x5c, 0x40, 0x68], |c| {
+            kerb(c, true)
+        });
+        // 6B02
+        c.r[CX] &= 0xff30;
+        if c.r[CX] & 0x30 == 0x30 {
+            let due = c.d(c.r[SI].wrapping_add(0xc));
+            objects(c, 0x72, Some(due));
+        }
+        c.r[DI] = c.r[DI].wrapping_add(0x78);
+        c.r[SI] = c.r[SI].wrapping_add(0x10);
+        if c.r[SI] > c.d(0xee) {
+            break;
+        }
+    }
 }
