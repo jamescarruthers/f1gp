@@ -381,13 +381,30 @@ const WALK_PITS: u16 = 0x3aab;
 const SHAPE: u16 = 0x88a5;
 const VERTEX: u16 = 0x831f;
 const POLE: u16 = 0x878d;
+const CAR: u16 = 0xa30a;
+const PARKED: u16 = 0xa7b2;
+const PART: u16 = 0xa406;
+const PART_OWN: u16 = 0xa2cc;
+const PART_SHAPE: u16 = 0xa2d3;
+
+/// Routines the caught races never call, made up from the calls of one they could be called
+/// in place of (the same segment and stack: SEG, the routine, the one lent, near): the car's
+/// parts from the car drawer's, the arctangent from the pose's.
+const BORROW: [(u16, u16, u16, bool); 6] = [
+    (SEG, PART, CAR, true),
+    (SEG, PART_OWN, CAR, true),
+    (SEG, PART_SHAPE, CAR, true),
+    (SEG, 0xa19e, CAR, true),
+    (SEG, 0xa1c1, CAR, true),
+    (0, 0x043c, 0x14a2, false),
+];
 
 /// The stack below SP left out of the comparisons: what the game's pushes leave there.
 const STACK: usize = 0x400;
 
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 25] = [
+const TRACK: [Port; 35] = [
     ("haze", SEG, HAZE, true, r3d::road::haze),
     ("road", SEG, 0x5470, true, r3d::road::road),
     ("mode", SEG, 0x49c0, true, r3d::blocks::mode),
@@ -425,6 +442,16 @@ const TRACK: [Port; 25] = [
     ("pole", SEG, POLE, true, r3d::shape::pole),
     ("shapehaze", SEG, 0x8801, true, r3d::shape::haze),
     ("shape", SEG, SHAPE, true, r3d::shape::shape),
+    ("finesine", 0, 0x03c8, false, r3d::cars::fine_sine),
+    ("angle", 0, 0x043c, false, r3d::cars::angle),
+    ("pose", 0, 0x14a2, false, r3d::cars::pose),
+    ("car", SEG, CAR, true, r3d::cars::car),
+    ("part", SEG, PART, true, r3d::cars::part),
+    ("partown", SEG, PART_OWN, true, r3d::cars::part_own),
+    ("partshape", SEG, PART_SHAPE, true, r3d::cars::part_shape),
+    ("ownpart", SEG, 0xa19e, true, r3d::cars::own_part),
+    ("partcar", SEG, 0xa1c1, true, r3d::cars::part_and_car),
+    ("parked", SEG, PARKED, true, r3d::cars::parked),
 ];
 
 /// Every port: OURS, then TRACK.
@@ -799,19 +826,31 @@ fn calls_check(out: &Path, which: &str, frames: usize) {
     }
 }
 
-/// The game's near routine run from `start` (at its first instruction), a step at a time, until
-/// it returns (its divide errors through the game's handler, as in a race): the state then, or
+/// The game's routine (near, or far) run from `start` (at its first instruction), a step at a
+/// time, until it returns (its divide errors through the game's handler, as in a race): the state then, or
 /// None if it ran on. The offsets of the instructions it ran in its own segment go into `seen`.
-fn game_near(start: &Snapshot, seen: &mut std::collections::BTreeSet<u16>) -> Option<Snapshot> {
+fn game_near(
+    start: &Snapshot,
+    near: bool,
+    seen: &mut std::collections::BTreeSet<u16>,
+) -> Option<Snapshot> {
     let mut m = Machine::new();
     m.restore(start);
     let (cs, sp) = (m.cpu.s[1], m.cpu.r[4]);
     let ret = rd16(&m, lin(m.cpu.s[2], sp));
+    let (ret_cs, ret_sp) = if near {
+        (cs, sp.wrapping_add(2))
+    } else {
+        (
+            rd16(&m, lin(m.cpu.s[2], sp.wrapping_add(2))),
+            sp.wrapping_add(4),
+        )
+    };
     for _ in 0..2_000_000 {
+        if m.cpu.s[1] == ret_cs && m.cpu.ip == ret && m.cpu.r[4] == ret_sp {
+            return Some(m.snapshot());
+        }
         if m.cpu.s[1] == cs {
-            if m.cpu.ip == ret && m.cpu.r[4] == sp.wrapping_add(2) {
-                return Some(m.snapshot());
-            }
             seen.insert(m.cpu.ip);
         }
         if let f1gp_machine::cpu::Event::Callback(_) = m.cpu.step(&mut m.hw) {
@@ -1013,6 +1052,96 @@ fn made_up_point(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
 
 /// A made-up call of the segment walk: its bands' lengths, its direction, the road drawn as
 /// polygons or not, the mirror's flag and the camera's segment at random; some walks long enough
+/// A car's call (A30A, or one of its parts' in its place): its parts' flags (+9A bits 5 to 7)
+/// and heading at random, its place about the camera often; for a part, which (DI, and BX its
+/// table entry), and the place kept at G:350D near the car's.
+fn made_up_car(m: &mut Machine, off: u16, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp, si) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5], m.cpu.r[6]);
+    let at = |o: u16| lin(ss, bp.wrapping_add(o));
+    let put = |m: &mut Machine, a: u32, v: i32| m.hw.wr16(a, v as u16);
+    let flags = lin(ds, si.wrapping_add(0x9a)) as usize;
+    let f = [0, 0x80, 0xc0, 0xa0, 0xe0][rng(5) as usize];
+    m.hw.mem[flags] = m.hw.mem[flags] & 0x1f | f;
+    if rng(2) == 0 {
+        m.cpu.r[2] = rng(65536) as u16;
+    }
+    if rng(2) == 0 {
+        for (o, cam) in [(0x10u16, 0x142u16), (0x14, 0x14a)] {
+            let d = match rng(3) {
+                0 => rng(0x800) - 0x400,
+                1 => rng(0x10000) - 0x8000,
+                _ => rng(0x100000) - 0x80000,
+            };
+            let c = rd16(m, at(cam)) as u32 | (rd16(m, at(cam + 2)) as u32) << 16;
+            let v = c.wrapping_add(d as u32);
+            put(m, at(o), v as i32);
+            put(m, at(o + 2), (v >> 16) as i32);
+        }
+    }
+    if off != CAR {
+        let k = rng(5);
+        m.cpu.r[7] = k as u16;
+        m.cpu.r[3] = 0x351b + 16 * k as u16;
+        for (o, f) in [
+            (0x350d, 0x10),
+            (0x350f, 0x12),
+            (0x3511, 0x14),
+            (0x3513, 0x16),
+        ] {
+            let v = rd16(m, at(f)) as i32;
+            put(m, lin(ds, o), v);
+        }
+        let (x, z) = (rng(0x400) - 0x200, rng(0x400) - 0x200);
+        let x0 = rd16(m, lin(ds, 0x350d));
+        put(m, lin(ds, 0x350d), x0 as i32 + x);
+        let z0 = rd16(m, lin(ds, 0x3511));
+        put(m, lin(ds, 0x3511), z0 as i32 + z);
+        put(m, lin(ds, 0x3515), m.cpu.r[1] as i32);
+        put(m, lin(ds, 0x3517), m.cpu.r[2] as i32);
+        let p = rd16(m, at(8)) as i32;
+        put(m, lin(ds, 0x3519), p);
+    }
+}
+
+/// A call into segment 0 (the pose, its sine, the arctangent): the angle or vector at random;
+/// for the pose, the car's place on its segment and the segment's heading, lean and height at
+/// random some of the time, and which way it is placed.
+fn made_up_pose(m: &mut Machine, off: u16, rng: &mut impl FnMut(i32) -> i32) {
+    let wide = |rng: &mut dyn FnMut(i32) -> i32| match rng(5) {
+        0 => rng(16) - 8,
+        1 => [0, 0x8000, 0x7fff, 0xffff][rng(4) as usize],
+        2 => rng(0x800) - 0x400,
+        _ => rng(65536),
+    };
+    match off {
+        0x03c8 => m.cpu.r[0] = wide(rng) as u16,
+        0x043c => {
+            m.cpu.r[0] = wide(rng) as u16;
+            m.cpu.r[2] = wide(rng) as u16;
+        }
+        _ => {
+            let (es, ds, si, di) = (m.cpu.s[0], m.cpu.s[3], m.cpu.r[6], m.cpu.r[7]);
+            let put = |m: &mut Machine, a: u32, v: i32| m.hw.wr16(a, v as u16);
+            for o in [0xau16, 0x1a, 0x1c, 0x1e, 0x8c] {
+                if rng(3) == 0 {
+                    put(m, lin(ds, si.wrapping_add(o)), wide(rng));
+                }
+            }
+            for o in [0u16, 2, 4, 6, 8, 0x14, 0x34] {
+                if rng(3) == 0 {
+                    put(m, lin(es, di.wrapping_add(o)), wide(rng));
+                }
+            }
+            if rng(3) == 0 {
+                m.hw.mem[lin(es, di.wrapping_add(0x21)) as usize] = rng(256) as u8;
+            }
+            if rng(4) == 0 {
+                m.hw.mem[lin(ds, si.wrapping_add(0x7e)) as usize] ^= 1;
+            }
+        }
+    }
+}
+
 /// A vertex's call (831F): the vertex it mirrors (if it mirrors one) made already projected half
 /// the time, with its record at random (its depth, its flags with 1FAD's shift and the near
 /// bit); the horizon, the scale, the shape's height and the finer coordinates at random some of
@@ -1236,28 +1365,54 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
     let mut seen = std::collections::BTreeSet::new();
     let mut failed = false;
     std::panic::set_hook(Box::new(|_| {}));
-    for o in ours()
-        .iter()
-        .filter(|o| o.near && (which == "all" || which == o.name))
-    {
+    for o in ours().iter().filter(|o| which == "all" || which == o.name) {
+        let borrow = BORROW.iter().find(|b| (b.0, b.1) == (o.seg, o.off));
         // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
-        let calls: Vec<Call> = if [
+        let calls: Vec<Call> = if let Some(b) = borrow {
+            snaps
+                .iter()
+                .flat_map(|s| calls_in(s, b.0, b.2, b.3))
+                .collect()
+        } else if [
             GROUND, BITMAP, POINT, POINT_NEAR, PROJECT, WALK, WALK_PITS, HAZE, SHAPE, VERTEX, POLE,
+            CAR, PARKED,
         ]
         .contains(&o.off)
+            || o.seg == 0
         {
             snaps
                 .iter()
-                .flat_map(|s| calls_in(s, o.seg, o.off, true))
+                .flat_map(|s| calls_in(s, o.seg, o.off, o.near))
                 .collect()
         } else {
-            calls_in(&snaps[0], o.seg, o.off, true)
+            calls_in(&snaps[0], o.seg, o.off, o.near)
         };
+        if calls.is_empty() {
+            println!("{}: no calls to start from", o.name);
+            continue;
+        }
         let (mut same, mut faults) = (0, 0);
         for t in 0..trials {
             let mut m = Machine::new();
             m.restore(&calls[t % calls.len()].before);
-            if o.off == GROUND {
+            if borrow.is_some() {
+                m.cpu.ip = o.off;
+            }
+            if o.seg == 0 {
+                made_up_pose(&mut m, o.off, &mut rng);
+            } else if o.off == PARKED {
+                // which car, sometimes the camera's
+                let ds = m.cpu.s[3];
+                let own = rd16(&m, lin(ds, 0x97f)).wrapping_add(0x25);
+                let car = if rng(2) == 0 {
+                    m.hw.mem[lin(ds, own) as usize] as i32
+                } else {
+                    1 + rng(26)
+                };
+                m.hw.wr16(lin(ds, 0x356b), car as u16);
+            } else if o.off == CAR || borrow.is_some() {
+                made_up_car(&mut m, o.off, &mut rng);
+            } else if o.off == GROUND {
                 made_up_ground(&mut m, &mut rng);
             } else if o.off == BITMAP {
                 made_up_bitmap(&mut m, &mut rng);
@@ -1285,12 +1440,26 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
             let flag = lin(m.cpu.s[2], 0xc0) as usize;
             m.hw.mem[flag] = 0;
             let start = m.snapshot();
-            let game = game_near(&start, &mut seen);
+            // (the footprint is the renderer's segment's alone)
+            let mut elsewhere = std::collections::BTreeSet::new();
+            let game = game_near(
+                &start,
+                o.near,
+                if o.seg == SEG {
+                    &mut seen
+                } else {
+                    &mut elsewhere
+                },
+            );
             let ours = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut m = Machine::new();
                 m.restore(&start);
                 o.run(&mut m);
-                m.ret();
+                if o.near {
+                    m.ret();
+                } else {
+                    m.retf();
+                }
                 m
             }))
             .ok();

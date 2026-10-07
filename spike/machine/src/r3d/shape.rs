@@ -30,7 +30,7 @@ fn shr(v: u16, n: u16) -> u16 {
 }
 
 /// The sine table (SS:3264) at an angle's size.
-fn sine(c: &Cpu, a: u16) -> u16 {
+pub(super) fn sine(c: &Cpu, a: u16) -> u16 {
     let a = if (a as i16) < 0 { a.wrapping_neg() } else { a };
     c.ss((a >> 2 & 0xfffe).wrapping_add(0x3264))
 }

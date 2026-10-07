@@ -6,6 +6,7 @@
 
 pub mod bitmap;
 pub mod blocks;
+pub mod cars;
 pub mod edge;
 pub mod fill;
 pub mod ground;
