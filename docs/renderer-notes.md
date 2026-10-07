@@ -133,6 +133,33 @@ For each segment with a cross-section the walk writes a 16-byte record
 outcode}, the output of the projection 0F47:20D9. SC; DT (decoded in every
 capture).
 
+### Rewritten
+
+The walk, the cross-sections and the projection are rewritten in Rust and
+exact (`spike/machine/src/r3d/`: `walk.rs`, `section.rs`, `track.rs`,
+`point.rs`), checked call by call against the game's code in the 176 caught
+frames and on made-up calls (`r3d calls`, `r3d fuzz`):
+
+- **The walk** (3B32 to 49BF, its loops 343A to 3AAA, the pit lane's walk
+  3AAB): bands from far to near (R:01E2, 01DE, 01DA, 01D6: the edges only,
+  fences, kerbs, everything), each band's cross-sections by the builder entry
+  it sets at R:0020 (3181, 2F7C, 2D12, 2A04), then behind the camera (R:01D2,
+  and for the road drawn as polygons R:01CE, 01CA, 01C6). It writes the strip
+  records at [bp+2C], object list entries at [bp+24] (R:0066 the segment's
+  count, R:0064, ES:DI) and crests at [bp+28]. When the strip list fills
+  (R:00EE) or the walk meets R:0124, the loops leave by resetting SP from
+  R:0132 and going to the forward walk's tail (41CE), whichever way the walk
+  was going; the reverse walk's copies of that code are never reached. Every
+  walk in the caught frames and 3,000 made-up ones match; 96% of its code ran.
+- **The cross-section** (2445 to 32C2, entered at 2A04, 2D12, 2F7C or 3181
+  and run to its end) and its helpers: the raised fence top (2334), the
+  crests (279E, 28D1, with the square root 0000:024E), the ground's profile
+  points for the texture (78C1), the strip's colours (32C3), its edge flags
+  (3306) and the ground's shade nibbles (226B). Every call matches.
+- **The projection** (20D9, 20AB, 2168, with 1FAD for a column whose divide
+  overflows): every call and 60,000 made-up ones match; every reachable
+  instruction ran.
+
 ## 3. The cross-section
 
 ### Points

@@ -570,7 +570,9 @@ at any resolution.
    place, the game's own code runs 19–26% of the 3D routine's instructions;
    most of the rest is objects (0F47:9E2A: shapes, effects, bitmaps).
    The bitmap drawer (0F47:19E8, `bitmap.rs`) is next and exact: with it the
-   game's code runs 14–16%.
+   game's code runs 14–16%. Then the segment walk with its cross-sections
+   and the projection (`walk.rs`, `section.rs`, `track.rs`, `point.rs`):
+   11%, and about half of the routine's code is now ours.
 4. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
    projection, each checked the same way, until the whole routine is ours.
 5. **Sharper and smoother:** the same rules at a higher resolution and with
