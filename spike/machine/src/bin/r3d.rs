@@ -212,6 +212,190 @@ fn footprint(out: &Path) {
     }
 }
 
+/// The polygon filler (0F47:0999, a far routine): R:000C/R:0010 its list of 4-byte entries (a
+/// flags word, a pointer to a 10-byte edge record), R:0640 its mode, R:02F4 its colour.
+const FILL: u16 = 0x0999;
+
+/// One call of a routine: the state before it, and after the game's own code ran it alone.
+struct Call {
+    before: Snapshot,
+    after: Snapshot,
+}
+
+/// Every call of the routine at SEG:`off` (a far routine) while the 3D routine draws a caught
+/// frame: the state before each, and after the game's code.
+fn calls_in(snap: &Snapshot, off: u16) -> Vec<Call> {
+    let at = lin(SEG + IMAGE, off);
+    let mut m = Machine::new();
+    m.restore(snap);
+    let old = m.hook(at, HOOKS + 2);
+    let mut calls = Vec::new();
+    let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
+    m.call_far(cs, ip, 50_000_000, &mut |m, _| {
+        m.cpu.ip = m.cpu.ip.wrapping_sub(3);
+        m.unhook(at, old);
+        let mut before = m.snapshot();
+        before.mem[at as usize..at as usize + 3].copy_from_slice(&old);
+        m.call_far(SEG + IMAGE, off, 5_000_000, &mut |_, n| {
+            panic!("hook {n:02x}")
+        })
+        .unwrap();
+        calls.push(Call {
+            before,
+            after: m.snapshot(),
+        });
+        m.hook(at, HOOKS + 2);
+        m.retf();
+    })
+    .unwrap();
+    calls
+}
+
+/// The filler's calls in the first `frames` caught frames: what each was given and what it wrote.
+fn fill_calls(out: &Path, frames: usize) {
+    for p in caught(out).into_iter().take(frames) {
+        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+        let calls = calls_in(&snap, FILL);
+        println!(
+            "{}: {} calls",
+            p.file_name().unwrap().to_string_lossy(),
+            calls.len()
+        );
+        for (i, c) in calls.iter().enumerate() {
+            let mem = &c.before.mem;
+            let w = |a: u32| mem[a as usize] as u16 | (mem[a as usize + 1] as u16) << 8;
+            let r = c.before.cpu.s[3];
+            let rw = |o: u16| w(lin(r, o));
+            let (start, end) = (rw(0x10), rw(0x0c));
+            let mut entries = String::new();
+            let mut e = start;
+            while e != end && entries.len() < 400 {
+                let rec = rw(e + 2);
+                entries += &format!(
+                    " [{:02x} {},{} {},{}]",
+                    rw(e),
+                    rw(rec) as i16,
+                    rw(rec + 2) as i16,
+                    rw(rec + 4) as i16,
+                    rw(rec + 6) as i16
+                );
+                e = e.wrapping_add(4);
+            }
+            let bb = {
+                let ss = c.before.cpu.s[2];
+                let rr = w(lin(ss, 0xf4));
+                lin(w(lin(rr, 0x1e)), w(lin(rr, 0x1c))) as usize
+            };
+            let rows: Vec<usize> = (0..200)
+                .filter(|y| {
+                    c.before.mem[bb + y * 320..bb + y * 320 + 320]
+                        != c.after.mem[bb + y * 320..bb + y * 320 + 320]
+                })
+                .collect();
+            let px = (bb..bb + FRAME)
+                .filter(|&a| c.before.mem[a] != c.after.mem[a])
+                .count();
+            println!(
+                "  {i:3}: colour {:02x} mode {:04x}{} -> {} px, rows {:?}..{:?}",
+                mem[lin(r, 0x2f4) as usize],
+                rw(0x640),
+                entries,
+                px,
+                rows.first(),
+                rows.last()
+            );
+        }
+    }
+}
+
+/// The filler's calls in the first `frames` caught frames as JSON lines, for working out its rules:
+/// what each was given (mode, colour, edges: flags and record words) and every pixel it wrote,
+/// found by running it on two backgrounds (a pixel the same after both was written), as runs
+/// [row, first x, last x, colour] (a run is a row's pixels of one colour, side by side).
+fn dump_fills(out: &Path, frames: usize, file: &Path) {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(file).unwrap());
+    let mut n = 0;
+    for p in caught(out).into_iter().take(frames) {
+        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+        for c in calls_in(&snap, FILL) {
+            let mem = &c.before.mem;
+            let w = |a: u32| mem[a as usize] as u16 | (mem[a as usize + 1] as u16) << 8;
+            let r = c.before.cpu.s[3];
+            let rw = |o: u16| w(lin(r, o));
+            let (start, end) = (rw(0x10), rw(0x0c));
+            let mut edges = Vec::new();
+            let mut e = start;
+            while e != end && edges.len() < 64 {
+                let rec = rw(e + 2);
+                // the record: rows (first, last), x at each end, then a word and the x of each row
+                let (y0, y1) = (rw(rec) as i16, rw(rec + 2) as i16);
+                let rows = (y0 - y1).clamp(0, 200) as u16;
+                let xs: Vec<String> = (0..=rows)
+                    .map(|k| (rw(rec + 8 + 2 * k) as i16).to_string())
+                    .collect();
+                edges.push(format!(
+                    "[{},{},{},{},{},{},[{}]]",
+                    rw(e),
+                    rec,
+                    y0,
+                    y1,
+                    rw(rec + 4) as i16,
+                    rw(rec + 6) as i16,
+                    xs.join(",")
+                ));
+                e = e.wrapping_add(4);
+            }
+            let ss = c.before.cpu.s[2];
+            let rr = w(lin(ss, 0xf4));
+            let bb = lin(w(lin(rr, 0x1e)), w(lin(rr, 0x1c))) as usize;
+            // the filler alone on two backgrounds
+            let mut outs = Vec::new();
+            for bg in [0x00u8, 0xff] {
+                let mut m = Machine::new();
+                m.restore(&c.before);
+                m.hw.mem[bb..bb + FRAME].fill(bg);
+                let (cs, ip) = (m.cpu.s[1], m.cpu.ip);
+                m.call_far(cs, ip, 5_000_000, &mut |_, n| panic!("hook {n:02x}"))
+                    .unwrap();
+                outs.push(m.hw.mem[bb..bb + FRAME].to_vec());
+            }
+            let mut runs = Vec::new();
+            for y in 0..200 {
+                let mut x = 0;
+                while x < 320 {
+                    let i = y * 320 + x;
+                    if outs[0][i] == outs[1][i] {
+                        let v = outs[0][i];
+                        let x0 = x;
+                        while x < 320
+                            && outs[0][y * 320 + x] == outs[1][y * 320 + x]
+                            && outs[0][y * 320 + x] == v
+                        {
+                            x += 1;
+                        }
+                        runs.push(format!("[{y},{x0},{},{v}]", x - 1));
+                    } else {
+                        x += 1;
+                    }
+                }
+            }
+            writeln!(
+                f,
+                "{{\"frame\":\"{}\",\"mode\":{},\"colour\":{},\"edges\":[{}],\"runs\":[{}]}}",
+                p.file_stem().unwrap().to_string_lossy(),
+                rw(0x640),
+                mem[lin(r, 0x2f4) as usize],
+                edges.join(","),
+                runs.join(",")
+            )
+            .unwrap();
+            n += 1;
+        }
+    }
+    println!("{n} calls to {}", file.display());
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -224,6 +408,11 @@ fn main() {
         ),
         Some("check") => check(Path::new(&a[2])),
         Some("footprint") => footprint(Path::new(&a[2])),
+        Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
+        Some("fills") => fill_calls(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(1),
+        ),
         _ => eprintln!("r3d capture <files> <session> <out> [every] [count] | r3d check <out>"),
     }
 }

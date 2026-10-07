@@ -447,6 +447,25 @@ Rows are viewport rows; SS:0130 is the horizon row.
   bit 15 and works with 8× finer coordinates; 20D9 then shifts dz 3 bits
   more. SC.
 
+### The polygon filler (0F47:0999)
+
+A far routine (callers `push cs; call 0999`, 27 places), studied on our PC: each call caught with
+the state before it and the pixels it writes, found by running it alone on two backgrounds
+(`spike/machine/src/bin/r3d.rs`, modes `fills` and `dumpfills`; 4,212 calls in 58 Monza frames).
+
+- **Its input** is a list of 4-byte entries from R:0010 up to R:000C: a flags word and a pointer to
+  an edge record. R:0640 is the mode, R:02F4 the colour. DT.
+- **An edge record** (at R:B458 and on) is the edge's first and last rows (the first is the lower
+  row, the larger y; the last row is drawn, the first is not), its x at each end, then the x of
+  each row it covers, from the first row less one up to the last, ending with 8000h. So the edge
+  rasteriser rounds each row's x before the filler runs; the filler does no arithmetic on edges. DT.
+- **The fill:** each row from the left side's x (drawn) to the right side's x (not drawn), in the
+  colour. Edges flagged 40h are on the right side, the others on the left. This alone gives the
+  exact pixels of 3,540 of the 4,212 calls (84%). DT.
+- **Not decoded yet:** the other 16%, polygons with edges on the screen's borders (x 0 or 320,
+  row 164; the flags' low bits and the mode's low nibble) and some with several edges a side,
+  which 0F47:0A86–0D25 handle; and how the edge code (0F47:0000–0998) rounds each row's x.
+
 ## 8. The palette
 
 - The live 256-colour palette is the 768-byte buffer **SS:05DA** (6-bit RGB).
@@ -507,6 +526,7 @@ at Monza, bundle `dist/p2-static-25000.jsdos`):
   bitmap ids; and the purpose of setting fields +02, +0A, +0E.
 - What 0F47:8261 changes on the viewed car, and 0F47:A737.
 - Where the per-circuit shade ramps 10h–1Fh are computed.
+- The polygon filler's border cases, and the edge code's rounding (section 7).
 
 ## Objects: shapes and placement (decoded)
 
