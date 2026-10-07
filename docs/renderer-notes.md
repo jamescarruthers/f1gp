@@ -36,7 +36,7 @@ Addresses and evidence codes follow `docs/memory-map.md`. In addition:
 
 | Step | Routine | What it does | Evidence |
 | --- | --- | --- | --- |
-| 1 | 8261 | Temporarily patches two bytes (+24, +52) of the viewed car's shape record; 82CC restores them at the end. Purpose unknown. | SC |
+| 1 | 8261 | In the pits, sets the fence colour codes (+24, +52) of the viewed car's pit box to 1 (red) on one side; 82CC puts them back at the end ("Routine 0F47:8261" below). | SC |
 | 2 | 18E1 | SS:01AF = colour 12h (grass), SS:01AE = colour 1Ah (road). When wet (SS:122E ≠ 0) and SS:0184 > 0 both go through a darkening table (7BCE:7BC0, level SS:0184 − 1). | SC |
 | 3 | A783 | SS:01B4 = 1C0h when the viewed car is in the pit lane and well off its centre line. | SC |
 | 4 | 49C0 | Sets R:00FA, the "road drawn as a polygon" mode (section 5). | SC |
@@ -46,10 +46,23 @@ Addresses and evidence codes follow `docs/memory-map.md`. In addition:
 | 8 | 72BE | **Sky gradient, horizon image, far ground** (section 5). | SC, DT |
 | 9 | 4C12 | Turns projected points into clipped screen edges (section 7). | SC |
 | 10 | 802A | **Draws** block by block, far to near: a road-coloured row band, then 5470 (white lines, road markings, grass) and 6425 (fences, kerbs, objects, cars) for the block's segments. Then the remaining objects (541B), then the ground texture (7F64, when the T option is on), then cockpit parts. | SC, DT |
-| 11 | A737, 82CC | Tidy-up. | SC |
+| 11 | A737, 82CC | Takes the cars off their segments; puts the pit box's colour codes back. | SC |
 
 Between steps the renderer calls `lcall 19ED:008C`, the same service the main
-loop calls; it is not part of drawing.
+loop calls; it is not part of drawing. It services the sound driver (far
+8D10:0000, as patched into 19ED:0098, with AX 7) when there is one (SS:08DA).
+
+### Rewritten
+
+The whole routine is rewritten in Rust and exact (`spike/machine/src/r3d/`,
+`frame.rs` at the top): from the state each of the 176 caught frames (Monza,
+Monaco, Germany) starts in, it leaves the same memory and registers as the
+game's routine, and with it in place the game's own code runs none of the
+3D view. Each routine it calls is also checked on its own, call by call and
+on made-up calls (`r3d calls`, `r3d fuzz`). The sound driver's calls run in
+the machine: the driver is not the renderer's. In these frames BP is 0, so
+SS:[bp+X] and SS:X are the same word.
+
 
 The renderer draws into the back buffer at 50BA (the far pointer R:001C, used
 by the sky and horizon routines, held 50BA:0000 in our dumps; 19ED:31FA copies
@@ -435,6 +448,14 @@ Rows are viewport rows; SS:0130 is the horizon row.
   file in every capture; the best-matching column offset equals the formula
   in 4 of 4 tested frames; parts of the image are covered by later polygons
   and objects).
+- **Below the cockpit's top** (SS:0132) a row is filled only where the
+  cockpit is open (19ED:3181): two spans a row from tables at SS:6364 (the
+  row's start; 0 for none), SS:6556 to SS:640A and SS:64B0 to SS:65FC. SC
+  (the rewrite, `screen.rs`).
+- **The horizon image near the top**: with the horizon within 8 rows of the
+  view's top, 39ED skips the rows above by their count, not their bytes, and
+  its MUL clears DX, which then caps the strip at row 0: none of it is drawn.
+  SC (the rewrite).
 - **Far ground** (0F47:72BE): from the horizon row down to the far road,
   filled with the grass colour SS:01AF, or with the road colour SS:01AE when
   the track header's "surrounding" byte has bit 7 (Phoenix, Montreal).

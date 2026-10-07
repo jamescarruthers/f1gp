@@ -575,11 +575,13 @@ at any resolution.
    11%, and about half of the routine's code is now ours. Then the road's
    blocks, strips and polygons (`blocks.rs`, `strips.rs`, `road.rs`), the
    shapes (`shape.rs`), the cars (`cars.rs`) and the objects with their sort,
-   the fences and the pit lane (`scene.rs`): 4.1–5.3%. What is left is the
-   top of the routine (81CE, 802A), the sky and horizon (72BE, segment 19ED)
-   and some small routines around them.
-4. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
-   projection, each checked the same way, until the whole routine is ours.
+   the fences and the pit lane (`scene.rs`): 4.1–5.3%.
+4. **The whole routine (done).** With the top (`frame.rs`: 81CE, 802A, the
+   sky, the cars on their segments, the cockpit's parts) and segment 19ED's
+   part (`screen.rs`), the whole 3D routine is ours: all 176 caught frames
+   come out with the same memory and registers as the game's, and the game's
+   own code runs none of it. Next it runs in the page, in place of the
+   game's routine, in the WebAssembly machine.
 5. **Sharper and smoother:** the same rules at a higher resolution and with
    the camera eased between frames, rasterised in WebGPU compute shaders; the
    WebGL view stays for browsers without WebGPU.
