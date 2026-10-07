@@ -380,7 +380,10 @@ const WALK_PITS: u16 = 0x3aab;
 
 type Port = (&'static str, u16, u16, bool, fn(&mut r3d::regs::Cpu));
 
-const TRACK: [Port; 16] = [
+const TRACK: [Port; 19] = [
+    ("mode", SEG, 0x49c0, true, r3d::blocks::mode),
+    ("blocks", SEG, 0x4a03, true, r3d::blocks::blocks),
+    ("strips", SEG, 0x4c12, true, r3d::strips::strips),
     ("walk", SEG, WALK, true, r3d::walk::walk),
     ("walkpits", SEG, WALK_PITS, true, r3d::walk::walk_pits),
     ("walls", SEG, 0x2a04, true, |c| {

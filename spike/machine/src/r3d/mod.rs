@@ -5,12 +5,14 @@
 //! picture drawn by us, then drawn sharper and smoother.
 
 pub mod bitmap;
+pub mod blocks;
 pub mod edge;
 pub mod fill;
 pub mod ground;
 pub mod point;
 pub mod regs;
 pub mod section;
+pub mod strips;
 pub mod track;
 pub mod walk;
 
