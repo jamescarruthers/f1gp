@@ -1,12 +1,13 @@
 //! The machine's pieces outside the CPU: DOS's wildcard matching and files, EMS
 //! mapping, the timer's rate and reads, the interrupt controller, a small program
-//! run end to end (it prints through DOS and exits with a code).
+//! run end to end (it prints through DOS and exits with a code), hooks on a routine, a routine
+//! run alone, snapshots.
 //!
 //!   cargo test --release
 
 use f1gp_machine::devices::{Pic, Pit, PIT_HZ};
 use f1gp_machine::dos::wild_match;
-use f1gp_machine::pc::Machine;
+use f1gp_machine::pc::{Machine, HOOKS};
 
 #[test]
 fn dos_wildcards() {
@@ -131,4 +132,72 @@ fn find_first_and_next_in_a_folder() {
     let dta = (0x0192usize << 4) + 0x80;
     assert_eq!(&m.hw.mem[dta + 0x1e..dta + 0x1e + 5], b"B.SAV");
     assert_eq!(m.hw.rd16((dta + 0x1a) as u32), 20);
+}
+
+/// A .COM that calls a far routine twice (add ax,5; retf) and exits with AL: 1 + 5 + 5 = 11.
+fn far_calls() -> Vec<u8> {
+    vec![
+        0xb8, 0x01, 0x00, // 100 mov ax,1
+        0x0e, 0xe8, 0x09, 0x00, // 103 push cs; call 0110
+        0x0e, 0xe8, 0x05, 0x00, // 107 push cs; call 0110
+        0xb4, 0x4c, 0xcd, 0x21, // 10B mov ah,4Ch; int 21h
+        0x90, // 10F
+        0x05, 0x05, 0x00, 0xcb, // 110 add ax,5; retf
+    ]
+}
+
+#[test]
+fn a_hook_stops_the_machine_and_rust_does_the_routine() {
+    let mut m = Machine::new();
+    m.add_file("F.COM", far_calls());
+    m.start("F.COM", "").unwrap();
+    m.run(0.0);
+    assert_eq!(m.exited, None);
+    let at = ((m.cpu.s[1] as u32) << 4) + 0x110;
+    let old = m.hook(at, HOOKS);
+    let mut hits = 0;
+    let target = m.hw.now + 10_000.0;
+    while let Some(n) = m.run_until(target) {
+        assert_eq!(n, HOOKS);
+        assert_eq!(m.cpu.ip, 0x113);
+        hits += 1;
+        m.cpu.r[0] += 100; // the routine's work, in Rust
+        m.retf();
+    }
+    m.unhook(at, old);
+    assert_eq!(hits, 2);
+    assert_eq!(m.exited, Some(201));
+}
+
+#[test]
+fn a_routine_runs_alone_and_a_snapshot_comes_back() {
+    let mut m = Machine::new();
+    m.add_file("F.COM", far_calls());
+    m.start("F.COM", "").unwrap();
+    let before = m.snapshot();
+    m.cpu.r[0] = 7;
+    let cs = m.cpu.s[1];
+    let n = m
+        .call_far(cs, 0x110, 100, &mut |_, n| panic!("hook {n:02x}"))
+        .unwrap();
+    assert_eq!((n, m.cpu.r[0]), (2, 12));
+    // a routine that does not return in time is an error
+    m.hook(((cs as u32) << 4) + 0x113, HOOKS);
+    let mut seen = 0;
+    assert!(m
+        .call_far(cs, 0x110, 100, &mut |m, _| {
+            seen += 1;
+            m.cpu.ip = 0x110;
+        })
+        .is_err());
+    assert!(seen > 0);
+    m.restore(&before);
+    assert_eq!(m.cpu.r[0], before.cpu.r[0]);
+    let bytes = before.to_bytes();
+    let back = f1gp_machine::pc::Snapshot::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        (back.cpu.r, back.cpu.s, back.cpu.ip, back.cpu.flags),
+        (before.cpu.r, before.cpu.s, before.cpu.ip, before.cpu.flags)
+    );
+    assert_eq!(back.mem, before.mem);
 }
