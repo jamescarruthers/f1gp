@@ -13,9 +13,9 @@
 //!       compares the frame it leaves with the one caught
 //!   r3d profile <out dir>
 //!       where the routine's instructions go, routine by routine
-//!   r3d calls <out dir> [fill|edge|border|ground|bitmap|all] [frames]
+//!   r3d calls <out dir> [fill|edge|border|ground|bitmap|point|pointnear|project|all] [frames]
 //!       our routines (OURS) against the game's, call by call
-//!   r3d fuzz <out dir> [edge|border|ground|bitmap|all] [trials 20000]
+//!   r3d fuzz <out dir> [edge|border|ground|bitmap|point|pointnear|project|all] [trials 20000]
 //!       our near routines against the game's on made-up calls
 //!   r3d ours <out dir>
 //!       each caught frame drawn with our routines in place of the game's, against the one caught
@@ -299,7 +299,7 @@ fn profile(out: &Path) {
     println!(
         "{total} instructions; routine (image-relative), calls, with callees, own, top callers"
     );
-    for ((seg, off), r) in v.iter().take(70) {
+    for ((seg, off), r) in v.iter() {
         let mut c: Vec<_> = r.callers.iter().collect();
         c.sort_by(|a, b| b.1.cmp(a.1));
         let callers: Vec<String> = c
@@ -343,7 +343,20 @@ const GROUND: u16 = 0x7f64;
 /// The bitmap drawer (0F47:19E8), a near routine.
 const BITMAP: u16 = 0x19e8;
 
-const OURS: [Ours; 5] = [
+/// The point projection's entries (0F47:20D9 a world point, 20AB one near the camera, 2168 one
+/// already in the view), near routines that leave their results in registers too.
+const POINT: u16 = 0x20d9;
+const POINT_NEAR: u16 = 0x20ab;
+const PROJECT: u16 = 0x2168;
+
+/// Run a port that sets registers as the game's routine does.
+fn with_regs(m: &mut Machine, f: impl FnOnce(r3d::Mem, &mut [u16; 8])) {
+    let mut r = m.cpu.r;
+    f(r3d::Mem::of(m), &mut r);
+    m.cpu.r = r;
+}
+
+const OURS: [Ours; 8] = [
     Ours {
         name: "fill",
         off: FILL,
@@ -396,6 +409,28 @@ const OURS: [Ours; 5] = [
         run: |m| {
             let r = m.cpu.r;
             r3d::bitmap::bitmap(r3d::Mem::of(m), r[5], r[0], r[1], r[2]);
+        },
+    },
+    Ours {
+        name: "point",
+        off: POINT,
+        near: true,
+        run: |m| with_regs(m, |m, r| r3d::point::point(m, r, r3d::point::Entry::World)),
+    },
+    Ours {
+        name: "pointnear",
+        off: POINT_NEAR,
+        near: true,
+        run: |m| with_regs(m, |m, r| r3d::point::point(m, r, r3d::point::Entry::Near)),
+    },
+    Ours {
+        name: "project",
+        off: PROJECT,
+        near: true,
+        run: |m| {
+            with_regs(m, |m, r| {
+                r3d::point::point(m, r, r3d::point::Entry::Projected)
+            })
         },
     },
 ];
@@ -809,6 +844,75 @@ fn made_up_bitmap(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
     }
 }
 
+/// A made-up call of the point projection: the point (32-bit at SS:[bp+10] and [bp+14]), its
+/// height, the camera's position and heading, and the finer coordinates (R:02A4) at random;
+/// some points at the camera, some just off its axis, some far to the side.
+fn made_up_point(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, ds, bp) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r[5]);
+    let put = |m: &mut Machine, o: u16, v: i32| m.hw.wr16(lin(ss, bp.wrapping_add(o)), v as u16);
+    let wide = |rng: &mut dyn FnMut(i32) -> i32| match rng(4) {
+        0 => rng(16) - 8,
+        1 => rng(0x800) - 0x400,
+        _ => rng(65536),
+    };
+    for o in [0x10, 0x12, 0x14, 0x16] {
+        if rng(3) != 0 {
+            let v = wide(rng);
+            put(m, o, v);
+        }
+    }
+    if rng(4) == 0 {
+        // the point exactly where the camera is
+        for o in [0x10, 0x12] {
+            put(m, o, 0);
+        }
+        let (x, z) = (
+            rd16(m, lin(ss, bp.wrapping_add(0x13c))),
+            rd16(m, lin(ss, bp.wrapping_add(0x140))),
+        );
+        if rng(2) == 0 {
+            put(m, 0x10, x as i32);
+            put(m, 0x14, z as i32);
+        }
+    }
+    if rng(2) == 0 {
+        m.cpu.r[0] = wide(rng) as u16;
+    }
+    if rng(2) == 0 {
+        m.cpu.r[1] = wide(rng) as u16;
+    }
+    if rng(4) == 0 {
+        let a = rng(65536);
+        put(m, 0x154, a);
+        put(m, 0x156, rng(65536));
+        put(m, 0x8, rng(65536));
+        put(m, 0xc, rng(65536));
+    }
+    if rng(4) == 0 {
+        put(m, 0x17c, rng(65536));
+    }
+    let depth = 8 + rng(200);
+    match rng(8) {
+        0 => {
+            // a column within 160 of the largest (2168's add overflows)
+            let q = 0x7f60 + rng(0xa0);
+            let v = (q * depth) as u32;
+            put(m, 0x10, v as i32 & 0xffff);
+            put(m, 0x12, (v >> 16) as i32);
+            put(m, 0x14, depth);
+        }
+        1 => {
+            // a point far to the side whose doubling ends on 3800h exactly (1FAD)
+            let v = (0x3800_0000u32 >> rng(12)) as i32 * if rng(2) == 0 { 1 } else { -1 };
+            put(m, 0x10, v & 0xffff);
+            put(m, 0x12, v >> 16);
+            put(m, 0x14, depth);
+        }
+        _ => {}
+    }
+    m.hw.wr16(lin(ds, 0x2a4), (rng(2) * 0x8000) as u16);
+}
+
 /// A made-up call of the ground texture: the view, the camera car's heading, speed and yaw
 /// rate, the horizon, the texture's top row and the ground points' list end changed at random.
 fn made_up_ground(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
@@ -845,7 +949,8 @@ fn made_up_ground(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
 }
 
 /// Our near routines against the game's on made-up calls: `trials` of each, from caught calls
-/// with their input changed at random (made_up_edge, made_up_ground, made_up_bitmap), so that the paths races
+/// with their input changed at random (made_up_edge, made_up_ground, made_up_bitmap,
+/// made_up_point), so that the paths races
 /// rarely take are run too. Both must leave the same memory and registers. The offsets of the game's instructions
 /// run go to FOOTPRINT_OUT if set.
 fn fuzz(out: &Path, which: &str, trials: usize) {
@@ -869,7 +974,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
         .filter(|o| o.near && (which == "all" || which == o.name))
     {
         // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
-        let calls: Vec<Call> = if o.off == GROUND || o.off == BITMAP {
+        let calls: Vec<Call> = if [GROUND, BITMAP, POINT, POINT_NEAR, PROJECT].contains(&o.off) {
             snaps
                 .iter()
                 .flat_map(|s| calls_in(s, o.off, true))
@@ -885,6 +990,8 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
                 made_up_ground(&mut m, &mut rng);
             } else if o.off == BITMAP {
                 made_up_bitmap(&mut m, &mut rng);
+            } else if [POINT, POINT_NEAR, PROJECT].contains(&o.off) {
+                made_up_point(&mut m, &mut rng);
             } else {
                 made_up_edge(&mut m, o, &mut rng);
             }

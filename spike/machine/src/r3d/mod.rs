@@ -8,6 +8,7 @@ pub mod bitmap;
 pub mod edge;
 pub mod fill;
 pub mod ground;
+pub mod point;
 
 use crate::pc::Machine;
 
