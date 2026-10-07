@@ -97,9 +97,23 @@ callees, own). `r3d calls <out> [name]` runs our routines (`src/r3d/`; the names
 `src/bin/r3d.rs`, OURS and TRACK) against the game's on every call in the caught frames: the
 same memory (all of it but 1 KB of stack below SP) and registers after each. `r3d fuzz <out>
 [name] [trials]` runs them against the game's on made-up calls, to reach the paths races don't;
-a routine the races never call borrows the calls of one it could stand in for (BORROW). `r3d ours <out>` draws each frame with our routines in place of the game's and
-compares the frames. `fills` and `dumpfills` list the filler's calls, the second with the pixels
-each wrote.
+a routine the races never call borrows the calls of one it could stand in for (BORROW); with
+FOOTPRINT_OUT=<file> it writes the instructions the game's code ran. `r3d ours <out> [names]`
+draws each frame with our routines in place of the game's (the whole frame, 81CE, by default; or
+the ones named, comma-separated) and compares the frames. `fills` and `dumpfills` list the
+filler's calls, the second with the pixels each wrote.
+
+The whole 3D routine is ours (`src/r3d/frame.rs` at the top). `Machine::set_native_3d` runs it in
+place of the game's in a running game (a hook at 81CE, once the game's code is there; the page's
+`r3d=ours` and `lib/pc.mjs` `native3d`): it draws the same picture without the game's 460,000 to
+940,000 emulated instructions a frame, handing over to the game's palette step (19ED:008C) in the
+machine between its steps. `r3d shadow <files> <session>` plays a recorded race with the game's
+routine and draws each frame beside it with ours: all 3,193 frames of the three races are the
+same. `r3d native <files> <session>` plays it with each (the race goes its own way after a while,
+as our frames take none of the game's time; NATIVE_CYCLES=<per ms> runs the race on fewer).
+`probes/p8-r3d-native.mjs` races in the WebAssembly machine: with ours the game keeps 30 frames a
+second at 8,000 cycles a millisecond (the host a third of the time the game's own 3D takes at
+25,000, which it needs for 30).
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`

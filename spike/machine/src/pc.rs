@@ -152,6 +152,12 @@ pub struct Machine {
     pub frame: Vec<u8>,
     /// the hook the CPU reached (`run_until` stops there)
     hit: Option<u8>,
+    /// the game's 3D routine replaced by ours (src/r3d/frame.rs) in `run`
+    native_3d: bool,
+    /// our frame's step to go on with when the palette step it handed over to returns
+    native_next: Option<u8>,
+    /// the frames our 3D routine has drawn
+    pub native_frames: u64,
 }
 
 /// The CPU's registers and the memory: a point to come back to (`Machine::restore`), or to save.
@@ -230,6 +236,9 @@ impl Machine {
             exited: None,
             frame: vec![0; 320 * 200 * 4],
             hit: None,
+            native_3d: false,
+            native_next: None,
+            native_frames: 0,
         };
         m.bios_init();
         m
@@ -328,9 +337,33 @@ impl Machine {
         self.hw.kbd.push(b);
     }
 
-    /// Run for `ms` of emulated time.
+    /// Run for `ms` of emulated time (the 3D view drawn by our routine, if set_native_3d).
     pub fn run(&mut self, ms: f64) {
-        self.run_until(self.hw.now + ms * 1000.0);
+        let target = self.hw.now + ms * 1000.0;
+        loop {
+            if self.native_3d {
+                crate::r3d::frame::native(self, true);
+            }
+            match self.run_until(target) {
+                Some(crate::r3d::frame::HOOK) if self.native_3d => {
+                    self.native_frames += 1;
+                    self.native_next =
+                        crate::r3d::frame::step(self, 0, crate::r3d::frame::Service::Handover);
+                }
+                Some(crate::r3d::frame::RESUME) if self.native_next.is_some() => {
+                    let from = self.native_next.take().unwrap();
+                    self.native_next =
+                        crate::r3d::frame::step(self, from, crate::r3d::frame::Service::Handover);
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// Draw the game's 3D view with our routine (src/r3d/), or with the game's own code.
+    pub fn set_native_3d(&mut self, on: bool) {
+        self.native_3d = on;
+        crate::r3d::frame::native(self, on);
     }
 
     /// Run to the emulated time `target` (µs), or until the CPU reaches a hook: then the hook's

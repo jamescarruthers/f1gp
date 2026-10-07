@@ -1794,7 +1794,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
 /// Each caught frame drawn with our routines in place of the game's (through hooks: the Rust
 /// does the work and returns), against the frame caught: the same 64,000 bytes, and the
 /// instructions the game's code still ran.
-fn ours_check(out: &Path) {
+fn ours_check(out: &Path, names: &str) {
     let (mut same, mut total) = (0, 0);
     let (mut theirs, mut left) = (0u64, 0u64);
     for p in caught(out) {
@@ -1805,7 +1805,16 @@ fn ours_check(out: &Path) {
         theirs += n_game;
         let mut m = Machine::new();
         m.restore(&snap);
-        let all = ours();
+        let all: Vec<Ours> = ours()
+            .into_iter()
+            .filter(|o| names == "all" || names.split(',').any(|n| n == o.name))
+            .collect();
+        // one hook number each, below the one call_far returns at
+        assert!(
+            AT_CALL as usize + all.len() <= 0xfd,
+            "{} routines: too many to hook at once",
+            all.len()
+        );
         for (k, o) in all.iter().enumerate() {
             m.hook(lin(o.seg + IMAGE, o.off), AT_CALL + k as u8);
         }
@@ -1843,6 +1852,137 @@ fn ours_check(out: &Path) {
     }
 }
 
+/// The recorded race played twice, with the game's 3D routine and with ours in its place
+/// (Machine::set_native_3d, as the page runs it): the screens after each run compared, and the
+/// time each took. Our routine takes none of the game's time, so the game's frames fall at other
+/// moments and the race goes its own way after a while (`shadow` compares the frames themselves);
+/// NATIVE_SHOTS=<folder> saves every 500th screen of each.
+fn native_check(files: &Path, ops: &str) {
+    let play = |native: bool| {
+        let mut m = session::machine(files, "GP.EXE", " /g");
+        m.set_native_3d(native);
+        let sum = |b: &[u8]| {
+            b.iter()
+                .fold(0u32, |x, &y| x.wrapping_mul(31).wrapping_add(y as u32))
+        };
+        let mut screens = vec![];
+        let mut raced = false;
+        let t = std::time::Instant::now();
+        for op in session::parse(ops) {
+            match op {
+                Op::Cycles(c) => {
+                    if !(native && raced) {
+                        m.cycles_per_ms = c;
+                    }
+                }
+                Op::Key(k) => m.key_byte(k),
+                Op::Write(at, bytes) => m.hw.mem[at..at + bytes.len()].copy_from_slice(&bytes),
+                Op::Mark => {
+                    // the race starts: NATIVE_CYCLES=<per ms> runs it on fewer, with ours
+                    raced = true;
+                    if let (true, Ok(v)) = (native, std::env::var("NATIVE_CYCLES")) {
+                        m.cycles_per_ms = v.parse().unwrap();
+                    }
+                }
+                Op::End(_) => {}
+                Op::Run(ms) => {
+                    m.run(ms);
+                    screens.push(sum(m.render()));
+                    if let Ok(dir) = std::env::var("NATIVE_SHOTS") {
+                        if screens.len() % 500 == 0 {
+                            let png = f1gp_machine::png::encode(m.render(), 320, 200);
+                            let name = format!(
+                                "{}-{:04}.png",
+                                if native { "ours" } else { "game" },
+                                screens.len()
+                            );
+                            std::fs::write(Path::new(&dir).join(name), png).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        (screens, m.native_frames, t.elapsed().as_secs_f64())
+    };
+    let (game, n_game, t_game) = play(false);
+    let (ours, n_ours, t_ours) = play(true);
+    let first = game
+        .iter()
+        .zip(&ours)
+        .position(|(a, b)| a != b)
+        .unwrap_or(game.len());
+    let _ = n_game;
+    println!(
+        "the screens the same for the first {first} of {} runs; the game's 3D: {t_game:.1} s; ours: {t_ours:.1} s, {n_ours} frames drawn",
+        game.len()
+    );
+}
+
+/// The recorded race played with the game's 3D routine; at each of its calls our routine also
+/// draws, from the same state (its palette step left out), and the two frames are compared:
+/// the back buffer each leaves.
+fn shadow_check(files: &Path, ops: &str) {
+    let mut m = session::machine(files, "GP.EXE", " /g");
+    let entry = lin(SEG + IMAGE, ENTRY);
+    let mut entry_old: Option<[u8; 3]> = None;
+    let mut ret: Option<(u32, [u8; 3])> = None;
+    let mut ours: Option<Vec<u8>> = None;
+    let (mut same, mut total, mut shown) = (0, 0, 0);
+    for op in session::parse(ops) {
+        match op {
+            Op::Cycles(c) => m.cycles_per_ms = c,
+            Op::Key(k) => m.key_byte(k),
+            Op::Write(at, bytes) => m.hw.mem[at..at + bytes.len()].copy_from_slice(&bytes),
+            Op::Mark => {
+                let a = entry as usize;
+                assert_eq!(m.hw.mem[a..a + 6], FIRST, "not the routine at {:05x}", a);
+                entry_old = Some(m.hook(entry, AT_ENTRY));
+            }
+            Op::End(_) => {}
+            Op::Run(ms) => {
+                let target = m.hw.now + ms * 1000.0;
+                while let Some(n) = m.run_until(target) {
+                    m.cpu.ip = m.cpu.ip.wrapping_sub(3);
+                    if n == AT_ENTRY {
+                        let old = entry_old.take().unwrap();
+                        m.unhook(entry, old);
+                        // ours, from this state
+                        let mut o = Machine::new();
+                        o.restore(&m.snapshot());
+                        r3d::frame::step(&mut o, 0, r3d::frame::Service::Skip);
+                        let bb = back_buffer(&o) as usize;
+                        ours = Some(o.hw.mem[bb..bb + FRAME].to_vec());
+                        let sp = lin(m.cpu.s[2], m.cpu.r[4]);
+                        let at = lin(rd16(&m, sp + 2), rd16(&m, sp));
+                        ret = Some((at, m.hook(at, AT_RETURN)));
+                    } else if n == AT_RETURN {
+                        let (at, old) = ret.take().unwrap();
+                        m.unhook(at, old);
+                        let bb = back_buffer(&m) as usize;
+                        let theirs = &m.hw.mem[bb..bb + FRAME];
+                        let o = ours.take().unwrap();
+                        total += 1;
+                        let diff = theirs.iter().zip(&o).filter(|(a, b)| a != b).count();
+                        if diff == 0 {
+                            same += 1;
+                        } else if shown < 8 {
+                            shown += 1;
+                            println!("frame {total}: {diff} of 64000 bytes differ");
+                        }
+                        entry_old = Some(m.hook(entry, AT_ENTRY));
+                    } else {
+                        panic!("hook {n:02x}?");
+                    }
+                }
+            }
+        }
+    }
+    println!("{same} of {total} frames the same, ours drawn beside the game's in the whole race");
+    if same != total {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -1856,7 +1996,12 @@ fn main() {
         Some("check") => check(Path::new(&a[2])),
         Some("footprint") => footprint(Path::new(&a[2])),
         Some("profile") => profile(Path::new(&a[2])),
-        Some("ours") => ours_check(Path::new(&a[2])),
+        Some("ours") => ours_check(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.as_str()).unwrap_or("frame"),
+        ),
+        Some("shadow") => shadow_check(Path::new(&a[2]), &std::fs::read_to_string(&a[3]).unwrap()),
+        Some("native") => native_check(Path::new(&a[2]), &std::fs::read_to_string(&a[3]).unwrap()),
         Some("calls") => calls_check(
             Path::new(&a[2]),
             a.get(3).map(|s| s.as_str()).unwrap_or("all"),

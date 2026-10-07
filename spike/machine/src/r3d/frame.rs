@@ -10,6 +10,37 @@ use super::scene::{deeper, drain, pits, rings, sort};
 use super::{bitmap, blocks, ground, road, screen, shape, strips, walk};
 use crate::pc::Machine;
 
+/// The hook that stops the machine at the game's 3D routine when ours runs in its place.
+pub const HOOK: u8 = 0xfe;
+/// The renderer's code segment once gp.exe is loaded (0F47 in the image, at 10E9).
+const CODE: u16 = 0x10e9;
+/// Where the routine is.
+const ENTRY: u32 = ((CODE as u32) << 4) + 0x81ce;
+/// Its first bytes, to know it is there.
+const PROLOGUE: [u8; 16] = [
+    0x1e, 0x36, 0x8e, 0x1e, 0xf4, 0x00, 0xc7, 0x06, 0x42, 0x06, 0x44, 0x06, 0xc6, 0x06, 0x26, 0x08,
+];
+
+/// Our 3D routine in place of the game's (`on`), or the game's put back: a hook at the routine's
+/// entry, once the game's code is there (Machine::run then runs `step` at it).
+pub fn native(m: &mut Machine, on: bool) {
+    let a = ENTRY as usize;
+    if m.hw.mem.len() < a + PROLOGUE.len() {
+        return;
+    }
+    let hooked =
+        m.hw.mem[a..a + 3] == [0xfe, 0x38, HOOK] && m.hw.mem[a + 3..a + 16] == PROLOGUE[3..];
+    if on {
+        let r = ((crate::pc::BIOS as usize) << 4) + RESUME_AT as usize;
+        m.hw.mem[r..r + 3].copy_from_slice(&[0xfe, 0x38, RESUME]);
+    }
+    if on && !hooked && m.hw.mem[a..a + 16] == PROLOGUE {
+        m.hook(ENTRY, HOOK);
+    } else if !on && hooked {
+        m.unhook(ENTRY, [PROLOGUE[0], PROLOGUE[1], PROLOGUE[2]]);
+    }
+}
+
 /// A routine in segment 19ED called far, as the game calls it: CS its segment while it runs.
 fn far19(c: &mut Cpu, f: fn(&mut Cpu)) {
     let cs = c.s[CS];
@@ -18,74 +49,140 @@ fn far19(c: &mut Cpu, f: fn(&mut Cpu)) {
     c.s[CS] = cs;
 }
 
-/// 19ED:008C (far): the sound driver serviced (far 8D10:0000 as patched into 19ED:0098, AX 7)
-/// when there is one (SS:08DA). The driver is not the renderer's: it runs in the machine.
-fn sound(m: &mut Machine) {
-    let ss = m.cpu.s[2];
-    if m.hw.rd16(((ss as u32) << 4) + 0x8da) == 0 {
-        return;
-    }
-    let seg19 = m.cpu.s[1].wrapping_add(0x19ed - 0x0f47);
-    let at = (seg19 as u32) << 4;
-    let (off, seg) = (m.hw.rd16(at + 0x99), m.hw.rd16(at + 0x9b));
-    m.cpu.r[0] = 7;
-    m.call_far(seg, off, 10_000_000, &mut |_, n| {
-        panic!("hook {n:02x} in the sound driver")
-    })
-    .expect("the sound driver returns");
+/// Where the palette step returns to when our frame hands over to it: a hook in the BIOS's
+/// segment, after the one call_far returns to.
+pub const RESUME: u8 = 0xfd;
+const RESUME_AT: u16 = crate::pc::RETURN_AT + 3;
+
+/// How the frame's palette step runs.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Service {
+    /// handed over to the game's 19ED:008C in the running machine (Machine::run)
+    Handover,
+    /// run here alone (checks on caught frames, which have no palette change pending)
+    Inline,
+    /// left out (a frame drawn beside the game's, to compare what it draws)
+    Skip,
 }
 
-/// 81CE (far): one frame.
-pub fn frame(m: &mut Machine) {
-    let ds = m.cpu.s[3];
-    {
-        let c = &mut Cpu::of(m);
-        c.s[DS] = c.ss(0xf4);
-        c.set_d(0x642, 0x644);
-        c.set_db(0x826, 0);
-        c.set_cb(0x73b0, 0);
-        let g = c.ss(0xf0);
-        c.s[ES] = g;
-        let v = c.w(g, 0x96f);
-        c.set_c(0x73ac, v);
-        let v = c.w(g, 0x971);
-        c.set_c(0x73ae, v);
-        c.set_bpb(0x172, 0);
-        for (o, v) in [
-            (0x10c, 0xa13e),
-            (0x110, 0x832e),
-            (0x2aa, 0xb458),
-            (0xf2, 0xa4c6),
-            (0x164, 0),
-            (0x168, 0),
-        ] {
-            c.set_d(o, v);
-        }
-        // PUSH DS and the CALL: the walk keeps SP
-        for f in [
-            pit_box,
-            colours,
-            wet_view,
-            blocks::mode,
-            cars_on,
-            walk::walk,
-        ] {
-            deeper(c, 4, f);
-        }
+/// 19ED:008C (far), which the frame calls between its steps: the palette step. While a palette
+/// change is pending (SS:08DA) the driver at 8D10 (far 8D10:0000 as patched into 19ED:0098, AX
+/// 7) sends the VGA its next part, in time with the display, so it runs in the machine: handed
+/// over, the game's 008C called with RESUME's address to return to, true when it was. Run here
+/// alone, the machine's clock stands still and the driver waits for ever (a panic).
+fn service(m: &mut Machine, how: Service) -> bool {
+    let ss = m.cpu.s[2];
+    if how == Service::Skip || m.hw.rd16(((ss as u32) << 4) + 0x8da) == 0 {
+        return false;
     }
-    sound(m);
-    deeper(&mut Cpu::of(m), 4, blocks::blocks);
-    deeper(&mut Cpu::of(m), 4, sky);
-    sound(m);
-    deeper(&mut Cpu::of(m), 4, strips::strips);
-    sound(m);
-    deeper(&mut Cpu::of(m), 4, draw);
-    sound(m);
-    {
-        let c = &mut Cpu::of(m);
-        deeper(c, 4, cars_off);
-        deeper(c, 4, pit_box_off);
-        c.s[DS] = ds;
+    let seg19 = CODE.wrapping_add(0x19ed - 0x0f47);
+    if how == Service::Inline {
+        let at = (seg19 as u32) << 4;
+        let (off, seg) = (m.hw.rd16(at + 0x99), m.hw.rd16(at + 0x9b));
+        m.cpu.r[0] = 7;
+        m.call_far(seg, off, 10_000_000, &mut |_, n| {
+            panic!("hook {n:02x} in the driver")
+        })
+        .expect("the palette step returns");
+        return false;
+    }
+    let sp = m.cpu.r[4].wrapping_sub(4);
+    m.cpu.r[4] = sp;
+    let a = ((ss as u32) << 4) + sp as u32;
+    m.hw.wr16(a, RESUME_AT);
+    m.hw.wr16(a + 2, crate::pc::BIOS);
+    m.cpu.s[1] = seg19;
+    m.cpu.ip = 0x008c;
+    true
+}
+
+/// 81CE (far): one frame, alone, without its return (for checks on caught frames: the palette
+/// step run here).
+pub fn frame(m: &mut Machine) {
+    step(m, 0, Service::Inline);
+}
+
+/// 81CE (far): one frame in five steps, between the four calls of the palette step: `from` 0
+/// at the routine's entry (SP at the caller's return address). Returns the step to go on with
+/// when it has handed over to the palette step (the machine runs it, then comes back at RESUME),
+/// None when the frame is done and returned to the game.
+pub fn step(m: &mut Machine, from: u8, how: Service) -> Option<u8> {
+    if from != 0 {
+        // back from the service's RETF: in the routine's own segment again
+        m.cpu.s[1] = CODE;
+    }
+    let mut at = from;
+    loop {
+        {
+            let c = &mut Cpu::of(m);
+            match at {
+                0 => {
+                    // PUSH DS
+                    let sp = c.r[SP].wrapping_sub(2);
+                    c.r[SP] = sp;
+                    let (ss, ds) = (c.s[SS], c.s[DS]);
+                    c.set_w(ss, sp, ds);
+                    c.s[DS] = c.ss(0xf4);
+                    c.set_d(0x642, 0x644);
+                    c.set_db(0x826, 0);
+                    c.set_cb(0x73b0, 0);
+                    let g = c.ss(0xf0);
+                    c.s[ES] = g;
+                    let v = c.w(g, 0x96f);
+                    c.set_c(0x73ac, v);
+                    let v = c.w(g, 0x971);
+                    c.set_c(0x73ae, v);
+                    c.set_bpb(0x172, 0);
+                    for (o, v) in [
+                        (0x10c, 0xa13e),
+                        (0x110, 0x832e),
+                        (0x2aa, 0xb458),
+                        (0xf2, 0xa4c6),
+                        (0x164, 0),
+                        (0x168, 0),
+                    ] {
+                        c.set_d(o, v);
+                    }
+                    // each CALL (the walk keeps SP)
+                    for f in [
+                        pit_box,
+                        colours,
+                        wet_view,
+                        blocks::mode,
+                        cars_on,
+                        walk::walk,
+                    ] {
+                        deeper(c, 2, f);
+                    }
+                }
+                1 => {
+                    deeper(c, 2, blocks::blocks);
+                    deeper(c, 2, sky);
+                }
+                2 => deeper(c, 2, strips::strips),
+                3 => deeper(c, 2, draw),
+                _ => {
+                    deeper(c, 2, cars_off);
+                    deeper(c, 2, pit_box_off);
+                    // POP DS
+                    let sp = c.r[SP];
+                    c.s[DS] = c.w(c.s[SS], sp);
+                    c.r[SP] = sp.wrapping_add(2);
+                }
+            }
+        }
+        if at >= 4 {
+            // RETF (alone, the caller returns)
+            if how == Service::Handover {
+                m.retf();
+            }
+            return None;
+        }
+        at += 1;
+        // CALL FAR 19ED:008C
+        if service(m, how) {
+            return Some(at);
+        }
     }
 }
 
