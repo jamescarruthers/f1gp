@@ -13,9 +13,9 @@
 //!       compares the frame it leaves with the one caught
 //!   r3d profile <out dir>
 //!       where the routine's instructions go, routine by routine
-//!   r3d calls <out dir> [fill|edge|border|ground|all] [frames]
+//!   r3d calls <out dir> [fill|edge|border|ground|bitmap|all] [frames]
 //!       our routines (OURS) against the game's, call by call
-//!   r3d fuzz <out dir> [edge|border|ground|all] [trials 20000]
+//!   r3d fuzz <out dir> [edge|border|ground|bitmap|all] [trials 20000]
 //!       our near routines against the game's on made-up calls
 //!   r3d ours <out dir>
 //!       each caught frame drawn with our routines in place of the game's, against the one caught
@@ -340,7 +340,10 @@ struct Ours {
 /// The ground texture (0F47:7F64), a near routine run after the scene with the T option on.
 const GROUND: u16 = 0x7f64;
 
-const OURS: [Ours; 4] = [
+/// The bitmap drawer (0F47:19E8), a near routine.
+const BITMAP: u16 = 0x19e8;
+
+const OURS: [Ours; 5] = [
     Ours {
         name: "fill",
         off: FILL,
@@ -384,6 +387,15 @@ const OURS: [Ours; 4] = [
         run: |m| {
             let bp = m.cpu.r[5];
             r3d::ground::ground(r3d::Mem::of(m), bp);
+        },
+    },
+    Ours {
+        name: "bitmap",
+        off: BITMAP,
+        near: true,
+        run: |m| {
+            let r = m.cpu.r;
+            r3d::bitmap::bitmap(r3d::Mem::of(m), r[5], r[0], r[1], r[2]);
         },
     },
 ];
@@ -758,6 +770,45 @@ fn made_up_edge(m: &mut Machine, o: &Ours, rng: &mut impl FnMut(i32) -> i32) {
     }
 }
 
+/// A made-up call of the bitmap drawer: the bitmap, its depth, anchor and mirroring, the
+/// window and mirror modes, the vertical scale and the weather changed at random.
+fn made_up_bitmap(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
+    let (ss, bp) = (m.cpu.s[2], m.cpu.r[5]);
+    let put = |m: &mut Machine, o: u16, v: i32| m.hw.wr16(lin(ss, o), v as u16);
+    let s = |o: u16| bp.wrapping_add(o);
+    if rng(2) == 0 {
+        m.cpu.r[0] = rng(0xe8) as u16;
+    }
+    let depth = [rng(40) - 8, rng(0x400), rng(0x4000), 0x7f00 + rng(0x100)][rng(4) as usize];
+    put(m, s(0x8c), depth);
+    if rng(50) == 0 {
+        // a bitmap marked not to be drawn (its size word's bits 15 and 14)
+        let store = rd16(m, lin(ss, 0xf8));
+        let at = lin(store, (m.cpu.r[0] << 2).wrapping_add(0x238));
+        let (seg, off) = (rd16(m, at + 2), rd16(m, at));
+        m.hw.wr16(lin(seg, off), 0xc000);
+    }
+    if rng(2) == 0 {
+        put(m, s(0x88), rng(800) - 240);
+    }
+    if rng(2) == 0 {
+        m.cpu.r[1] = (rng(400) - 100) as u16;
+    }
+    put(m, s(0x12e), rng(65536));
+    if rng(3) == 0 {
+        m.hw.mem[lin(ss, s(0x134)) as usize] = rng(2) as u8;
+        put(m, s(0x132), rng(164));
+        put(m, s(0x130), rng(200) - 20);
+    }
+    if rng(3) == 0 {
+        put(m, s(0x17e), rng(0x40000) >> 2);
+    }
+    if rng(4) == 0 {
+        put(m, 0x122e, 1);
+        put(m, 0x182, rng(65536));
+    }
+}
+
 /// A made-up call of the ground texture: the view, the camera car's heading, speed and yaw
 /// rate, the horizon, the texture's top row and the ground points' list end changed at random.
 fn made_up_ground(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
@@ -794,7 +845,7 @@ fn made_up_ground(m: &mut Machine, rng: &mut impl FnMut(i32) -> i32) {
 }
 
 /// Our near routines against the game's on made-up calls: `trials` of each, from caught calls
-/// with their input changed at random (made_up_edge, made_up_ground), so that the paths races
+/// with their input changed at random (made_up_edge, made_up_ground, made_up_bitmap), so that the paths races
 /// rarely take are run too. Both must leave the same memory and registers. The offsets of the game's instructions
 /// run go to FOOTPRINT_OUT if set.
 fn fuzz(out: &Path, which: &str, trials: usize) {
@@ -818,7 +869,7 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
         .filter(|o| o.near && (which == "all" || which == o.name))
     {
         // the edge routines from the first frame's calls, the texture (once a frame) from each frame's
-        let calls: Vec<Call> = if o.off == GROUND {
+        let calls: Vec<Call> = if o.off == GROUND || o.off == BITMAP {
             snaps
                 .iter()
                 .flat_map(|s| calls_in(s, o.off, true))
@@ -832,6 +883,8 @@ fn fuzz(out: &Path, which: &str, trials: usize) {
             m.restore(&calls[t % calls.len()].before);
             if o.off == GROUND {
                 made_up_ground(&mut m, &mut rng);
+            } else if o.off == BITMAP {
+                made_up_bitmap(&mut m, &mut rng);
             } else {
                 made_up_edge(&mut m, o, &mut rng);
             }
