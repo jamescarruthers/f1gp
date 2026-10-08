@@ -117,10 +117,12 @@ second at 8,000 cycles a millisecond (the host a third of the time the game's ow
 
 Our routine can record what it draws (`src/r3d/list.rs`): each polygon's colour and ring of
 edges with the values the projection divided for each end, the rows of sky and ground, the
-ground texture's texels, and the rest (bitmaps, poles, the crowd, the scenery, the cockpit's
-pieces) as game pixels. `src/r3d/fine.rs` draws that list again at s times the resolution: the
-points projected again s times finer, the edges built and the polygons filled by the game's
-rules on an s times larger screen, the rest as game pixels s x s. `r3d list <out> [scales]
+ground texture's texels, each bitmap with its rows of runs, scale and anchor point, and the rest
+(poles, the crowd, the scenery, the cockpit's pieces, the mirrors' bitmaps) as game pixels.
+`src/r3d/fine.rs` draws that list again at s times the resolution: the points projected again s
+times finer, the edges built, the polygons filled and the bitmaps stepped by the game's rules on
+an s times larger screen, the rest as game pixels s x s. Recording for scale s, the routine
+chooses its levels of detail for that screen (`list::detail`). `r3d list <out> [scales]
 [keep]` checks that at scale 1 the list gives back the frame our routine drew, byte for byte
 (all 176 caught frames), and saves the primitives of the first `keep` frames at each scale for
 the WebGPU rasteriser's check (`probes/p9-gpu-r3d.mjs`, `lib/gpu-r3d.mjs`: the same bytes at
@@ -129,12 +131,15 @@ fine-edges <out> [trials]` builds made-up edges both ways. `r3d time <out> [runs
 routine on each caught frame, with the list off and on.
 
 The page's `r3d=gpu` (`render.html`) takes the frames the game shows that way
-(`Machine::set_r3d_scale`, `src/r3d/shown.rs`): at the routine's next call, the frame it recorded
-is the one on the screen, so the machine keeps its primitives at the page's scale with the
-screen, the palette and a mask of the pixels where the screen shows the 3D view (`mc_r3d_shown`,
-`lib/pc.mjs` `r3dShown`). `r3d page <files> <session> [scale]` plays a recorded race that way and
-lays each frame together as the page does: at scale 1 every frame is the game's screen (all of
-the three races'); PAGE_SHOTS=<folder> saves some.
+(`Machine::set_r3d_scale`, `src/r3d/shown.rs`): the game's copy to the screen (19ED:31FA) is done
+by our port of it (`screen::show`), which marks the bytes it takes from the back buffer and pairs
+them with the frame our routine drew last; when `run` returns, the machine has that frame's
+primitives at the page's scale with the screen, the palette and a mask of the pixels where the
+screen shows the 3D view (`mc_r3d_shown`, `lib/pc.mjs` `r3dShown`). `r3d page <files> <session>
+[scale]` plays a recorded race that way and lays each frame together as the page does: at scale 1
+every frame is the game's screen (all of the three races'), and each copy runs the game's code
+first and must leave the screen as ours does. PAGE_SHOTS=<folder> saves every 300th frame (PAGE_EVERY=n: every nth); PAGE_OFF=n
+sets the scale to 0 for one run in n.
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`

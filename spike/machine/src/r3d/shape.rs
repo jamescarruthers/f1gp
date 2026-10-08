@@ -544,10 +544,13 @@ fn zero(c: &mut Cpu, hdr: u16) {
     sprite(c, di, cx);
 }
 
-/// 8BAF: the level of detail for the depth, then a bitmap or the model.
+/// 8BAF: the level of detail for the depth, then a bitmap or the model. (Each level's greatest
+/// depth times `list::detail`: on a screen that many times larger the game would keep each
+/// level as much further.)
 fn lod(c: &mut Cpu, hdr: u16, depth: u16) {
     let mut di = hdr;
-    while depth as i16 > c.e(di.wrapping_add(0x16)) as i16 {
+    let s = list::detail();
+    while depth as i16 as i32 > c.e(di.wrapping_add(0x16)) as i16 as i32 * s {
         di = di.wrapping_add(0xa);
     }
     c.set_bp(0x14, depth);
@@ -648,7 +651,7 @@ fn sprite(c: &mut Cpu, di: u16, cx: u16) {
     c.set_bp(0x88, v);
     let row = c.d(0x34);
     let (m, r) = c.split();
-    bitmap::bitmap(m, r[BP], id, row, colours);
+    bitmap::bitmap(m, r[BP], id, row, colours, Some(0x2c));
     // 9BD8
     c.set_bpb(0x134, 0);
 }
@@ -806,7 +809,7 @@ fn command(c: &mut Cpu, cmd: u16) {
     if c.d(0x2f4) & 0x10 != 0 && c.bpb(0x178) & 0x10 == 0 {
         return;
     }
-    // 8E94: a bitmap at a vertex, up to a depth
+    // 8E94: a bitmap at a vertex, up to a depth (times `list::detail`, as in `lod`)
     let v = c.eb(si) as u16;
     si = si.wrapping_add(1);
     let b = vertex_at(c, v);
@@ -821,7 +824,7 @@ fn command(c: &mut Cpu, cmd: u16) {
     }
     let far = (c.eb(si) as u16) << 7;
     si = si.wrapping_add(1);
-    if (far as i16) < dx as i16 {
+    if (far as i16 as i32) * list::detail() < dx as i16 as i32 {
         return;
     }
     c.set_bp(0x8c, dx);
@@ -871,7 +874,7 @@ fn command(c: &mut Cpu, cmd: u16) {
         colours = given(c, si);
     }
     let (m, r) = c.split();
-    bitmap::bitmap(m, r[BP], id, row, colours);
+    bitmap::bitmap(m, r[BP], id, row, colours, Some(rec));
 }
 
 /// 8FF1: the palette, or the command's own (R:02F4 bit 1).

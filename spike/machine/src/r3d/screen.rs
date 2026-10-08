@@ -97,6 +97,63 @@ fn open_rows(c: &mut Cpu) {
     }
 }
 
+/// 19ED:31FA (far): the back buffer (G:[04BC]) copied to the screen (A000:0000), once a frame.
+/// In the outside views (G:0981 not 0) rows 0-179, and rows 180-199 cleared if SS:0138 is set
+/// (which clears it). In the cockpit rows 0-102; then on rows 103-163 the window's openings
+/// (SS:6364, as `open_rows`), the back buffer read at the screen's offsets (323C); then on
+/// rows 116-137 the mirrors, all of the row but the gap between the openings (3288). Each byte
+/// copied from the back buffer is marked in `copied` (by its offset in A000), if given. The
+/// registers kept.
+pub fn show(c: &mut Cpu, mut copied: Option<&mut [u8]>) {
+    let g = c.ss(0xf0);
+    let (src, from) = (c.w(g, 0x4be), c.w(g, 0x4bc));
+    let mut put = |c: &mut Cpu, di: u16, si: u16, n: u16| {
+        for k in 0..n {
+            let v = c.b(src, si.wrapping_add(k));
+            c.set_b(0xa000, di.wrapping_add(k), v);
+            if let Some(m) = copied.as_deref_mut() {
+                m[di.wrapping_add(k) as usize] = 1;
+            }
+        }
+    };
+    if c.b(g, 0x981) != 0 {
+        put(c, 0, from, 0xe100);
+        if c.ssb(0x138) != 0 {
+            c.set_ssb(0x138, 0);
+            fill(c, 0xa000, 0xe100, 0x1900, 0);
+        }
+        return;
+    }
+    put(c, 0, from, 0x80c0);
+    // [l, r) of the row at DI (SUB, JLE: nothing unless r > l)
+    let mut span = |c: &mut Cpu, di: u16, l: u16, r: u16| {
+        if r as i16 > l as i16 {
+            let at = di.wrapping_add(l);
+            put(c, at, at, r.wrapping_sub(l));
+        }
+    };
+    for row in 0x67..0xa4u16 {
+        let t = 0x6364 + 2 * (row - 0x67);
+        let di = c.ss(t);
+        if di != 0 {
+            let (l, r) = (c.ss(t + 0x1f2), c.ss(t + 0xa6));
+            span(c, di, l, r);
+            let (l, r) = (c.ss(t + 0x14c), c.ss(t + 0x298));
+            span(c, di, l, r);
+        }
+    }
+    for row in 0x74..0x8au16 {
+        let t = 0x6364 + 2 * (row - 0x67);
+        let di = c.ss(t);
+        if di != 0 {
+            let r = c.ss(t + 0xa6);
+            span(c, di, 0, r);
+            let l = c.ss(t + 0x14c);
+            span(c, di, l, 0x140);
+        }
+    }
+}
+
 /// 19ED:39ED (far): the horizon's scenery, up to 8 rows (512 bytes a row, the segment in the
 /// code at 3A4F, from 66A2h) above the horizon row SS:[bp+130] and down to the sky's lowest
 /// R:0140, scrolled by the camera's heading and wrapped round; hazed (3AA7) when wet. The

@@ -159,12 +159,18 @@ pub struct Machine {
     /// the frames our 3D routine has drawn
     pub native_frames: u64,
     /// with our routine, the 3D view drawn finer for the page (src/r3d/shown.rs): the scale (0
-    /// off), the frame being recorded, the last frame drawn (until the game shows it) and the
-    /// last frame shown
+    /// off), the frame being recorded, the last frame drawn (until the game copies it to the
+    /// screen), the frame on the screen, whether the game has copied since the page last took
+    /// a frame, and the last frame the page took
     r3d_scale: u32,
     r3d_recording: bool,
     r3d_drawn: Option<crate::r3d::shown::Drawn>,
+    r3d_on_screen: Option<crate::r3d::shown::OnScreen>,
+    r3d_copied: bool,
     pub r3d_shown: crate::r3d::shown::Shown,
+    /// for tests: each copy to the screen done by the game's code first, and our port held to
+    /// it (the copies checked, and those that differ)
+    pub r3d_copy_check: Option<(u32, u32)>,
 }
 
 /// The CPU's registers and the memory: a point to come back to (`Machine::restore`), or to save.
@@ -249,7 +255,10 @@ impl Machine {
             r3d_scale: 0,
             r3d_recording: false,
             r3d_drawn: None,
+            r3d_on_screen: None,
+            r3d_copied: false,
             r3d_shown: Default::default(),
+            r3d_copy_check: None,
         };
         m.bios_init();
         m
@@ -355,6 +364,7 @@ impl Machine {
             if self.native_3d {
                 crate::r3d::frame::native(self, true);
             }
+            crate::r3d::shown::hook(self, self.native_3d && self.r3d_scale > 0);
             match self.run_until(target) {
                 Some(crate::r3d::frame::HOOK) if self.native_3d => {
                     self.native_frames += 1;
@@ -369,25 +379,23 @@ impl Machine {
                         crate::r3d::frame::step(self, from, crate::r3d::frame::Service::Handover);
                     self.r3d_end();
                 }
-                _ => return,
+                Some(crate::r3d::shown::COPY) => self.r3d_copy(),
+                _ => break,
             }
         }
+        self.r3d_take();
     }
 
-    /// Our routine is called again: the frame it drew last is the one the game shows now; record
-    /// the new one, if the page wants it finer.
+    /// Our routine is called: record its frame, if the page wants it finer.
     fn r3d_begin(&mut self) {
-        if let Some(d) = self.r3d_drawn.take() {
-            let serial = self.r3d_shown.serial.wrapping_add(1);
-            self.r3d_shown = crate::r3d::shown::shown(self, &d, self.r3d_scale, serial);
-        }
         self.r3d_recording = self.r3d_scale > 0;
         if self.r3d_recording {
-            crate::r3d::list::begin(self);
+            crate::r3d::list::begin(self, self.r3d_scale);
         }
     }
 
-    /// Our routine's frame is drawn (it has handed over for the last time): keep its record.
+    /// Our routine's frame is drawn (it has handed over for the last time): keep its record
+    /// until the game copies it to the screen.
     fn r3d_end(&mut self) {
         if self.r3d_recording && self.native_next.is_none() {
             self.r3d_recording = false;
@@ -398,18 +406,74 @@ impl Machine {
     }
 
     /// The 3D view drawn finer for the page at `scale` (1 to 8; 0 stops it), with our routine
-    /// (set_native_3d): each frame the game shows is then in `r3d_shown`.
+    /// (set_native_3d): each frame the game shows is then in `r3d_shown` when `run` returns.
     pub fn set_r3d_scale(&mut self, scale: u32) {
-        self.r3d_scale = scale.min(8);
-        if self.r3d_scale == 0 {
+        let scale = scale.min(8);
+        if scale == self.r3d_scale {
+            return;
+        }
+        self.r3d_scale = scale;
+        if scale == 0 {
+            // (in the middle of a frame too: the recording dropped)
+            if self.r3d_recording {
+                self.r3d_recording = false;
+                crate::r3d::list::end();
+            }
             self.r3d_drawn = None;
+            self.r3d_on_screen = None;
+        } else {
+            // the frame on the screen again at the new scale
+            self.r3d_copied = self.r3d_on_screen.is_some();
+        }
+        crate::r3d::shown::hook(self, self.native_3d && scale > 0);
+    }
+
+    /// The machine stopped at the game's copy to the screen (r3d::shown::COPY): the copy done,
+    /// paired with the frame our routine drew last.
+    fn r3d_copy(&mut self) {
+        let copied = match self.r3d_copy_check {
+            Some((n, differ)) => {
+                let (copied, same) = crate::r3d::shown::copy_checked(self);
+                self.r3d_copy_check = Some((n + 1, differ + !same as u32));
+                copied
+            }
+            None => crate::r3d::shown::copy(self),
+        };
+        if self.r3d_scale > 0 {
+            self.r3d_on_screen = crate::r3d::shown::on_screen(
+                self.r3d_on_screen.take(),
+                self.r3d_drawn.take(),
+                copied,
+            );
+            self.r3d_copied = true;
+        }
+    }
+
+    /// The page takes the machine's state: if the game has copied a frame to the screen since,
+    /// the frame as it shows now, in `r3d_shown`.
+    fn r3d_take(&mut self) {
+        if !self.r3d_copied || self.r3d_scale == 0 {
+            return;
+        }
+        self.r3d_copied = false;
+        if let Some(mut o) = self.r3d_on_screen.take() {
+            let mut last = std::mem::take(&mut self.r3d_shown);
+            let s = crate::r3d::shown::shown(self, &mut o, self.r3d_scale, &mut last);
+            self.r3d_shown = s.unwrap_or(last);
+            self.r3d_on_screen = Some(o);
         }
     }
 
     /// Draw the game's 3D view with our routine (src/r3d/), or with the game's own code.
     pub fn set_native_3d(&mut self, on: bool) {
+        if on != self.native_3d {
+            // the screen no longer (or not yet) holds our routine's frames
+            self.r3d_drawn = None;
+            self.r3d_on_screen = None;
+        }
         self.native_3d = on;
         crate::r3d::frame::native(self, on);
+        crate::r3d::shown::hook(self, on && self.r3d_scale > 0);
     }
 
     /// Run to the emulated time `target` (µs), or until the CPU reaches a hook: then the hook's

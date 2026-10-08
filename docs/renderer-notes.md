@@ -1484,9 +1484,16 @@ draws, it records a display list:
   blocks and the far ground, whole or through the cockpit's window.
 - **Texels**, at the ground texture (7F64): the shade added to a pixel of road
   or grass.
-- **Pixels** of everything else, in runs: bitmaps, poles, the crowd (a
-  polygon in colour 1Bh), the scenery strip, the dithered sky rows and the
-  cockpit's pieces.
+- **Bitmaps**, at the drawer (19E8), after 1931 has hazed their colours: the
+  bitmap's rows of runs (read once a frame for each bitmap), the object's 16
+  colours, the size, depth and the scale the drawer took (R:0234), SS:[bp+17E]
+  (the rows' share; not for AAh, ABh and AFh), the mirroring, the cockpit's top,
+  and the anchor: the point it hangs from (a shape's reference point R:002C, a
+  vertex at R:0830 + 16v; A944's pit signals are placed on the screen). Those
+  in the mirrors are kept as pixels.
+- **Pixels** of everything else, in runs: poles, the crowd (a polygon in
+  colour 1Bh), the scenery strip, the dithered sky rows, the bitmaps in the
+  mirrors and the cockpit's pieces.
 
 `fine.rs` draws the list at scale s. Decided again there, as the game's
 rasteriser decides them, on a screen s times larger:
@@ -1508,22 +1515,59 @@ rasteriser decides them, on a screen s times larger:
   the game's run;
 - each ring walked as 0999 walks it, with the border lists s times longer and
   the cockpit's window read at the game row each fine row lies in (its limits
-  and gap s times wider).
+  and gap s times wider);
+- each bitmap stepped as 19E8 steps it, from its anchor projected again: the
+  scale size × 8192 × s / depth, capped at 8000h × s (s = 1 takes the game's
+  own, divide overflow and all); each column at the anchor plus k times the
+  scale (1AC2); the rows from the bottom one up, each the bitmap row the
+  16.16 count reaches (1B45); from the cockpit's top through the window's game
+  row (1DBF), a run that ends past the left opening cut there, one in the gap
+  dropped, and the next run starting where the last one was cut, as the
+  game's does. Near, a bitmap is the game's art made larger (a board's
+  33 rows are 1:1 at depth C8h, 25 ft); further off, where the game drops
+  rows and columns, the finer screen keeps more of them.
 
 The rest is drawn as game pixels made s x s for now, and the texels go on the
 fine pixels of road or grass within their game pixel.
 
+Recording for scale s, the routine also chooses its levels of detail for a
+screen s times larger: a shape's level (8BAF: the first whose greatest depth,
+times s, is at least the shape's depth) and a bitmap at a vertex (8E94: drawn
+to the command's depth times 128 times s). The car's polygon model lasts to
+depth FFh in the cockpit and 1A0h outside (written by 0:E993 and 0:E9D3 at a
+view change); beyond, the game draws it as a bitmap (B0h–DCh). At s = 4 the
+models last to 3FCh and 680h. The 320 x 200 frame our routine draws has those
+levels too, so the mask still compares like with like; at s = 1 nothing
+changes. Nothing the game reads later depends on the level chosen (the random
+generator G:08C3, the texture's sums CS:7394–739B, the cars' marks are all
+worked out before or apart from it), so the race goes as it would. The walk's
+own reach (segments ahead, R:01E2 to 01D6, and the settings' 9, 25 or 58
+segments for an object) is left as the game sets it: it decides what the
+walk builds, not only what is drawn.
+
 In the page (`render.html` `r3d=gpu`) the frame is laid into the game's
 screen: a screen pixel shows the finer 3D view where the copy to the screen
-(19ED:31FA, read in the code) takes it from the back buffer, in the rows our
-routine drew, and where it still holds what our routine left there. The copy
-takes rows 0–179 in the outside views; in the cockpit, rows 0–102, then on
-rows 103–163 (a row whose SS:6364 offset is 0 left out) the two openings, from
-the left limit (+1F2h) to the left opening's end (+A6h) and from the right
-one's start (+14Ch) to the right limit (+298h), and on rows 116–137 (the main
-table's rows, not the mirror table at SS:63DE) the row from 0 to the left
-opening's end and from the right one's start to 320: the mirrors and their
-housings.
+took it from the back buffer, in the rows our routine drew, and where it still
+holds what our routine left there. The copy takes rows 0–179 in the outside
+views; in the cockpit, rows 0–102, then on rows 103–163 (a row whose SS:6364
+offset is 0 left out) the two openings, from the left limit (+1F2h) to the left
+opening's end (+A6h) and from the right one's start (+14Ch) to the right limit
+(+298h), and on rows 116–137 (the main table's rows, not the mirror table at
+SS:63DE) the row from 0 to the left opening's end and from the right one's
+start to 320: the mirrors and their housings. The openings' bytes are read from
+the back buffer at the screen's own offsets (SI = DI), so the back buffer's
+offset must be 0, as it is (525C:0000, set at 0:C2C5 before each copy, with
+DS:04B4 and DS:04C0 at A000:0000).
+
+The machine takes the copy over (a hook at 19ED:31FA, `screen::show`), so it
+knows each byte the copy took, and pairs it with the frame our routine drew
+last. The game copies in the race (0:C2FB, called after 19ED:142B has drawn the
+dash), in pause (0:DDD1, 0:DFA6: once, the PAUSED board drawn, then it waits)
+and in the pit stop (0:F38B). After the copy it sets some of the palette (the
+dash's lights, 19ED:2D8C), so the page takes the screen and the palette when
+the machine stops for it, not at the copy. A message drawn over the view in
+the back buffer in the colour our routine left there is taken for the view; at
+s > 1 the view's finer pixels show there.
 
 Checked: at s = 1 the list gives back the frame our routine drew, byte for
 byte, on all 176 caught frames (`r3d list`) and on every frame of the three
@@ -1531,7 +1575,12 @@ recorded races (3,193, `r3d shadow`); on 34,263 made-up edges and 35,209
 made-up border edges the edge rebuilt from the list has the game's flags and
 record (`r3d fine-edges`). The WebGPU rasteriser (`spike/lib/gpu-r3d.mjs`)
 paints the list's primitives to the same bytes as `fine.rs` at scales 1, 2 and
-4 on all 176 frames (`spike/probes/p9-gpu-r3d.mjs`).
+4 on all 176 frames (`spike/probes/p9-gpu-r3d.mjs`). The bitmaps drawn from the
+list (2,162 in the caught frames) give the drawer's bytes at s = 1 on every
+frame. Our copy leaves the screen
+and SS:0138 as the game's copy does on every copy of the three races (1,594,
+1,131 and 1,130) and of one with a pause (`r3d page`, which runs the game's copy
+first on each).
 
 ### The frame around the 3D view, traced for the composite
 

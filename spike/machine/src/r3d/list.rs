@@ -10,8 +10,11 @@
 //!   can divide them again.
 //! - **Rows** (19ED:3112 and 3181): the sky bands, the road band between blocks, the far ground,
 //!   whole or through the cockpit's window.
-//! - **Pixels** of everything else (bitmaps, poles, the crowd, the horizon's scenery, the dithered
-//!   sky rows, the cockpit's pieces), as the game's pixels, in runs.
+//! - **Bitmaps** (19E8): the bitmap's rows of runs, its colours, the scale the game took from its
+//!   size and depth, and its anchor point as the projection made it, so that a finer scale can
+//!   step its columns and rows again (those in the mirrors are kept as pixels).
+//! - **Pixels** of everything else (poles, the crowd, the horizon's scenery, the dithered sky
+//!   rows, the cockpit's pieces), as the game's pixels, in runs.
 //! - **Texels** of the ground texture (7F64): the shade added to a game pixel of road or grass.
 //!
 //! The recorder is off unless `begin` was called; each hook is then a test of one flag, which
@@ -19,7 +22,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::Mem;
 use crate::pc::Machine;
@@ -84,6 +87,40 @@ pub struct Edge {
     pub flags: u16,
 }
 
+/// A run of a bitmap's row: from column `start` (signed, from the anchor; None: where the last
+/// run ended, as the game leaves it) to `end`, in the object's colour `colour` (0 to 15).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BitRun {
+    pub start: Option<i8>,
+    pub end: i8,
+    pub colour: u8,
+}
+
+/// A bitmap drawn (19E8), as the drawer took it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bitmap {
+    /// its rows (an index in `List::bitmaps`), and the object's 16 colours, hazed (1931)
+    pub bits: u32,
+    pub colours: [u8; 16],
+    /// its anchor: the point it hangs from (None: placed on the screen, A944), and the column
+    /// and row the game drew it from
+    pub anchor: Option<Pt>,
+    pub col: i16,
+    pub row: i16,
+    /// its size (+0) and rows below the anchor (+6), its depth (SS:[bp+16C])
+    pub size: u16,
+    pub below: u16,
+    pub depth: u16,
+    /// the scale the game took (R:0234: size * 8192 / depth, 1 to 8000h), and SS:[bp+17E], the
+    /// rows' share of it (None for AAh, ABh and AFh, whose rows take all of it)
+    pub scale: u16,
+    pub rows_by: Option<u16>,
+    /// columns the other way (SS:[bp+12E] bit 15)
+    pub mirrored: bool,
+    /// the row the cockpit's window starts on (R:0236, SS:[bp+132])
+    pub top: i16,
+}
+
 /// A ring entry: an edge (an index in `List::edges`) and whether it is turned round (40h).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entry {
@@ -116,6 +153,8 @@ pub enum Cmd {
     },
     /// The ground texture's shade added to the game pixel at (x, y) if it is road or grass.
     Texel { x: u16, y: u16, delta: i8 },
+    /// A bitmap, drawn again by the game's stepping.
+    Bitmap(Box<Bitmap>),
 }
 
 /// A frame's display list.
@@ -130,6 +169,8 @@ pub struct List {
     /// the cockpit's top row SS:[bp+132], and SS:[bp+17C] (the vertical scale)
     pub top: i16,
     pub f: i16,
+    /// the bitmaps drawn, each as its rows of runs, the bottom row first
+    pub bitmaps: Vec<Vec<Vec<BitRun>>>,
     /// writes the recorder saw outside the 3D view, ring entries whose slot no edge was built
     /// into, and polygons drawn as pixels (the crowd)
     pub outside: u32,
@@ -160,10 +201,14 @@ struct Rec {
     pending: Option<(Vec<Entry>, u16)>,
     /// the fill being drawn is recorded as pixels
     as_pixels: bool,
+    /// by a bitmap's address: its index in `List::bitmaps`
+    bits: HashMap<(u16, u16), u32>,
 }
 
-/// Whether a recording is on (on some thread: the recorder itself is the thread's own).
+/// Whether a recording is on (on some thread: the recorder itself is the thread's own), and the
+/// scale it is for.
 static ON: AtomicBool = AtomicBool::new(false);
+static SCALE: AtomicU32 = AtomicU32::new(1);
 thread_local! {
     static REC: RefCell<Option<Box<Rec>>> = const { RefCell::new(None) };
 }
@@ -177,6 +222,19 @@ fn on() -> bool {
 #[inline]
 pub(super) fn recording() -> bool {
     on()
+}
+
+/// How many times larger than the game's the screen is that the levels of detail are chosen
+/// for: the scale being recorded for, else 1. A shape's finer version (8BAF) and a bitmap at a
+/// vertex (8E94) are kept that many times as far, as the game would keep them on that screen;
+/// the frame at the game's scale shows them too.
+#[inline]
+pub(super) fn detail() -> i32 {
+    if on() {
+        SCALE.load(Ordering::Relaxed) as i32
+    } else {
+        1
+    }
 }
 
 /// The recorder, for a hook that has something to do (kept out of line: the routines it is
@@ -194,8 +252,9 @@ fn word(mem: &[u8], a: usize) -> u16 {
     mem[a] as u16 | (mem[a + 1] as u16) << 8
 }
 
-/// Start recording: the machine is at the 3D routine's entry (SS the game's, R at SS:00F4).
-pub fn begin(m: &Machine) {
+/// Start recording for `scale` (`detail`): the machine is at the 3D routine's entry (SS the
+/// game's, R at SS:00F4).
+pub fn begin(m: &Machine, scale: u32) {
     let mem = &m.hw.mem;
     let ss = m.cpu.s[2];
     let r = word(mem, lin(ss, 0xf4));
@@ -221,8 +280,10 @@ pub fn begin(m: &Machine) {
             shape: Vec::new(),
             pending: None,
             as_pixels: false,
+            bits: HashMap::new(),
         }))
     });
+    SCALE.store(scale.max(1), Ordering::Relaxed);
     ON.store(true, Ordering::Relaxed);
 }
 
@@ -469,6 +530,80 @@ pub(super) fn fill_px(seg: u16, off: u16, v: u8) {
             }
         });
     }
+}
+
+/// A bitmap's rows of runs, read from its header at seg:at (+2 the row table's bytes, +8 the
+/// rows' offsets, each row a list of runs; 19E8); None if a run's colour is not one of the
+/// object's 16.
+fn bit_rows(m: &Mem, seg: u16, at: u16) -> Option<Vec<Vec<BitRun>>> {
+    let bytes = m.w(seg, at.wrapping_add(2)) as i16;
+    let n = if bytes > 0 {
+        (bytes as usize).div_ceil(2)
+    } else {
+        0
+    };
+    let mut rows = Vec::with_capacity(n);
+    for r in 0..n as u16 {
+        let mut si = m
+            .w(seg, at.wrapping_add(8).wrapping_add(2 * r))
+            .wrapping_add(at);
+        let mut next = || {
+            let v = m.b(seg, si);
+            si = si.wrapping_add(1);
+            v
+        };
+        let mut runs = Vec::new();
+        let mut c = next();
+        let mut new_start = true;
+        while c != 0 && runs.len() < 256 {
+            let start = new_start.then(|| next() as i8);
+            let end = next() as i8;
+            let k = ((c & 0x7e) as i32 - 4) / 2;
+            if !(0..16).contains(&k) {
+                return None;
+            }
+            runs.push(BitRun {
+                start,
+                end,
+                colour: k as u8,
+            });
+            c = next();
+            new_start = c & 0x80 != 0;
+        }
+        rows.push(runs);
+    }
+    Some(rows)
+}
+
+/// The bitmap drawer (19E8) is about to draw the bitmap at seg:at, with its colours at seg:0000
+/// (`b` without `bits` and `colours`): recorded as a bitmap, true, or false if its pixels are to
+/// be kept instead.
+pub(super) fn bitmap(m: &Mem, seg: u16, at: u16, anchor: Option<u16>, mut b: Bitmap) -> bool {
+    if !on() {
+        return false;
+    }
+    with(|r| {
+        let bits = match r.bits.get(&(seg, at)) {
+            Some(&k) => k,
+            None => {
+                let Some(rows) = bit_rows(m, seg, at) else {
+                    return false;
+                };
+                let k = r.list.bitmaps.len() as u32;
+                r.list.bitmaps.push(rows);
+                r.bits.insert((seg, at), k);
+                k
+            }
+        };
+        b.bits = bits;
+        for (k, c) in b.colours.iter_mut().enumerate() {
+            *c = m.b(seg, 2 * k as u16);
+        }
+        b.anchor = anchor.map(|base| point(r, m, base.wrapping_add(6)));
+        r.list.cmds.push(Cmd::Bitmap(Box::new(b)));
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// The ground texture added `delta` to the pixel at seg:off.

@@ -12,17 +12,20 @@
 //!   larger: clipped to its sides, cut at depth 8 from the same camera-space values, then
 //!   stepped row by row with the same error term;
 //! - each polygon's ring walked again as the filler (0999) walks it, with the border lists
-//!   s times longer and the cockpit's window tables read at the game row each fine row lies in.
+//!   s times longer and the cockpit's window tables read at the game row each fine row lies in;
+//! - each bitmap stepped again as the drawer (19E8) steps it, from its anchor point projected
+//!   again, with its scale s times larger (and its greatest, 8000h, too), through the cockpit's
+//!   window row by row.
 //!
-//! The rest is drawn as game pixels made s x s: bitmaps, poles, the crowd, the scenery, the
-//! dithered sky rows and the cockpit's pieces (pixel art either way, for now); the ground
-//! texture's shade goes on the fine pixels of road and grass within its game pixel.
+//! The rest is drawn as game pixels made s x s: poles, the crowd, the scenery, the dithered sky
+//! rows, the bitmaps in the mirrors and the cockpit's pieces (pixel art either way, for now);
+//! the ground texture's shade goes on the fine pixels of road and grass within its game pixel.
 //!
 //! The output is a list of primitives in paint order, each over the ones before it: spans of
 //! fine pixels, runs of game pixels, and texels. `draw` paints them; the GPU paints the same
 //! list with each pixel keeping the highest of (primitive number, colour).
 
-use super::list::{self, Cmd, Edge, EdgeOf, Entry, List, Pt};
+use super::list::{self, BitRun, Bitmap, Cmd, Edge, EdgeOf, Entry, List, Pt};
 
 /// The end of an edge record's list of x.
 const END: i32 = i32::MIN;
@@ -1140,6 +1143,150 @@ impl Fill<'_> {
     }
 }
 
+/// 19E8 at the fine scale: the bitmap's columns and rows stepped from its anchor as the drawer
+/// steps them (1AC2, 1B45), with the scale s times larger, at most 8000h s; its rows from the
+/// cockpit's top through the window's game row, limits and gap s times wider (1DBF). At s = 1,
+/// the game's scale and so the game's pixels.
+fn bitmap(out: &mut Vec<Prim>, list: &List, b: &Bitmap, sc: Scale) {
+    let s = sc.s as i64;
+    let rows = &list.bitmaps[b.bits as usize];
+    let (ax, ay) = match &b.anchor {
+        Some(p) => {
+            let f = place(p, sc);
+            (f.x as i64, f.y as i64)
+        }
+        None => (b.col as i64 * s, b.row as i64 * s),
+    };
+    let scale = if s == 1 {
+        b.scale as i64
+    } else {
+        ((b.size as i64) << 13) * s / (b.depth as i64).max(1)
+    }
+    .clamp(1, 0x8000 * s);
+    // 1AC2: column k's x, the anchor plus k times the scale (16.16), mirrored or not, on screen
+    let step = scale << 3;
+    let w = sc.w as i64;
+    let col = |k: i8| -> i64 {
+        let k = k as i64;
+        let o = (k.abs() * step) >> 16;
+        (if (k < 0) != b.mirrored {
+            ax - o
+        } else {
+            ax + o
+        })
+        .clamp(0, w)
+    };
+    // 1B45: the rows' scale, the bottom row, and the bitmap rows per screen row (16.16)
+    let rs = match b.rows_by {
+        Some(v) => (scale * v as i64) >> 16,
+        None => scale,
+    };
+    let below = (b.below as i64 * rs * 8) >> 16;
+    let mut y = ay + below;
+    // (a quotient over 16 bits, or none, made FFFFh as the game's divide-error handler leaves it)
+    let q = if rs == 0 {
+        0xffff
+    } else {
+        ((1i64 << 24) / rs).min(0xffff)
+    };
+    if q == 0 || y < 0 {
+        return;
+    }
+    let row_step = (q << 5) as u32;
+    let mut at = (((b.below as u32) << 16) as u64)
+        .wrapping_sub(((q as u64 * below as u64) << 5) & 0xffff_ffff) as u32;
+    for _ in 0..0x10000 {
+        if (at as i32) >= 0 {
+            break;
+        }
+        at = at.wrapping_add(row_step);
+    }
+    let mut next = || {
+        let r = (at >> 16) as usize;
+        at = at.wrapping_add(row_step);
+        rows.get(r)
+    };
+    let h = sc.h as i64;
+    while y >= h {
+        if next().is_none() {
+            return;
+        }
+        y -= 1;
+    }
+    let top = b.top as i64;
+    while y >= 0 {
+        let Some(runs) = next() else { return };
+        let g = y / s;
+        if g >= top {
+            let t = |k: usize| {
+                list.window
+                    .get(k * 0x53 + (g - top) as usize)
+                    .map_or(0, |&v| v as i16 as i64)
+            };
+            if t(0) != 0 {
+                let win = [t(3) * s, t(4) * s, t(1) * s, t(2) * s];
+                bit_runs(out, runs, y, b, &col, Some(win));
+            }
+        } else {
+            bit_runs(out, runs, y, b, &col, None);
+        }
+        y -= 1;
+    }
+}
+
+/// A bitmap row's runs on fine row y (the runs of 1D3A), through the window's left and right
+/// limits and its gap if given.
+fn bit_runs(
+    out: &mut Vec<Prim>,
+    runs: &[BitRun],
+    y: i64,
+    b: &Bitmap,
+    col: &dyn Fn(i8) -> i64,
+    win: Option<[i64; 4]>,
+) {
+    let (mut dx, mut cx) = (0i64, 0i64);
+    for r in runs {
+        match r.start {
+            Some(k) if b.mirrored => cx = col(k),
+            Some(k) => dx = col(k),
+            None if b.mirrored => cx = dx,
+            None => dx = cx,
+        }
+        if b.mirrored {
+            dx = col(r.end);
+        } else {
+            cx = col(r.end);
+        }
+        let mut draw = true;
+        if let Some([lo, hi, gap0, gap1]) = win {
+            // 1DBF
+            if dx < lo {
+                dx = lo;
+            }
+            if cx > hi {
+                cx = hi;
+            }
+            if cx > gap0 && dx < gap1 {
+                if dx < gap0 {
+                    cx = gap0;
+                } else if cx <= gap1 {
+                    draw = false;
+                } else {
+                    dx = gap1;
+                }
+            }
+        }
+        if draw && cx > dx {
+            out.push(Prim::Span {
+                y: y as u32,
+                x0: dx as u32,
+                x1: cx as u32,
+                colour: b.colours[r.colour as usize],
+            });
+        }
+    }
+}
+
 /// The list's primitives at scale `s` (1 to 64).
 pub fn prims(list: &List, s: u32) -> Prims {
     assert!((1..=64).contains(&s), "scale {s}");
@@ -1250,6 +1397,7 @@ pub fn prims(list: &List, s: u32) -> Prims {
                 y: y as u32,
                 delta,
             }),
+            Cmd::Bitmap(b) => bitmap(&mut out, list, b, sc),
         }
     }
     Prims {
