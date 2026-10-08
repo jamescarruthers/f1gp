@@ -390,7 +390,7 @@ impl Machine {
     fn r3d_begin(&mut self) {
         self.r3d_recording = self.r3d_scale > 0;
         if self.r3d_recording {
-            crate::r3d::list::begin(self);
+            crate::r3d::list::begin(self, self.r3d_scale);
         }
     }
 

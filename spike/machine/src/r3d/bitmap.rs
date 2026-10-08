@@ -21,8 +21,9 @@ use super::list;
 use super::Mem;
 
 /// The bitmap's id (AX), its anchor row (CX) and the offset of its object's colours (DX), with
-/// SS:[bp+88] its anchor column, [bp+8C] its depth and [bp+12E] bit 15 to mirror it.
-pub fn bitmap(m: Mem, bp: u16, id: u16, row: u16, colours: u16) {
+/// SS:[bp+88] its anchor column, [bp+8C] its depth and [bp+12E] bit 15 to mirror it. `anchor`:
+/// the point the anchor is (its record's offset in R), for the display list.
+pub fn bitmap(m: Mem, bp: u16, id: u16, row: u16, colours: u16, anchor: Option<u16>) {
     let ds = m.w(m.ss, 0xf8);
     let es = 0;
     let mut b = Bitmap {
@@ -31,8 +32,9 @@ pub fn bitmap(m: Mem, bp: u16, id: u16, row: u16, colours: u16) {
         ds,
         es,
         bx: 0,
+        listed: false,
     };
-    b.run(id, row, colours);
+    b.run(id, row, colours, anchor);
 }
 
 struct Bitmap<'a> {
@@ -43,6 +45,8 @@ struct Bitmap<'a> {
     es: u16,
     /// the bitmap's header
     bx: u16,
+    /// the display list has it as a bitmap, not as its pixels
+    listed: bool,
 }
 
 /// A loop over the bitmap's rows (19E8 has four, and switches between them).
@@ -95,7 +99,7 @@ impl Bitmap<'_> {
         self.set_d(o + 2, (v >> 16) as u16);
     }
 
-    fn run(&mut self, mut id: u16, row: u16, colours: u16) {
+    fn run(&mut self, mut id: u16, row: u16, colours: u16, anchor: Option<u16>) {
         // 19F0: the bitmap, following an alias
         loop {
             self.set_s(0x180, id);
@@ -156,6 +160,25 @@ impl Bitmap<'_> {
         }
         self.columns(x, columns);
         self.colours();
+        // (in the mirrors, its pixels)
+        if list::recording() && self.db(0x232) == 0 {
+            let id = self.s(0x180);
+            let at = list::Bitmap {
+                bits: 0,
+                colours: [0; 16],
+                anchor: None,
+                col: x as i16,
+                row: row as i16,
+                size: self.d(bx),
+                below: self.d(bx.wrapping_add(6)),
+                depth: self.s(0x16c),
+                scale: self.d(0x234),
+                rows_by: (id != 0xaf && id != 0xaa && id != 0xab).then(|| self.s(0x17e)),
+                mirrored: (self.d(0x230) as i16) < 0,
+                top: self.d(0x236) as i16,
+            };
+            self.listed = list::bitmap(&self.m, self.ds, bx, anchor, at);
+        }
         self.rows(bx);
     }
 
@@ -439,7 +462,7 @@ impl Bitmap<'_> {
     /// STOSB if n is odd, then REP STOSW: n bytes of the colour word's two bytes.
     fn fill(&mut self, mut di: u16, n: u16, colour: u16) {
         let es = self.es;
-        let rec = list::recording();
+        let rec = list::recording() && !self.listed;
         let mut words = n >> 1;
         if n & 1 != 0 {
             self.m.set_b(es, di, colour as u8);

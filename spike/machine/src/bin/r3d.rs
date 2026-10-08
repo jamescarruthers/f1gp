@@ -564,7 +564,7 @@ const OURS: [Ours; 8] = [
         near: true,
         run: Run::Machine(|m| {
             let r = m.cpu.r;
-            r3d::bitmap::bitmap(r3d::Mem::of(m), r[5], r[0], r[1], r[2]);
+            r3d::bitmap::bitmap(r3d::Mem::of(m), r[5], r[0], r[1], r[2], None);
         }),
     },
     Ours {
@@ -1952,7 +1952,7 @@ fn shadow_check(files: &Path, ops: &str) {
                         let bb = back_buffer(&o) as usize;
                         let view = (r3d::list::W * r3d::list::H) as usize;
                         let before = o.hw.mem[bb..bb + view].to_vec();
-                        r3d::list::begin(&o);
+                        r3d::list::begin(&o, 1);
                         r3d::frame::step(&mut o, 0, r3d::frame::Service::Skip);
                         let l = r3d::list::end().unwrap();
                         let again = r3d::fine::draw(&r3d::fine::prims(&l, 1), Some(&before));
@@ -2007,7 +2007,7 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
     let view = (r3d::list::W * r3d::list::H) as usize;
     let (mut same, mut total) = (0, 0);
     let mut sum = r3d::fine::Stats::default();
-    let (mut missing, mut outside, mut pixels, mut cmds) = (0, 0, 0, 0);
+    let (mut missing, mut outside, mut pixels, mut cmds, mut bitmaps) = (0, 0, 0, 0, 0);
     let (mut flat, mut unflat) = (0, 0);
     for (k, p) in caught(out).into_iter().enumerate() {
         let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
@@ -2015,7 +2015,7 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
         m.restore(&snap);
         let at = back_buffer(&m) as usize;
         let before = m.hw.mem[at..at + view].to_vec();
-        r3d::list::begin(&m);
+        r3d::list::begin(&m, 1);
         r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
         let l = r3d::list::end().unwrap();
         let drawn = &m.hw.mem[at..at + view];
@@ -2025,6 +2025,11 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
         outside += l.outside;
         pixels += l.as_pixels;
         cmds += l.cmds.len();
+        bitmaps += l
+            .cmds
+            .iter()
+            .filter(|c| matches!(c, r3d::list::Cmd::Bitmap(_)))
+            .count();
         // edges flat on the game's screen (nothing to draw, 80h) that draw at the largest scale
         let top = *scales.iter().max().unwrap();
         for (k, e) in l.edges.iter().enumerate() {
@@ -2093,7 +2098,7 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
         }
     }
     println!(
-        "{same} of {total} frames the same drawn from the display list at scale 1; {cmds} commands, {} polygons ({} drew nothing), {} as pixels; {} edges, {} with other flags; {} cuts wrapped; {missing} ring entries without an edge, {outside} writes outside the view",
+        "{same} of {total} frames the same drawn from the display list at scale 1; {cmds} commands, {} polygons ({} drew nothing), {} as pixels; {bitmaps} bitmaps; {} edges, {} with other flags; {} cuts wrapped; {missing} ring entries without an edge, {outside} writes outside the view",
         sum.polys, sum.empty, pixels, sum.edges, sum.flags_differ, sum.cut_wrapped
     );
     println!(
@@ -2152,7 +2157,7 @@ fn fine_edges(out: &Path, trials: usize) {
                 continue;
             }
             checked += 1;
-            r3d::list::begin(&m);
+            r3d::list::begin(&m, 1);
             o.run(&mut m);
             let l = r3d::list::end().unwrap();
             let (flags, rec, st) = r3d::fine::edge_at(&l, 0, 1);
@@ -2208,7 +2213,7 @@ fn time_frames(out: &Path, reps: usize) {
                 m.restore(snap);
                 let t = std::time::Instant::now();
                 if listing {
-                    r3d::list::begin(&m);
+                    r3d::list::begin(&m, 1);
                 }
                 r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
                 if listing {
@@ -2318,7 +2323,10 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
                     println!("frame {seen}: {d} of 64000 pixels differ from the game's screen");
                 }
                 if let Ok(dir) = std::env::var("PAGE_SHOTS") {
-                    if shown % 300 == 0 {
+                    let every = std::env::var("PAGE_EVERY")
+                        .ok()
+                        .and_then(|v| v.parse().ok());
+                    if shown % every.unwrap_or(300) == 0 {
                         let rgba: Vec<u8> = pic
                             .iter()
                             .flat_map(|&c| {

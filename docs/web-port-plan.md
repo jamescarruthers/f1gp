@@ -610,8 +610,9 @@ at any resolution.
      highest (primitive number << 8 | colour) written to it, which is painter's
      order without sorting. In headless Chromium here (SwiftShader, a GPU run
      on the CPU, so no measure of a real one) a frame takes 9 ms at scale 1,
-     25–28 ms at 2 and 99–118 ms at 4. For now the bitmaps, poles, crowd,
-     scenery, dithered sky rows and cockpit pieces are game pixels made s x s.
+     25–28 ms at 2 and 99–118 ms at 4. Bitmaps are stepped again at the
+     scale (see below); the poles, crowd, scenery, dithered sky rows and
+     cockpit pieces are game pixels made s x s.
      Natively our routine takes 0.14 ms a frame with recording off, as with
      the recorder compiled out, and 0.47 ms with it on (`r3d time`, the 58
      Monza frames); 20 s of racing in the WebAssembly machine takes the host
@@ -652,11 +653,22 @@ at any resolution.
      t = 0 in 666 of 698 (the rest differ by inputs taken from N+1: the start
      lights, the race order, a view change or a TV cut). One frame of the port
      takes 0.2–0.3 ms in WebAssembly (0.9 ms at worst), the copy 0.07 ms.
-   - **The pixel art at the finer scale.** Bitmaps placed and sized from the
-     finer projection (their texels still the game's), poles s pixels wide from
-     their fine ends, the scenery scrolled finer, the crowd's game-sized texels
-     on fine spans, the ground texture worked out for each fine row, and the
-     sky and ground bands from the fine rows of the points they came from.
+   - **Detail for the scale (done).** Recording for scale s, our routine picks
+     a shape's level of detail and a vertex bitmap's reach as the game would on
+     a screen s times larger (8BAF, 8E94: each greatest depth times s), so the
+     cars keep their polygon models s times as far (to depth FFh s in the
+     cockpit, 1A0h s outside) instead of turning into bitmaps 32 and 52 feet
+     out. The bitmaps (wheels, helmets, boards, flags, marshals, trees, the
+     cars beyond) are drawn again by the drawer's stepping from their anchor
+     projected again, the scale s times larger (`list::Bitmap`, `fine.rs`
+     `bitmap`); at s = 1 the drawer's bytes on every frame of the caught frames
+     and the races. Near, a bitmap is still the game's art made larger.
+   - **The pixel art at the finer scale.** Poles s pixels wide from their fine
+     ends, the scenery scrolled finer, the crowd's game-sized texels on fine
+     spans, the ground texture worked out for each fine row, the sky and
+     ground bands from the fine rows of the points they came from, and perhaps
+     a pixel-art filter (xBR, as the cockpit has) for bitmaps drawn larger than
+     their art.
    - **Edges on the GPU, if needed.** The CPU builds the edges and walks the
      rings at scale s, and the GPU fills the spans. If that costs too much at
      high scales, the edge stepping and the ring walk move to compute shaders;

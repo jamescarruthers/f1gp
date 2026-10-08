@@ -850,7 +850,7 @@ pub fn signals(c: &mut Cpu) {
         c.set_bp(0x12e, 0);
         (c.r[AX], c.r[CX], c.r[DX]) = (id, row, colours);
         let (m, r) = c.split();
-        bitmap::bitmap(m, r[BP], id, row, colours);
+        bitmap::bitmap(m, r[BP], id, row, colours, None);
     };
     if f & 8 != 0 {
         if c.d(0x291b) == 0x8000 {
