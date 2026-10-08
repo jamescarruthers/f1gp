@@ -163,6 +163,7 @@ pub struct Machine {
     /// screen), the frame on the screen, whether the game has copied since the page last took
     /// a frame, and the last frame the page took
     r3d_scale: u32,
+    r3d_cars: crate::r3d::list::Cars,
     r3d_art: crate::r3d::fine::Art,
     r3d_recording: bool,
     r3d_drawn: Option<crate::r3d::shown::Drawn>,
@@ -254,6 +255,7 @@ impl Machine {
             native_next: None,
             native_frames: 0,
             r3d_scale: 0,
+            r3d_cars: crate::r3d::list::Cars::Scale,
             r3d_art: crate::r3d::fine::Art::Pixels,
             r3d_recording: false,
             r3d_drawn: None,
@@ -392,7 +394,7 @@ impl Machine {
     fn r3d_begin(&mut self) {
         self.r3d_recording = self.r3d_scale > 0;
         if self.r3d_recording {
-            crate::r3d::list::begin(self, self.r3d_scale);
+            crate::r3d::list::begin(self, self.r3d_scale, self.r3d_cars);
         }
     }
 
@@ -428,6 +430,12 @@ impl Machine {
             self.r3d_copied = self.r3d_on_screen.is_some();
         }
         crate::r3d::shown::hook(self, self.native_3d && scale > 0);
+    }
+
+    /// How far the cars keep their polygon model while the 3D view is drawn finer (from the
+    /// next frame our routine draws).
+    pub fn set_r3d_cars(&mut self, cars: crate::r3d::list::Cars) {
+        self.r3d_cars = cars;
     }
 
     /// The bitmaps drawn larger than their art smoothed, or as their pixels (fine::Art).

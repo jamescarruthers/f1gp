@@ -88,6 +88,17 @@ pub extern "C" fn mc_native_3d(p: *mut Handle, on: u32) {
 pub extern "C" fn mc_r3d_scale(p: *mut Handle, scale: u32) {
     h(p).m.set_r3d_scale(scale);
 }
+/// How far the cars keep their 3D model while the 3D view is drawn finer: 0 as the game does,
+/// 1 as on a screen the scale times larger, 2 at every distance.
+#[no_mangle]
+pub extern "C" fn mc_r3d_cars(p: *mut Handle, mode: u32) {
+    use crate::r3d::list::Cars;
+    h(p).m.set_r3d_cars(match mode {
+        0 => Cars::Game,
+        2 => Cars::All,
+        _ => Cars::Scale,
+    });
+}
 /// The bitmaps drawn larger than their art smoothed (1) or as their pixels (0).
 #[no_mangle]
 pub extern "C" fn mc_r3d_smooth(p: *mut Handle, on: u32) {

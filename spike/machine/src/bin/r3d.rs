@@ -1952,7 +1952,7 @@ fn shadow_check(files: &Path, ops: &str) {
                         let bb = back_buffer(&o) as usize;
                         let view = (r3d::list::W * r3d::list::H) as usize;
                         let before = o.hw.mem[bb..bb + view].to_vec();
-                        r3d::list::begin(&o, 1);
+                        r3d::list::begin(&o, 1, r3d::list::Cars::Scale);
                         r3d::frame::step(&mut o, 0, r3d::frame::Service::Skip);
                         let l = r3d::list::end().unwrap();
                         let again = r3d::fine::draw(&r3d::fine::prims(&l, 1), Some(&before));
@@ -2015,7 +2015,7 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
         m.restore(&snap);
         let at = back_buffer(&m) as usize;
         let before = m.hw.mem[at..at + view].to_vec();
-        r3d::list::begin(&m, 1);
+        r3d::list::begin(&m, 1, r3d::list::Cars::Scale);
         r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
         let l = r3d::list::end().unwrap();
         let drawn = &m.hw.mem[at..at + view];
@@ -2157,7 +2157,7 @@ fn fine_edges(out: &Path, trials: usize) {
                 continue;
             }
             checked += 1;
-            r3d::list::begin(&m, 1);
+            r3d::list::begin(&m, 1, r3d::list::Cars::Scale);
             o.run(&mut m);
             let l = r3d::list::end().unwrap();
             let (flags, rec, st) = r3d::fine::edge_at(&l, 0, 1);
@@ -2213,7 +2213,7 @@ fn time_frames(out: &Path, reps: usize) {
                 m.restore(snap);
                 let t = std::time::Instant::now();
                 if listing {
-                    r3d::list::begin(&m, 1);
+                    r3d::list::begin(&m, 1, r3d::list::Cars::Scale);
                 }
                 r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
                 if listing {
@@ -2248,6 +2248,12 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
     // PAGE_OFF=n: the scale 0 for one run in n (the page turning r3d=gpu off and on, often in
     // the middle of a frame)
     let off: Option<u32> = std::env::var("PAGE_OFF").ok().and_then(|v| v.parse().ok());
+    // PAGE_CARS=game|scale|all: how far the cars keep their model (list::Cars)
+    m.set_r3d_cars(match std::env::var("PAGE_CARS").as_deref() {
+        Ok("game") => r3d::list::Cars::Game,
+        Ok("all") => r3d::list::Cars::All,
+        _ => r3d::list::Cars::Scale,
+    });
     let (mut seen, mut same, mut shown, mut masked) = (0u32, 0, 0, 0u64);
     let (mut ms, mut runs) = (0.0f64, 0u32);
     for op in session::parse(ops) {

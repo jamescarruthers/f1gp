@@ -41,7 +41,8 @@ const SCAN = (() => {
  */
 export async function createPC(o) {
   let bytes = o.wasm;
-  if (typeof bytes === 'string' || bytes instanceof URL) bytes = await (await fetch(bytes)).arrayBuffer();
+  // (asked again of the server each time: an unversioned file a browser may keep for minutes after a deploy)
+  if (typeof bytes === 'string' || bytes instanceof URL) bytes = await (await fetch(bytes, { cache: 'no-cache' })).arrayBuffer();
   const { instance } = await WebAssembly.instantiate(bytes, {});
   const x = instance.exports;
   const memory = x.memory;
@@ -101,6 +102,12 @@ export async function createPC(o) {
      * at this scale (1 to 8; 0 stops it): machine/src/r3d/shown.rs.
      */
     r3dScale: (s) => x.mc_r3d_scale(h, s),
+    /**
+     * How far the cars keep their 3D model when the view is drawn finer: 'scale' (as the game
+     * would on a screen that many times larger), 'all' (at every distance) or 'game' (as the
+     * game does at its own resolution).
+     */
+    r3dCars: (mode) => x.mc_r3d_cars(h, { game: 0, scale: 1, all: 2 }[mode] ?? 1),
     /** The bitmaps drawn larger than their art smoothed (fine.rs Art::Smooth), or as pixels. */
     r3dSmooth: (on) => x.mc_r3d_smooth(h, on ? 1 : 0),
     /**

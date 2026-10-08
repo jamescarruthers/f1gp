@@ -209,6 +209,19 @@ struct Rec {
 /// scale it is for.
 static ON: AtomicBool = AtomicBool::new(false);
 static SCALE: AtomicU32 = AtomicU32::new(1);
+static CARS: AtomicU32 = AtomicU32::new(Cars::Scale as u32);
+
+/// How far the cars (shape 0) keep their polygon model while recording for a finer scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cars {
+    /// as the game does at its own scale
+    Game = 0,
+    /// as the game would on a screen the recording's scale times larger, as other shapes
+    #[default]
+    Scale = 1,
+    /// at every depth
+    All = 2,
+}
 thread_local! {
     static REC: RefCell<Option<Box<Rec>>> = const { RefCell::new(None) };
 }
@@ -237,6 +250,20 @@ pub(super) fn detail() -> i32 {
     }
 }
 
+/// As `detail`, for the car's levels (`Cars`): 1 for the game's, the scale, or so large that
+/// its polygon model lasts at every depth.
+#[inline]
+pub(super) fn car_detail() -> i32 {
+    if !on() {
+        return 1;
+    }
+    match CARS.load(Ordering::Relaxed) {
+        0 => 1,
+        2 => 0x7fff,
+        _ => detail(),
+    }
+}
+
 /// The recorder, for a hook that has something to do (kept out of line: the routines it is
 /// called from are hot, and recording is rare).
 #[cold]
@@ -252,9 +279,9 @@ fn word(mem: &[u8], a: usize) -> u16 {
     mem[a] as u16 | (mem[a + 1] as u16) << 8
 }
 
-/// Start recording for `scale` (`detail`): the machine is at the 3D routine's entry (SS the
-/// game's, R at SS:00F4).
-pub fn begin(m: &Machine, scale: u32) {
+/// Start recording for `scale` (`detail`), the cars' levels as `cars` says (`car_detail`): the
+/// machine is at the 3D routine's entry (SS the game's, R at SS:00F4).
+pub fn begin(m: &Machine, scale: u32, cars: Cars) {
     let mem = &m.hw.mem;
     let ss = m.cpu.s[2];
     let r = word(mem, lin(ss, 0xf4));
@@ -284,6 +311,7 @@ pub fn begin(m: &Machine, scale: u32) {
         }))
     });
     SCALE.store(scale.max(1), Ordering::Relaxed);
+    CARS.store(cars as u32, Ordering::Relaxed);
     ON.store(true, Ordering::Relaxed);
 }
 

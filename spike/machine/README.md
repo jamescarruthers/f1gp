@@ -139,7 +139,7 @@ screen shows the 3D view (`mc_r3d_shown`, `lib/pc.mjs` `r3dShown`). `r3d page <f
 [scale]` plays a recorded race that way and lays each frame together as the page does: at scale 1
 every frame is the game's screen (all of the three races'), and each copy runs the game's code
 first and must leave the screen as ours does. PAGE_SHOTS=<folder> saves every 300th frame (PAGE_EVERY=n: every nth); PAGE_OFF=n
-sets the scale to 0 for one run in n.
+sets the scale to 0 for one run in n; PAGE_CARS=game|scale|all how far the cars keep their model.
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`
