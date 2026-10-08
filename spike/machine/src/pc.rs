@@ -158,6 +158,13 @@ pub struct Machine {
     native_next: Option<u8>,
     /// the frames our 3D routine has drawn
     pub native_frames: u64,
+    /// with our routine, the 3D view drawn finer for the page (src/r3d/shown.rs): the scale (0
+    /// off), the frame being recorded, the last frame drawn (until the game shows it) and the
+    /// last frame shown
+    r3d_scale: u32,
+    r3d_recording: bool,
+    r3d_drawn: Option<crate::r3d::shown::Drawn>,
+    pub r3d_shown: crate::r3d::shown::Shown,
 }
 
 /// The CPU's registers and the memory: a point to come back to (`Machine::restore`), or to save.
@@ -239,6 +246,10 @@ impl Machine {
             native_3d: false,
             native_next: None,
             native_frames: 0,
+            r3d_scale: 0,
+            r3d_recording: false,
+            r3d_drawn: None,
+            r3d_shown: Default::default(),
         };
         m.bios_init();
         m
@@ -347,16 +358,51 @@ impl Machine {
             match self.run_until(target) {
                 Some(crate::r3d::frame::HOOK) if self.native_3d => {
                     self.native_frames += 1;
+                    self.r3d_begin();
                     self.native_next =
                         crate::r3d::frame::step(self, 0, crate::r3d::frame::Service::Handover);
+                    self.r3d_end();
                 }
                 Some(crate::r3d::frame::RESUME) if self.native_next.is_some() => {
                     let from = self.native_next.take().unwrap();
                     self.native_next =
                         crate::r3d::frame::step(self, from, crate::r3d::frame::Service::Handover);
+                    self.r3d_end();
                 }
                 _ => return,
             }
+        }
+    }
+
+    /// Our routine is called again: the frame it drew last is the one the game shows now; record
+    /// the new one, if the page wants it finer.
+    fn r3d_begin(&mut self) {
+        if let Some(d) = self.r3d_drawn.take() {
+            let serial = self.r3d_shown.serial.wrapping_add(1);
+            self.r3d_shown = crate::r3d::shown::shown(self, &d, self.r3d_scale, serial);
+        }
+        self.r3d_recording = self.r3d_scale > 0;
+        if self.r3d_recording {
+            crate::r3d::list::begin(self);
+        }
+    }
+
+    /// Our routine's frame is drawn (it has handed over for the last time): keep its record.
+    fn r3d_end(&mut self) {
+        if self.r3d_recording && self.native_next.is_none() {
+            self.r3d_recording = false;
+            if let Some(l) = crate::r3d::list::end() {
+                self.r3d_drawn = Some(crate::r3d::shown::drawn(self, l));
+            }
+        }
+    }
+
+    /// The 3D view drawn finer for the page at `scale` (1 to 8; 0 stops it), with our routine
+    /// (set_native_3d): each frame the game shows is then in `r3d_shown`.
+    pub fn set_r3d_scale(&mut self, scale: u32) {
+        self.r3d_scale = scale.min(8);
+        if self.r3d_scale == 0 {
+            self.r3d_drawn = None;
         }
     }
 

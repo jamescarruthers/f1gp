@@ -1513,6 +1513,18 @@ rasteriser decides them, on a screen s times larger:
 The rest is drawn as game pixels made s x s for now, and the texels go on the
 fine pixels of road or grass within their game pixel.
 
+In the page (`render.html` `r3d=gpu`) the frame is laid into the game's
+screen: a screen pixel shows the finer 3D view where the copy to the screen
+(19ED:31FA, read in the code) takes it from the back buffer, in the rows our
+routine drew, and where it still holds what our routine left there. The copy
+takes rows 0–179 in the outside views; in the cockpit, rows 0–102, then on
+rows 103–163 (a row whose SS:6364 offset is 0 left out) the two openings, from
+the left limit (+1F2h) to the left opening's end (+A6h) and from the right
+one's start (+14Ch) to the right limit (+298h), and on rows 116–137 (the main
+table's rows, not the mirror table at SS:63DE) the row from 0 to the left
+opening's end and from the right one's start to 320: the mirrors and their
+housings.
+
 Checked: at s = 1 the list gives back the frame our routine drew, byte for
 byte, on all 176 caught frames (`r3d list`) and on every frame of the three
 recorded races (3,193, `r3d shadow`); on 34,263 made-up edges and 35,209

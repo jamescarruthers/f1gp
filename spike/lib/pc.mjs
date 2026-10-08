@@ -96,6 +96,28 @@ export async function createPC(o) {
     native3d: (on) => x.mc_native_3d(h, on ? 1 : 0),
     /** The frames our 3D routine has drawn. */
     nativeFrames: () => x.mc_native_frames(h),
+    /**
+     * With our 3D routine, each frame the game shows with its 3D view drawn finer for the page
+     * at this scale (1 to 8; 0 stops it): machine/src/r3d/shown.rs.
+     */
+    r3dScale: (s) => x.mc_r3d_scale(h, s),
+    /**
+     * The last frame shown that way, or null: { serial, scale, top (the screen row the 3D view
+     * starts on), words (its primitives, four words each), screen (320 x 200 palette indices),
+     * mask (1 where the screen shows the 3D view), dac (768 bytes, 6-bit) }, views to use
+     * before the next run.
+     */
+    r3dShown() {
+      const g = (k) => x.mc_r3d_shown(h, k) >>> 0;
+      const serial = g(0);
+      if (!serial) return null;
+      const v = view();
+      return {
+        serial, scale: g(1), top: g(2),
+        words: new Uint32Array(v.buffer, g(4), g(3)),
+        screen: v.subarray(g(5), g(5) + 64000), mask: v.subarray(g(6), g(6) + 64000), dac: v.subarray(g(7), g(7) + 768),
+      };
+    },
     /** A key (js-dos/GLFW code) down or up. */
     sendKeyEvent(code, down) {
       const s = SCAN[code];

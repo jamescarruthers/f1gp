@@ -83,6 +83,30 @@ pub extern "C" fn mc_set_cycles(p: *mut Handle, per_ms: f64) {
 pub extern "C" fn mc_native_3d(p: *mut Handle, on: u32) {
     h(p).m.set_native_3d(on != 0);
 }
+/// The 3D view drawn finer for the page at this scale (1 to 8; 0 stops it), by our routine.
+#[no_mangle]
+pub extern "C" fn mc_r3d_scale(p: *mut Handle, scale: u32) {
+    h(p).m.set_r3d_scale(scale);
+}
+/// The last frame the game showed with its 3D view drawn finer (src/r3d/shown.rs): what = 0 its
+/// serial number, 1 its scale, 2 the screen row the 3D view starts on, 3 its primitives' count
+/// of words, 4 their pointer, 5 the screen's pointer (320 x 200), 6 the mask's (1 where the
+/// screen shows the 3D view), 7 the palette's (768 bytes, 6-bit).
+#[no_mangle]
+pub extern "C" fn mc_r3d_shown(p: *mut Handle, what: u32) -> u32 {
+    let s = &h(p).m.r3d_shown;
+    match what {
+        0 => s.serial,
+        1 => s.scale,
+        2 => s.top,
+        3 => s.words.len() as u32,
+        4 => s.words.as_ptr() as u32,
+        5 => s.screen.as_ptr() as u32,
+        6 => s.mask.as_ptr() as u32,
+        7 => s.dac.as_ptr() as u32,
+        _ => 0,
+    }
+}
 /// The frames our 3D routine has drawn.
 #[no_mangle]
 pub extern "C" fn mc_native_frames(p: *mut Handle) -> f64 {

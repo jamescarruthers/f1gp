@@ -128,6 +128,14 @@ scales 1, 2 and 4). `r3d shadow` checks the list on every frame of a race too, a
 fine-edges <out> [trials]` builds made-up edges both ways. `r3d time <out> [runs]` times our
 routine on each caught frame, with the list off and on.
 
+The page's `r3d=gpu` (`render.html`) takes the frames the game shows that way
+(`Machine::set_r3d_scale`, `src/r3d/shown.rs`): at the routine's next call, the frame it recorded
+is the one on the screen, so the machine keeps its primitives at the page's scale with the
+screen, the palette and a mask of the pixels where the screen shows the 3D view (`mc_r3d_shown`,
+`lib/pc.mjs` `r3dShown`). `r3d page <files> <session> [scale]` plays a recorded race that way and
+lays each frame together as the page does: at scale 1 every frame is the game's screen (all of
+the three races'); PAGE_SHOTS=<folder> saves some.
+
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`
 runs the game's routine again from each state, alone: all 58 frames come out byte for byte the
