@@ -64,8 +64,10 @@ pub struct OnScreen {
 pub struct Shown {
     /// counts the frames shown
     pub serial: u32,
-    /// the primitives' scale, and the primitives (`fine::words`, four words each)
+    /// the primitives' scale and how the bitmaps were drawn, and the primitives (`fine::words`,
+    /// four words each)
     pub scale: u32,
+    pub art: fine::Art,
     pub words: Vec<u32>,
     /// the screen (palette indices, 320 x 200), and 1 where it shows the 3D view
     pub screen: Vec<u8>,
@@ -140,10 +142,16 @@ pub fn on_screen(was: Option<OnScreen>, drawn: Option<Drawn>, copied: Vec<u8>) -
 }
 
 /// The frame on the screen as the page takes it now, with its 3D view's primitives at `scale`
-/// (1 to 64), numbered after `last`; None if the screen, the palette and the scale are as
-/// `last` had them and the frame is not new. The primitives are made again only for a new frame
-/// or scale (else taken from `last`).
-pub fn shown(m: &Machine, o: &mut OnScreen, scale: u32, last: &mut Shown) -> Option<Shown> {
+/// (1 to 64) and its bitmaps drawn as `art` says, numbered after `last`; None if the screen,
+/// the palette, the scale and the art are as `last` had them and the frame is not new. The
+/// primitives are made again only for a new frame, scale or art (else taken from `last`).
+pub fn shown(
+    m: &Machine,
+    o: &mut OnScreen,
+    scale: u32,
+    art: fine::Art,
+    last: &mut Shown,
+) -> Option<Shown> {
     let vga = &m.hw.vga;
     let start = vga.start();
     let at = |i: usize| (start + i) & 0xffff;
@@ -164,19 +172,20 @@ pub fn shown(m: &Machine, o: &mut OnScreen, scale: u32, last: &mut Shown) -> Opt
             }
         }
     }
-    let same_frame = !o.fresh && scale == last.scale && d.top as u32 == last.top;
+    let same_frame = !o.fresh && scale == last.scale && art == last.art && d.top as u32 == last.top;
     if same_frame && screen == last.screen && mask == last.mask && dac == last.dac {
         return None;
     }
     let words = if same_frame {
         std::mem::take(&mut last.words)
     } else {
-        fine::words(&fine::prims(&d.list, scale))
+        fine::words(&fine::prims_in(&d.list, scale, art))
     };
     o.fresh = false;
     Some(Shown {
         serial: last.serial.wrapping_add(1),
         scale,
+        art,
         words,
         screen,
         mask,

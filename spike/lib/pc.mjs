@@ -101,6 +101,8 @@ export async function createPC(o) {
      * at this scale (1 to 8; 0 stops it): machine/src/r3d/shown.rs.
      */
     r3dScale: (s) => x.mc_r3d_scale(h, s),
+    /** The bitmaps drawn larger than their art smoothed (fine.rs Art::Smooth), or as pixels. */
+    r3dSmooth: (on) => x.mc_r3d_smooth(h, on ? 1 : 0),
     /**
      * The last frame shown that way, or null: { serial, scale, top (the screen row the 3D view
      * starts on), words (its primitives, four words each), screen (320 x 200 palette indices),

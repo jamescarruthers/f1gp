@@ -163,6 +163,7 @@ pub struct Machine {
     /// screen), the frame on the screen, whether the game has copied since the page last took
     /// a frame, and the last frame the page took
     r3d_scale: u32,
+    r3d_art: crate::r3d::fine::Art,
     r3d_recording: bool,
     r3d_drawn: Option<crate::r3d::shown::Drawn>,
     r3d_on_screen: Option<crate::r3d::shown::OnScreen>,
@@ -253,6 +254,7 @@ impl Machine {
             native_next: None,
             native_frames: 0,
             r3d_scale: 0,
+            r3d_art: crate::r3d::fine::Art::Pixels,
             r3d_recording: false,
             r3d_drawn: None,
             r3d_on_screen: None,
@@ -428,6 +430,20 @@ impl Machine {
         crate::r3d::shown::hook(self, self.native_3d && scale > 0);
     }
 
+    /// The bitmaps drawn larger than their art smoothed, or as their pixels (fine::Art).
+    pub fn set_r3d_smooth(&mut self, on: bool) {
+        let art = if on {
+            crate::r3d::fine::Art::Smooth
+        } else {
+            crate::r3d::fine::Art::Pixels
+        };
+        if art != self.r3d_art {
+            self.r3d_art = art;
+            // the frame on the screen again, drawn the new way
+            self.r3d_copied = self.r3d_on_screen.is_some();
+        }
+    }
+
     /// The machine stopped at the game's copy to the screen (r3d::shown::COPY): the copy done,
     /// paired with the frame our routine drew last.
     fn r3d_copy(&mut self) {
@@ -458,7 +474,7 @@ impl Machine {
         self.r3d_copied = false;
         if let Some(mut o) = self.r3d_on_screen.take() {
             let mut last = std::mem::take(&mut self.r3d_shown);
-            let s = crate::r3d::shown::shown(self, &mut o, self.r3d_scale, &mut last);
+            let s = crate::r3d::shown::shown(self, &mut o, self.r3d_scale, self.r3d_art, &mut last);
             self.r3d_shown = s.unwrap_or(last);
             self.r3d_on_screen = Some(o);
         }

@@ -55,6 +55,10 @@
                           and messages over it (lib/gpu-r3d.mjs); ours without WebGPU
     scale=auto|1..6       r3d=gpu: the 3D view's resolution, in game pixels (1: the
                           game's own pixels); auto, the default: the screen's pixels
+    art=pixels|smooth     r3d=gpu: the bitmaps (wheels, helmets, boards, trees) where they
+                          are drawn larger than their art: as its square pixels (the
+                          default), or smoothed by a pixel-art filter that keeps the
+                          game's colours (machine/src/r3d/fine.rs)
     gpucheck=1            r3d=gpu at scale 1, for probes: every 15th frame read back
                           and compared with the game's screen (renderApp.gpu)
     pad=auto|off          auto: a game controller drives (once the browser sees it: press
@@ -249,6 +253,7 @@ const opts = {
   r3d: ['ours', 'gpu'].includes(q.get('r3d')) ? q.get('r3d') : 'game',
   // r3d=gpu: the 3D view's scale (auto: the screen's pixels), and checks for probes
   scale: /^[1-6]$/.test(q.get('scale') ?? '') ? +q.get('scale') : 'auto',
+  art: q.get('art') === 'smooth' ? 'smooth' : 'pixels',
   gpucheck: q.get('gpucheck') === '1',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
@@ -608,6 +613,7 @@ function frame(now) {
   if (rustPC) {
     rustPC.native3d(opts.r3d !== 'game' && opts.screen === 'original' && !(routine && routine.installed));
     rustPC.r3dScale(gpu && opts.r3d === 'gpu' && opts.screen === 'original' ? gpuSeen.scale : 0);
+    rustPC.r3dSmooth(opts.art === 'smooth');
     const n = rustPC.nativeFrames();
     if (n !== nativeSeen.n) { if (nativeSeen.n === 0) log('game-3d-ours'); nativeSeen.n = n; nativeSeen.at = now; }
   }
@@ -801,7 +807,7 @@ setInterval(() => {
     const fps = gpuSeen.shown - (gpuSeen.lastShown ?? gpuSeen.shown);
     gpuSeen.lastShown = gpuSeen.shown;
     window.renderApp.gpu = { scale: gpuSeen.scale, shown: gpuSeen.shown, fps, sendMs: +med(ms) || null, checked: gpuSeen.checked, differ: gpuSeen.differ, lastDiffer: gpuSeen.lastDiffer, errors: gpu.errors };
-    if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, ${med(ms)} ms a frame to send`;
+    if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, art ${opts.art}, ${med(ms)} ms a frame to send`;
   }
   perf.kept = 0;
 }, 1000);

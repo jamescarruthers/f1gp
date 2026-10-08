@@ -88,6 +88,11 @@ pub extern "C" fn mc_native_3d(p: *mut Handle, on: u32) {
 pub extern "C" fn mc_r3d_scale(p: *mut Handle, scale: u32) {
     h(p).m.set_r3d_scale(scale);
 }
+/// The bitmaps drawn larger than their art smoothed (1) or as their pixels (0).
+#[no_mangle]
+pub extern "C" fn mc_r3d_smooth(p: *mut Handle, on: u32) {
+    h(p).m.set_r3d_smooth(on != 0);
+}
 /// The last frame the game showed with its 3D view drawn finer (src/r3d/shown.rs): what = 0 its
 /// serial number, 1 its scale, 2 the screen row the 3D view starts on, 3 its primitives' count
 /// of words, 4 their pointer, 5 the screen's pointer (320 x 200), 6 the mask's (1 where the

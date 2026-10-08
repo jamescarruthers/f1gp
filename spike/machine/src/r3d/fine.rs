@@ -54,6 +54,15 @@ pub enum Prim {
     Texel { x: u32, y: u32, delta: i8 },
 }
 
+/// How the bitmaps drawn larger than their art look: the art's square pixels, as the game's
+/// drawer steps them, or smoothed by a pixel-art filter that keeps the bitmap's colours.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Art {
+    #[default]
+    Pixels,
+    Smooth,
+}
+
 /// The frame's primitives at scale `s`: `w` x `h` fine pixels.
 pub struct Prims {
     pub s: u32,
@@ -1147,7 +1156,8 @@ impl Fill<'_> {
 /// steps them (1AC2, 1B45), with the scale s times larger, at most 8000h s; its rows from the
 /// cockpit's top through the window's game row, limits and gap s times wider (1DBF). At s = 1,
 /// the game's scale and so the game's pixels.
-fn bitmap(out: &mut Vec<Prim>, list: &List, b: &Bitmap, sc: Scale) {
+fn bitmap(out: &mut Vec<Prim>, list: &List, b: &Bitmap, sc: Scale, art: Art) {
+    let _ = art;
     let s = sc.s as i64;
     let rows = &list.bitmaps[b.bits as usize];
     let (ax, ay) = match &b.anchor {
@@ -1287,8 +1297,14 @@ fn bit_runs(
     }
 }
 
-/// The list's primitives at scale `s` (1 to 64).
+/// The list's primitives at scale `s` (1 to 64), the bitmaps as their pixels.
 pub fn prims(list: &List, s: u32) -> Prims {
+    prims_in(list, s, Art::Pixels)
+}
+
+/// The list's primitives at scale `s` (1 to 64), the bitmaps drawn larger than their art as
+/// `art` says.
+pub fn prims_in(list: &List, s: u32, art: Art) -> Prims {
     assert!((1..=64).contains(&s), "scale {s}");
     let sc = Scale {
         s: s as i32,
@@ -1397,7 +1413,7 @@ pub fn prims(list: &List, s: u32) -> Prims {
                 y: y as u32,
                 delta,
             }),
-            Cmd::Bitmap(b) => bitmap(&mut out, list, b, sc),
+            Cmd::Bitmap(b) => bitmap(&mut out, list, b, sc, art),
         }
     }
     Prims {
