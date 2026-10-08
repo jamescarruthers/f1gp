@@ -19,10 +19,13 @@ fn fill(c: &mut Cpu, seg: u16, at: u16, n: u16, v: u8) {
 
 /// `n` bytes from DS':si to ES':di, a byte at a time (the game's MOVSB and REP MOVSW).
 fn copy(c: &mut Cpu, to: (u16, u16), from: (u16, u16), n: u16) {
+    let rec = list::recording();
     for k in 0..n {
         let v = c.b(from.0, from.1.wrapping_add(k));
         c.set_b(to.0, to.1.wrapping_add(k), v);
-        list::px(to.0, to.1.wrapping_add(k), v);
+        if rec {
+            list::px(to.0, to.1.wrapping_add(k), v);
+        }
     }
 }
 
@@ -150,12 +153,15 @@ pub fn scenery(c: &mut Cpu) {
         let tables = c.c(0x3abf);
         let base = 0x7bc0u16.wrapping_add((level as u16) << 8);
         let n = (bx + 1).wrapping_mul(0x140);
+        let rec = list::recording();
         for k in 0..n {
             let at = di0.wrapping_add(k);
             let v = c.b(es, at);
             let h = c.b(tables, base.wrapping_add(v as u16));
             c.set_b(es, at, h);
-            list::px(es, at, h);
+            if rec {
+                list::px(es, at, h);
+            }
         }
     }
 }

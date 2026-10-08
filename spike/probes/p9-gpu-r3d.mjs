@@ -36,6 +36,10 @@ if (r.error) {
   console.log(r.error);
   process.exit(1);
 }
+if (!r.results.length) {
+  console.log('no frames compared');
+  process.exit(1);
+}
 const bad = r.results.filter((x) => x.differ);
 for (const x of bad.slice(0, 10)) console.log(`${x.frame} at scale ${x.s}: ${x.differ} bytes differ, the first at ${x.first}`);
 const by = (s) => r.results.filter((x) => x.s === s);

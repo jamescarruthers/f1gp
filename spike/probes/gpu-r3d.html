@@ -33,6 +33,7 @@ try {
       const t0 = performance.now();
       const got = await gpu.paint({ prims, s, init });
       const ms = performance.now() - t0;
+      if (want.length !== 320 * s * 164 * s || got.length !== want.length) throw new Error(`${name}: ${got.length} bytes painted, ${want.length} wanted, for ${320 * s * 164 * s}`);
       let differ = 0, first = -1;
       for (let i = 0; i < want.length; i++) if (got[i] !== want[i]) { differ++; if (first < 0) first = i; }
       results.push({ frame, s, prims: prims.length / 4, differ, first, ms: Math.round(ms) });

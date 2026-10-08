@@ -439,16 +439,21 @@ impl Bitmap<'_> {
     /// STOSB if n is odd, then REP STOSW: n bytes of the colour word's two bytes.
     fn fill(&mut self, mut di: u16, n: u16, colour: u16) {
         let es = self.es;
+        let rec = list::recording();
         let mut words = n >> 1;
         if n & 1 != 0 {
             self.m.set_b(es, di, colour as u8);
-            list::px(es, di, colour as u8);
+            if rec {
+                list::px(es, di, colour as u8);
+            }
             di = di.wrapping_add(1);
         }
         while words > 0 {
             self.m.set_w(es, di, colour);
-            list::px(es, di, colour as u8);
-            list::px(es, di.wrapping_add(1), (colour >> 8) as u8);
+            if rec {
+                list::px(es, di, colour as u8);
+                list::px(es, di.wrapping_add(1), (colour >> 8) as u8);
+            }
             di = di.wrapping_add(2);
             words -= 1;
         }

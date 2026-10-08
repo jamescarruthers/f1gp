@@ -612,17 +612,22 @@ impl Fill<'_> {
     /// Store `n` bytes of the colour word R:0048 at ES:(row + x), as STOSB then REP STOSW.
     fn store(&mut self, row: u16, x: u16, n: u16) {
         let [lo, hi] = self.rw(0x48).to_le_bytes();
+        let rec = list::recording();
         let mut d = row.wrapping_add(x);
         if n & 1 == 1 {
             self.m.set_b(self.es, d, lo);
-            list::fill_px(self.es, d, lo);
+            if rec {
+                list::fill_px(self.es, d, lo);
+            }
             d = d.wrapping_add(1);
         }
         for _ in 0..n / 2 {
             self.m.set_b(self.es, d, lo);
             self.m.set_b(self.es, d.wrapping_add(1), hi);
-            list::fill_px(self.es, d, lo);
-            list::fill_px(self.es, d.wrapping_add(1), hi);
+            if rec {
+                list::fill_px(self.es, d, lo);
+                list::fill_px(self.es, d.wrapping_add(1), hi);
+            }
             d = d.wrapping_add(2);
         }
     }
@@ -721,10 +726,13 @@ impl Fill<'_> {
         };
         let mut s = off.wrapping_add(a);
         let mut d = self.di.wrapping_add(x);
+        let rec = list::recording();
         for _ in 0..n {
             let v = self.m.b(seg, s);
             self.m.set_b(self.es, d, v);
-            list::fill_px(self.es, d, v);
+            if rec {
+                list::fill_px(self.es, d, v);
+            }
             s = s.wrapping_add(1);
             d = d.wrapping_add(1);
         }

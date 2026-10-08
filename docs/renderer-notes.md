@@ -1492,16 +1492,19 @@ draws, it records a display list:
 rasteriser decides them, on a screen s times larger:
 
 - each point projected again from the values the game divided, the column
-  truncated and the row rounded as 2168 rounds it. A point made otherwise (a
-  copy, 1FAD's placement far off the screen, the strips' dummy point) goes at
-  s times its game position; a point the game moved by a row or column after
-  projecting it (226B, 2334, 875A) moves by s;
+  truncated and the row rounded as 2168 rounds it. A point raised from another
+  (a fence's top, 2334; a mirror vertex, 84D6) is projected again from its
+  source's values with its own height, so the edges between the two stay
+  upright. A point made otherwise (1FAD's placement far off the screen, the
+  strips' dummy point, a point behind the near plane) goes at s times its game
+  position; a point the game moved by a row or column after projecting it
+  (226B, 875A, 2334's row the same as its source's) moves by s;
 - each edge built as 03E9 and 02E4 build it: flat or not, clipped to the
   screen's sides, cut at depth 8 from the same camera-space values (with the
   same number of halvings), stepped with the same error term. Of the 41,918
   edges built in the caught frames, 15,871 are lines the game leaves with
   nothing to draw (flags 80h: flat, or both ends behind the camera), never put
-  in a ring; 3,445 of those draw at s = 4, so the flags cannot be copied from
+  in a ring; 4,553 of those draw at s = 4, so the flags cannot be copied from
   the game's run;
 - each ring walked as 0999 walks it, with the border lists s times longer and
   the cockpit's window read at the game row each fine row lies in (its limits

@@ -113,7 +113,10 @@ pub fn vertex(c: &mut Cpu) {
     let mut cx = (p >> 16) as u16;
     let mut dx = cx;
     let mut ax = c.d(dst.wrapping_add(0xa)) & 0xfffc;
+    // what the finer scale can project again: the source's division with this height
+    let mut fine = None;
     if ax & 0x10 != 0 {
+        list::unprojected(dst);
         ax |= if (cx as i16) < 0 { 1 } else { 2 };
     } else {
         let dl = (ax >> 8) & 0x1f;
@@ -134,12 +137,19 @@ pub fn vertex(c: &mut Cpu) {
             let depth = c.d(dst.wrapping_add(4));
             c.set_bp(0x14, depth);
             let (q, r) = round(c, n, depth);
+            if c.ssb(0xc0) == 0 {
+                fine = Some(n);
+            }
             cx = q;
             dx = r;
         }
         // 85C2
         let (y, over) = (cx.wrapping_neg() as i16).overflowing_add(c.bp(0x130) as i16);
         cx = y as u16;
+        match fine {
+            Some(n) if !over => list::raised(src, dst, n, c.bp(0x130) as i16, y),
+            _ => list::unprojected(dst),
+        }
         if over {
             cx = cx.wrapping_sub(c.bp(0x130));
             if (cx as i16) < 0 {
@@ -288,9 +298,12 @@ pub fn pole(c: &mut Cpu) {
         return;
     }
     let al = c.ssb(0x2ee4);
+    let rec = list::recording();
     for _ in 0..n.wrapping_add(1) {
         c.set_b(seg, p, al);
-        list::px(seg, p, al);
+        if rec {
+            list::px(seg, p, al);
+        }
         p = p.wrapping_sub(0x140);
     }
     c.r[CX] = 0;

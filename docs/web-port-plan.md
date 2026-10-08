@@ -612,9 +612,10 @@ at any resolution.
      on the CPU, so no measure of a real one) a frame takes 9 ms at scale 1,
      25–28 ms at 2 and 99–118 ms at 4. For now the bitmaps, poles, crowd,
      scenery, dithered sky rows and cockpit pieces are game pixels made s x s.
-     Recording costs nothing measurable when it is off: 20 s of racing in the
-     WebAssembly machine took the host 1.8–2.0 s, against 1.8–1.9 s before
-     (`probes/p8-r3d-native.mjs`).
+     Natively our routine takes 0.14 ms a frame with recording off, as with
+     the recorder compiled out, and 0.47 ms with it on (`r3d time`, the 58
+     Monza frames); 20 s of racing in the WebAssembly machine takes the host
+     1.8–1.9 s, as before (`probes/p8-r3d-native.mjs`).
    - **In the page (next).** `r3d=gpu` with `scale=1|2|3|4|screen`: the list
      taken at the routine's end in the WebAssembly machine and painted on a
      WebGPU canvas in the game's palette; the cockpit and dash from the game's

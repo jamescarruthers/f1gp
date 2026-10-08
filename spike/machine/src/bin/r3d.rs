@@ -2192,6 +2192,43 @@ fn fine_edges(out: &Path, trials: usize) {
     }
 }
 
+/// Our 3D routine timed on each caught frame (natively, `reps` runs a frame, each from the caught
+/// state): the time a frame takes, its mean and the slowest, with the display list off and on.
+fn time_frames(out: &Path, reps: usize) {
+    let snaps: Vec<Snapshot> = caught(out)
+        .iter()
+        .map(|p| Snapshot::from_bytes(&std::fs::read(p).unwrap()).unwrap())
+        .collect();
+    let mut m = Machine::new();
+    for listing in [false, true] {
+        let (mut sum, mut worst) = (0.0f64, 0.0f64);
+        for snap in &snaps {
+            let mut best = f64::MAX;
+            for _ in 0..reps {
+                m.restore(snap);
+                let t = std::time::Instant::now();
+                if listing {
+                    r3d::list::begin(&m);
+                }
+                r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
+                if listing {
+                    std::hint::black_box(r3d::list::end());
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            sum += best;
+            worst = worst.max(best);
+        }
+        println!(
+            "{}: {:.3} ms a frame on average, {:.3} ms at most ({} frames, the best of {reps} runs each)",
+            if listing { "with the display list" } else { "our routine" },
+            sum / snaps.len() as f64,
+            worst,
+            snaps.len()
+        );
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -2229,6 +2266,10 @@ fn main() {
         Some("fine-edges") => fine_edges(
             Path::new(&a[2]),
             a.get(3).map(|s| s.parse().unwrap()).unwrap_or(20_000),
+        ),
+        Some("time") => time_frames(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(5),
         ),
         Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
         Some("fills") => fill_calls(

@@ -403,10 +403,13 @@ fn row(c: &mut Cpu) {
     let (es, di) = (c.d(0x1e), c.d(0x1c));
     let mut di = di.wrapping_add(c.r[CX].wrapping_mul(0x140));
     let ax = c.r[AX];
+    let rec = list::recording();
     for _ in 0..0xa0 {
         c.set_w(es, di, ax);
-        list::px(es, di, ax as u8);
-        list::px(es, di.wrapping_add(1), (ax >> 8) as u8);
+        if rec {
+            list::px(es, di, ax as u8);
+            list::px(es, di.wrapping_add(1), (ax >> 8) as u8);
+        }
         di = di.wrapping_add(2);
     }
     c.s[ES] = es;

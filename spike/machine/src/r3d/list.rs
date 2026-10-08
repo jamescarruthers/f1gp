@@ -14,10 +14,12 @@
 //!   sky rows, the cockpit's pieces), as the game's pixels, in runs.
 //! - **Texels** of the ground texture (7F64): the shade added to a game pixel of road or grass.
 //!
-//! The recorder is off unless `begin` was called; each hook is then a test of one flag.
+//! The recorder is off unless `begin` was called; each hook is then a test of one flag, which
+//! the per-pixel loops read once (`recording`).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::Mem;
 use crate::pc::Machine;
@@ -160,16 +162,27 @@ struct Rec {
     as_pixels: bool,
 }
 
+/// Whether a recording is on (on some thread: the recorder itself is the thread's own).
+static ON: AtomicBool = AtomicBool::new(false);
 thread_local! {
-    static ON: Cell<bool> = const { Cell::new(false) };
     static REC: RefCell<Option<Box<Rec>>> = const { RefCell::new(None) };
 }
 
 #[inline]
 fn on() -> bool {
-    ON.with(|c| c.get())
+    ON.load(Ordering::Relaxed)
 }
 
+/// Whether the hooks have anything to do: read once before a loop of pixels.
+#[inline]
+pub(super) fn recording() -> bool {
+    on()
+}
+
+/// The recorder, for a hook that has something to do (kept out of line: the routines it is
+/// called from are hot, and recording is rare).
+#[cold]
+#[inline(never)]
 fn with<T>(f: impl FnOnce(&mut Rec) -> T) -> Option<T> {
     REC.with(|r| r.borrow_mut().as_mut().map(|r| f(r)))
 }
@@ -210,12 +223,12 @@ pub fn begin(m: &Machine) {
             as_pixels: false,
         }))
     });
-    ON.with(|c| c.set(true));
+    ON.store(true, Ordering::Relaxed);
 }
 
 /// Stop recording; the list, if recording was on.
 pub fn end() -> Option<List> {
-    ON.with(|c| c.set(false));
+    ON.store(false, Ordering::Relaxed);
     REC.with(|c| c.borrow_mut().take()).map(|r| r.list)
 }
 
@@ -231,6 +244,22 @@ pub(super) fn projected(base: u16, p: Proj) {
 pub(super) fn unprojected(base: u16) {
     if on() {
         with(|r| r.shadow.remove(&base));
+    }
+}
+
+/// The record at R:dst was made from the one at R:src (2334, 84D6): the same column, sideways
+/// value and depth, and a new height, divided as 2168 divides it (`n`) for the row `row`, before
+/// any nudge (a row the same as the source's moved up one).
+pub(super) fn raised(src: u16, dst: u16, n: i32, h: i16, row: i16) {
+    if on() {
+        with(|r| match r.shadow.get(&src).copied() {
+            Some(p) => {
+                r.shadow.insert(dst, Proj { n, h, row, ..p });
+            }
+            None => {
+                r.shadow.remove(&dst);
+            }
+        });
     }
 }
 

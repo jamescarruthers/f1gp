@@ -5,6 +5,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::point::{self, Entry};
 use super::regs::*;
 
@@ -70,8 +71,11 @@ pub fn raise(c: &mut Cpu) {
     let mut cx = ((p << 1) >> 16) as u16;
     let mut dx = cx;
     let mut ax = c.d(bx.wrapping_add(0xa)) & 0xfffc;
+    // what the finer scale can project again: the source's division with this height
+    let mut fine = None;
     if ax & 0x10 != 0 {
         // 2373: behind the near plane: above or below only
+        list::unprojected(bx);
         ax |= if (cx as i16) < 0 { 1 } else { 2 };
         c.set_d(bx.wrapping_add(0xa), ax);
         c.r[AX] = ax;
@@ -100,6 +104,7 @@ pub fn raise(c: &mut Cpu) {
         if c.ssb(0xc0) != 0 {
             q = if (rem as i16) < 0 { 0x8000 } else { 0x7fff };
         } else {
+            fine = Some(n);
             let carry = rem & 0x8000 != 0;
             rem <<= 1;
             if carry {
@@ -131,6 +136,10 @@ pub fn raise(c: &mut Cpu) {
     } else {
         y as u16
     };
+    match fine {
+        Some(n) if !over => list::raised(si, bx, n, horizon as i16, cx as i16),
+        _ => list::unprojected(bx),
+    }
     if cx == c.d(si.wrapping_add(8)) {
         cx = cx.wrapping_sub(1);
     }

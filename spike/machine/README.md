@@ -125,7 +125,8 @@ rules on an s times larger screen, the rest as game pixels s x s. `r3d list <out
 (all 176 caught frames), and saves the primitives of the first `keep` frames at each scale for
 the WebGPU rasteriser's check (`probes/p9-gpu-r3d.mjs`, `lib/gpu-r3d.mjs`: the same bytes at
 scales 1, 2 and 4). `r3d shadow` checks the list on every frame of a race too, and `r3d
-fine-edges <out> [trials]` builds made-up edges both ways.
+fine-edges <out> [trials]` builds made-up edges both ways. `r3d time <out> [runs]` times our
+routine on each caught frame, with the list off and on.
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`
