@@ -1809,9 +1809,9 @@ fn ours_check(out: &Path, names: &str) {
             .into_iter()
             .filter(|o| names == "all" || names.split(',').any(|n| n == o.name))
             .collect();
-        // one hook number each, below the one call_far returns at
+        // one hook number each, below the machine's own (r3d::shown::COPY and up)
         assert!(
-            AT_CALL as usize + all.len() <= 0xfd,
+            AT_CALL as usize + all.len() <= r3d::shown::COPY as usize,
             "{} routines: too many to hook at once",
             all.len()
         );
@@ -2238,8 +2238,13 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
     let mut m = session::machine(files, "GP.EXE", " /g");
     m.set_native_3d(true);
     m.set_r3d_scale(scale);
+    // each copy to the screen by the game's code first, our port held to it
+    m.r3d_copy_check = Some((0, 0));
+    // PAGE_OFF=n: the scale 0 for one run in n (the page turning r3d=gpu off and on, often in
+    // the middle of a frame)
+    let off: Option<u32> = std::env::var("PAGE_OFF").ok().and_then(|v| v.parse().ok());
     let (mut seen, mut same, mut shown, mut masked) = (0u32, 0, 0, 0u64);
-    let mut ms = 0.0f64;
+    let (mut ms, mut runs) = (0.0f64, 0u32);
     for op in session::parse(ops) {
         match op {
             Op::Cycles(c) => m.cycles_per_ms = c,
@@ -2247,6 +2252,10 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
             Op::Write(at, bytes) => m.hw.mem[at..at + bytes.len()].copy_from_slice(&bytes),
             Op::Mark | Op::End(_) => {}
             Op::Run(t) => {
+                runs += 1;
+                if let Some(n) = off {
+                    m.set_r3d_scale(if runs % n == 0 { 0 } else { scale });
+                }
                 let t0 = std::time::Instant::now();
                 m.run(t);
                 ms += t0.elapsed().as_secs_f64() * 1000.0;
@@ -2337,7 +2346,9 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
         masked as f64 / shown.max(1) as f64 / (scale * scale) as f64,
         ms
     );
-    if scale == 1 && same != shown {
+    let (copies, differ) = m.r3d_copy_check.unwrap();
+    println!("{copies} copies to the screen by our port of 19ED:31FA, {differ} of them not as the game's");
+    if (scale == 1 && same != shown) || differ != 0 || copies == 0 {
         std::process::exit(1);
     }
 }

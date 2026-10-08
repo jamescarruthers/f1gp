@@ -3,21 +3,45 @@
 //! around them the game's own screen, its cockpit, dash and messages, with a mask of the pixels
 //! where the screen shows the 3D view.
 //!
-//! The game copies its back buffer to the screen once a frame (19ED:31FA, after the dash and the
-//! messages): rows 0-179 in the outside views; in the cockpit rows 0-102, then on rows 103-163
-//! the window's two openings (SS:6364: from the left limit to the left opening's end, from the
-//! right one's start to the right limit) and on rows 116-137 the mirrors too (all of the row but
-//! the gap between the openings). A screen pixel shows the 3D view where it lies in that copy,
-//! in the rows our routine drew, and still holds what our routine left there (the messages are
-//! drawn into the back buffer after it, the dash and the cockpit straight onto the screen).
+//! Our routine's frame is recorded as it draws (`Drawn`), with the 3D view's rows as it leaves
+//! them in the back buffer. The game puts the back buffer on the screen once a frame, in the race
+//! and in pause and the pit stop (19ED:31FA, after the dash and the messages); we take that
+//! routine over (`COPY`, the port `screen::show`), so each copy marks the bytes it takes from the
+//! back buffer and pairs them with the frame our routine drew last (`OnScreen`). When the page
+//! takes the machine's state (the end of Machine::run), the screen and the palette as they are
+//! then (the game sets some of the dash's colours after the copy) give the frame (`shown`): a
+//! screen pixel shows the 3D view where the copy took it from the back buffer and it is still
+//! what our routine left there.
 //!
-//! Our routine's frame is recorded as it draws (`Drawn`); the game shows it at the end of its
-//! frame, so the pair is taken when the routine is called again (`shown`): the screen and the
-//! palette as they are then belong to the frame recorded.
+//! A limit: a pixel the game draws over the view in the back buffer (a message) in the colour
+//! our routine left there is taken for the view. At scale 1 that is the same pixel; finer, the
+//! view's own finer pixels show there in place of the message's square.
 
 use super::fine;
 use super::list::{self, List};
+use super::regs::Cpu;
+use super::screen;
 use crate::pc::Machine;
+
+/// The hook at the game's copy to the screen while the page wants the 3D view finer
+/// (Machine::run runs `copy` there).
+pub const COPY: u8 = 0xfc;
+/// 19ED:31FA once gp.exe is loaded (19ED in the image, at 1B8F), and its first bytes.
+const SEG: u16 = 0x1b8f;
+const AT: u32 = ((SEG as u32) << 4) + 0x31fa;
+const PROLOGUE: [u8; 8] = [0x1e, 0x06, 0x60, 0x36, 0x8e, 0x1e, 0xf0, 0x00];
+
+/// The copy hooked (`on`) or put back, once the game's code is there.
+pub fn hook(m: &mut Machine, on: bool) {
+    let a = AT as usize;
+    let hooked =
+        m.hw.mem[a..a + 3] == [0xfe, 0x38, COPY] && m.hw.mem[a + 3..a + 8] == PROLOGUE[3..];
+    if on && !hooked && m.hw.mem[a..a + 8] == PROLOGUE {
+        m.hook(AT, COPY);
+    } else if !on && hooked {
+        m.unhook(AT, [PROLOGUE[0], PROLOGUE[1], PROLOGUE[2]]);
+    }
+}
 
 /// A frame our routine drew: its display list, the 3D view's rows as it left them in the back
 /// buffer, and the screen row the view starts on.
@@ -25,7 +49,14 @@ pub struct Drawn {
     list: List,
     back: Vec<u8>,
     top: usize,
-    cockpit: bool,
+}
+
+/// The frame the game has put on the screen: what our routine drew, the bytes of A000 the copy
+/// took from the back buffer (1 each), and whether it is yet to be shown.
+pub struct OnScreen {
+    drawn: Drawn,
+    copied: Vec<u8>,
+    fresh: bool,
 }
 
 /// A frame as the page takes it.
@@ -66,60 +97,90 @@ pub fn drawn(m: &Machine, list: List) -> Drawn {
     Drawn {
         back: m.hw.mem[view..view + W * H].to_vec(),
         top: if top <= 200 - H { top } else { 0 },
-        cockpit: m.hw.mem[lin(g, 0x981)] == 0,
         list,
     }
 }
 
-/// Whether the game's copy to the screen takes the pixel at (x, y) from the back buffer.
-fn copied(d: &Drawn, x: usize, y: usize) -> bool {
-    if !d.cockpit {
-        return y < 180;
-    }
-    if y < 0x67 {
-        return true;
-    }
-    if y >= 0xa4 {
-        return false;
-    }
-    let t = |k: usize| d.list.window_at(k, y as i32) as i32;
-    if t(0) == 0 {
-        return false;
-    }
-    let x = x as i32;
-    let opening = (t(3) <= x && x < t(1)) || (t(2) <= x && x < t(4));
-    let mirror = (0x74..0x8a).contains(&y) && (x < t(1) || x >= t(2));
-    opening || mirror
+/// The machine stopped at `COPY`: the game's copy to the screen done by our port, and a far
+/// return. The bytes it took from the back buffer, marked by their offset in A000.
+pub fn copy(m: &mut Machine) -> Vec<u8> {
+    let mut copied = vec![0u8; 0x10000];
+    screen::show(&mut Cpu::of(m), Some(&mut copied));
+    m.retf();
+    copied
 }
 
-/// The frame our routine drew, as the game now shows it (the machine at the routine's next
-/// call), with its 3D view's primitives at `scale`.
-pub fn shown(m: &Machine, d: &Drawn, scale: u32, serial: u32) -> Shown {
+/// As `copy`, held to the game's own copy, run first on the machine as it is: whether the port
+/// left the screen (A000) and SS:0138 as the game's copy does.
+pub fn copy_checked(m: &mut Machine) -> (Vec<u8>, bool) {
+    let flag = lin(m.cpu.s[2], 0x138);
+    let before = m.snapshot();
+    m.unhook(AT, [PROLOGUE[0], PROLOGUE[1], PROLOGUE[2]]);
+    let ran = m.call_far(SEG, 0x31fa, 1 << 20, &mut |_, _| {});
+    let want = (m.hw.mem[0xa0000..0xb0000].to_vec(), m.hw.mem[flag]);
+    m.restore(&before);
+    let copied = copy(m);
+    let same = ran.is_ok() && m.hw.mem[0xa0000..0xb0000] == want.0[..] && m.hw.mem[flag] == want.1;
+    (copied, same)
+}
+
+/// The game has copied its back buffer to the screen (`copied`): pair it with the frame our
+/// routine drew last (`drawn`, taken), or keep the one already on the screen (pause, the pit
+/// stop: the game copies again without drawing).
+pub fn on_screen(was: Option<OnScreen>, drawn: Option<Drawn>, copied: Vec<u8>) -> Option<OnScreen> {
+    match (drawn, was) {
+        (Some(drawn), _) => Some(OnScreen {
+            drawn,
+            copied,
+            fresh: true,
+        }),
+        (None, Some(o)) => Some(OnScreen { copied, ..o }),
+        (None, None) => None,
+    }
+}
+
+/// The frame on the screen as the page takes it now, with its 3D view's primitives at `scale`
+/// (1 to 64), numbered after `last`; None if the screen, the palette and the scale are as
+/// `last` had them and the frame is not new. The primitives are made again only for a new frame
+/// or scale (else taken from `last`).
+pub fn shown(m: &Machine, o: &mut OnScreen, scale: u32, last: &mut Shown) -> Option<Shown> {
     let vga = &m.hw.vga;
+    let start = vga.start();
+    let at = |i: usize| (start + i) & 0xffff;
     let mut screen = vec![0u8; W * 200];
     if vga.mode == 0x13 {
-        let start = vga.start();
         for (i, p) in screen.iter_mut().enumerate() {
-            *p = m.hw.mem[0xa0000 + ((start + i) & 0xffff)];
+            *p = m.hw.mem[0xa0000 + at(i)];
         }
     }
+    let dac: Vec<u8> = vga.dac.iter().flatten().copied().collect();
+    let d = &o.drawn;
     let mut mask = vec![0u8; W * 200];
     for y in d.top..d.top + H {
         for x in 0..W {
             let i = y * W + x;
-            if copied(d, x, y) && screen[i] == d.back[(y - d.top) * W + x] {
+            if o.copied[at(i)] != 0 && screen[i] == d.back[(y - d.top) * W + x] {
                 mask[i] = 1;
             }
         }
     }
-    let p = fine::prims(&d.list, scale);
-    Shown {
-        serial,
+    let same_frame = !o.fresh && scale == last.scale && d.top as u32 == last.top;
+    if same_frame && screen == last.screen && mask == last.mask && dac == last.dac {
+        return None;
+    }
+    let words = if same_frame {
+        std::mem::take(&mut last.words)
+    } else {
+        fine::words(&fine::prims(&d.list, scale))
+    };
+    o.fresh = false;
+    Some(Shown {
+        serial: last.serial.wrapping_add(1),
         scale,
-        words: fine::words(&p),
+        words,
         screen,
         mask,
-        dac: vga.dac.iter().flatten().copied().collect(),
+        dac,
         top: d.top as u32,
-    }
+    })
 }

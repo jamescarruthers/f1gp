@@ -1515,15 +1515,27 @@ fine pixels of road or grass within their game pixel.
 
 In the page (`render.html` `r3d=gpu`) the frame is laid into the game's
 screen: a screen pixel shows the finer 3D view where the copy to the screen
-(19ED:31FA, read in the code) takes it from the back buffer, in the rows our
-routine drew, and where it still holds what our routine left there. The copy
-takes rows 0–179 in the outside views; in the cockpit, rows 0–102, then on
-rows 103–163 (a row whose SS:6364 offset is 0 left out) the two openings, from
-the left limit (+1F2h) to the left opening's end (+A6h) and from the right
-one's start (+14Ch) to the right limit (+298h), and on rows 116–137 (the main
-table's rows, not the mirror table at SS:63DE) the row from 0 to the left
-opening's end and from the right one's start to 320: the mirrors and their
-housings.
+took it from the back buffer, in the rows our routine drew, and where it still
+holds what our routine left there. The copy takes rows 0–179 in the outside
+views; in the cockpit, rows 0–102, then on rows 103–163 (a row whose SS:6364
+offset is 0 left out) the two openings, from the left limit (+1F2h) to the left
+opening's end (+A6h) and from the right one's start (+14Ch) to the right limit
+(+298h), and on rows 116–137 (the main table's rows, not the mirror table at
+SS:63DE) the row from 0 to the left opening's end and from the right one's
+start to 320: the mirrors and their housings. The openings' bytes are read from
+the back buffer at the screen's own offsets (SI = DI), so the back buffer's
+offset must be 0, as it is (525C:0000, set at 0:C2C5 before each copy, with
+DS:04B4 and DS:04C0 at A000:0000).
+
+The machine takes the copy over (a hook at 19ED:31FA, `screen::show`), so it
+knows each byte the copy took, and pairs it with the frame our routine drew
+last. The game copies in the race (0:C2FB, called after 19ED:142B has drawn the
+dash), in pause (0:DDD1, 0:DFA6: once, the PAUSED board drawn, then it waits)
+and in the pit stop (0:F38B). After the copy it sets some of the palette (the
+dash's lights, 19ED:2D8C), so the page takes the screen and the palette when
+the machine stops for it, not at the copy. A message drawn over the view in
+the back buffer in the colour our routine left there is taken for the view; at
+s > 1 the view's finer pixels show there.
 
 Checked: at s = 1 the list gives back the frame our routine drew, byte for
 byte, on all 176 caught frames (`r3d list`) and on every frame of the three
@@ -1531,7 +1543,10 @@ recorded races (3,193, `r3d shadow`); on 34,263 made-up edges and 35,209
 made-up border edges the edge rebuilt from the list has the game's flags and
 record (`r3d fine-edges`). The WebGPU rasteriser (`spike/lib/gpu-r3d.mjs`)
 paints the list's primitives to the same bytes as `fine.rs` at scales 1, 2 and
-4 on all 176 frames (`spike/probes/p9-gpu-r3d.mjs`).
+4 on all 176 frames (`spike/probes/p9-gpu-r3d.mjs`). Our copy leaves the screen
+and SS:0138 as the game's copy does on every copy of the three races (1,594,
+1,131 and 1,130) and of one with a pause (`r3d page`, which runs the game's copy
+first on each).
 
 ### The frame around the 3D view, traced for the composite
 

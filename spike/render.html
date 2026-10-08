@@ -145,7 +145,7 @@
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   #screen, #gpu { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
-  #gpu[hidden] { display: none; }
+  #screen[hidden], #gpu[hidden] { display: none; }
   #gl { width: min(100%, 960px); aspect-ratio: 16 / 9; display: block; }
   .glpane { flex: 1 1 560px; min-width: 0; }
   .glwrap { position: relative; }
@@ -155,10 +155,10 @@
   body.gl-only .origpane { display: none; }
   body.overlay .glpane { display: none; }
   body.overlay .origpane { position: relative; }
-  body.overlay #screen { width: min(960px, calc(100vw - 50px)); }
+  body.overlay #screen, body.overlay #gpu { width: min(960px, calc(100vw - 50px)); }
   #overgl { display: none; position: absolute; left: 8px; top: 8px; opacity: 0.5; pointer-events: none; image-rendering: pixelated; }
   body.overlay #overgl { display: block; }
-  @media (max-width: 700px) { #screen { width: 100%; } main { padding: 0 16px 16px; } }
+  @media (max-width: 700px) { #screen, #gpu { width: 100%; } main { padding: 0 16px 16px; } }
   /* one screen */
   body.single main { display: block; padding: 0 16px 12px; }
   #stage { position: relative; width: 100%; height: calc(100vh - 72px); min-height: 240px; background: #000; overflow: hidden; border-radius: 6px; }
@@ -475,8 +475,8 @@ const glCanvas = opts.layout === 'overlay' ? $('overgl') : $('gl');
 const renderer = new TrackRenderer(glCanvas);
 function sizeCanvas() {
   if (opts.layout === 'overlay') {
-    // match the original screen's box exactly
-    const s = screen.getBoundingClientRect();
+    // match the original screen's box exactly (the WebGPU canvas's while it shows instead)
+    const s = ($('gpu').hidden ? screen : $('gpu')).getBoundingClientRect();
     glCanvas.style.width = `${s.width}px`; glCanvas.style.height = `${s.height}px`;
   }
   const r = glCanvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
@@ -630,7 +630,8 @@ function frame(now) {
       }).catch((e) => log('gpu-check-failed', { error: String(e) }));
     }
   }
-  const drawingGpu = !!gpu && opts.r3d === 'gpu' && opts.screen === 'original' && now - gpuSeen.at < 500;
+  // (kept while the game is paused: it shows one frame and copies no more)
+  const drawingGpu = !!gpu && opts.r3d === 'gpu' && opts.screen === 'original' && gpuSeen.shown > 0 && (now - gpuSeen.at < 500 || gamePaused);
   if ($('gpu').hidden === drawingGpu) { $('gpu').hidden = !drawingGpu; log(drawingGpu ? 'gpu-shown' : 'gpu-hidden'); }
   if (!swapped && $('screen').hidden !== drawingGpu) $('screen').hidden = drawingGpu;
   // the game draws a race view while the routine runs (it stops in pause, where the frame stays)
