@@ -36,7 +36,7 @@ Addresses and evidence codes follow `docs/memory-map.md`. In addition:
 
 | Step | Routine | What it does | Evidence |
 | --- | --- | --- | --- |
-| 1 | 8261 | Temporarily patches two bytes (+24, +52) of the viewed car's shape record; 82CC restores them at the end. Purpose unknown. | SC |
+| 1 | 8261 | In the pits, sets the fence colour codes (+24, +52) of the viewed car's pit box to 1 (red) on one side; 82CC puts them back at the end ("Routine 0F47:8261" below). | SC |
 | 2 | 18E1 | SS:01AF = colour 12h (grass), SS:01AE = colour 1Ah (road). When wet (SS:122E ≠ 0) and SS:0184 > 0 both go through a darkening table (7BCE:7BC0, level SS:0184 − 1). | SC |
 | 3 | A783 | SS:01B4 = 1C0h when the viewed car is in the pit lane and well off its centre line. | SC |
 | 4 | 49C0 | Sets R:00FA, the "road drawn as a polygon" mode (section 5). | SC |
@@ -46,16 +46,35 @@ Addresses and evidence codes follow `docs/memory-map.md`. In addition:
 | 8 | 72BE | **Sky gradient, horizon image, far ground** (section 5). | SC, DT |
 | 9 | 4C12 | Turns projected points into clipped screen edges (section 7). | SC |
 | 10 | 802A | **Draws** block by block, far to near: a road-coloured row band, then 5470 (white lines, road markings, grass) and 6425 (fences, kerbs, objects, cars) for the block's segments. Then the remaining objects (541B), then the ground texture (7F64, when the T option is on), then cockpit parts. | SC, DT |
-| 11 | A737, 82CC | Tidy-up. | SC |
+| 11 | A737, 82CC | Takes the cars off their segments; puts the pit box's colour codes back. | SC |
 
 Between steps the renderer calls `lcall 19ED:008C`, the same service the main
-loop calls; it is not part of drawing.
+loop calls; it is not part of drawing. It is the palette step: while a palette
+change is pending (SS:08DA, as when a session fades in) the driver at 8D10 (far
+8D10:0000 as patched into 19ED:0098, AX 7) sends the VGA the next part of it.
+
+### Rewritten
+
+The whole routine is rewritten in Rust and exact (`spike/machine/src/r3d/`,
+`frame.rs` at the top): from the state each of the 176 caught frames (Monza,
+Monaco, Germany) starts in, it leaves the same memory and registers as the
+game's routine, and with it in place the game's own code runs none of the
+3D view. Each routine it calls is also checked on its own, call by call and
+on made-up calls (`r3d calls`, `r3d fuzz`). The palette step runs in the
+machine: the frame hands over to it and goes on when it returns. In these
+frames BP is 0, so SS:[bp+X] and SS:X are the same word. Over the three
+recorded races, every frame (3,193) drawn by ours beside the game's from the
+same state is the same (`r3d shadow`).
+
 
 The renderer draws into the back buffer at 50BA (the far pointer R:001C, used
 by the sky and horizon routines, held 50BA:0000 in our dumps; 19ED:31FA copies
 the buffer to A000). The 3D view is 320×164 and appears at screen rows 16–179
-in external views and from row 0 in the cockpit (see the memory map). How the
-16-row offset is applied was not traced.
+in external views and from row 0 in the cockpit (see the memory map). The
+16-row offset is added each frame by the view-key step (0:E576): at
+0:E761–E776, in an outside view (DS:0981 ≠ 0), it adds 1400h to DS:04B8 and to
+R:001C, after the frame limiter (0:C2A6) has set them back; DS:04BC, where the
+copy to the screen reads from, stays at row 0. SC.
 
 ## 2. Which segments are drawn
 
@@ -132,6 +151,37 @@ For each segment with a cross-section the walk writes a 16-byte record
 (R:4D2E + D8h per record). A point is {lateral, dz, depth, screen x, screen y,
 outcode}, the output of the projection 0F47:20D9. SC; DT (decoded in every
 capture).
+
+### Rewritten
+
+The walk, the cross-sections and the projection are rewritten in Rust and
+exact (`spike/machine/src/r3d/`: `walk.rs`, `section.rs`, `track.rs`,
+`point.rs`), checked call by call against the game's code in the 176 caught
+frames and on made-up calls (`r3d calls`, `r3d fuzz`):
+
+- **The walk** (3B32 to 49BF, its loops 343A to 3AAA, the pit lane's walk
+  3AAB): bands from far to near (R:01E2, 01DE, 01DA, 01D6: the edges only,
+  fences, kerbs, everything), each band's cross-sections by the builder entry
+  it sets at R:0020 (3181, 2F7C, 2D12, 2A04), then behind the camera (R:01D2,
+  and for the road drawn as polygons R:01CE, 01CA, 01C6). It writes the strip
+  records at [bp+2C], object list entries at [bp+24] (R:0066 the segment's
+  count, R:0064, ES:DI) and crests at [bp+28]. When the strip list fills
+  (R:00EE) or the walk meets R:0124, the loops leave by resetting SP from
+  R:0132 and going to the forward walk's tail (41CE), whichever way the walk
+  was going; the reverse walk's copies of that code are never reached. Every
+  walk in the caught frames and 3,000 made-up ones match; 96% of its code ran.
+- **The cross-section** (2445 to 32C2, entered at 2A04, 2D12, 2F7C or 3181
+  and run to its end) and its helpers: the raised fence top (2334), the
+  crests (279E, 28D1, with the square root 0000:024E), the ground's profile
+  points for the texture (78C1), the strip's colours (32C3), its edge flags
+  (3306) and the ground's shade nibbles (226B). Every call matches.
+- **The projection** (20D9, 20AB, 2168, with 1FAD for a column whose divide
+  overflows): every call and 60,000 made-up ones match; every reachable
+  instruction ran.
+- **The road** (`blocks.rs`, `strips.rs`, `road.rs`): the road drawn as
+  polygons or not (49C0, R:00FA), the blocks between crests (4A03), the
+  strips' edges (4C12) and the road's polygons (5470: the road, its lines and
+  edges, the walls, the grass) with the haze (188A). Every call matches.
 
 ## 3. The cross-section
 
@@ -404,6 +454,14 @@ Rows are viewport rows; SS:0130 is the horizon row.
   file in every capture; the best-matching column offset equals the formula
   in 4 of 4 tested frames; parts of the image are covered by later polygons
   and objects).
+- **Below the cockpit's top** (SS:0132) a row is filled only where the
+  cockpit is open (19ED:3181): two spans a row from tables at SS:6364 (the
+  row's start; 0 for none), SS:6556 to SS:640A and SS:64B0 to SS:65FC. SC
+  (the rewrite, `screen.rs`).
+- **The horizon image near the top**: with the horizon within 8 rows of the
+  view's top, 39ED skips the rows above by their count, not their bytes, and
+  its MUL clears DX, which then caps the strip at row 0: none of it is drawn.
+  SC (the rewrite).
 - **Far ground** (0F47:72BE): from the horizon row down to the far road,
   filled with the grass colour SS:01AF, or with the road colour SS:01AE when
   the track header's "surrounding" byte has bit 7 (Phoenix, Montreal).
@@ -845,7 +903,9 @@ for each element of the sector's list, in order: polygon / pole / bitmap
 ### Drawing order between objects
 
 Objects are drawn far to near with the walk's object lists (sorted by
-0F47:53BF), interleaved with the fences and kerbs of each segment (section 7).
+0F47:53BF), interleaved with the fences and kerbs of each segment (section 7):
+before each strip the far list's objects due by its distance, after it, where
+both fences go on, the near list's.
 The sort key is the segment counter moved by the setting's +0A
 (0F47:5233): farther by (high & 3Fh) + max(low, 2) − 2 segments, or nearer by
 the same amount when seg+26 bit 6 is set. Long buildings carry a large value,
@@ -854,6 +914,11 @@ stripes are often separate objects painted over a building face in this way.
 SC; DT (letting a later object win where two objects are at about the same
 depth raised the 16-circuit agreement from 94.6 % to 95.4 %, most at Phoenix,
 whose buildings carry their window bands this way).
+With +0A's high byte bit 7 an object moved past R:0064 is held at R:0064 − 1
+unless its own distance, less half its low byte, is past it too. An object
+whose +1F has bit 2 keeps to the leading car (518A): its lead is replaced by
+the car's distance (R:006A, or R:006C by the setting's +4 sign) less its own,
+when that is set and within the lead's size plus 15. SC (the rewrite).
 
 ### Cars (for Phase 3)
 
@@ -919,12 +984,49 @@ a segment, the cockpit's start lights, the pit pass's pit-lane walls (the pit
 lane frames lose most there, on the track side, not on the objects), and the
 estimated camera segment of the reference frames.
 
+### Rewritten (objects)
+
+The objects' code is rewritten in Rust and exact (`spike/machine/src/r3d/`),
+checked call by call in the 176 caught frames and on made-up calls:
+
+- **The shape drawer** (831F to 9BDF, `shape.rs`): 88A5 as above, its vertex
+  projector 831F, the pole (878D) and the haze (8801). 831F is inlined twice
+  more in the polygon code (909D, 9526), byte for byte the same but for its
+  jumps. A vertex whose x offset has bit 15 mirrors another: that one is
+  projected first and its record copied with this vertex's own height, the
+  row then taken from the height alone (206E) where 1FAD placed the other.
+  The pole is one pixel wide in SS:2EE4, at one vertex's column, from the
+  other's row less one up to its own. 8801's branch for a haze level of 4 or
+  more (8894) is never reached: both ways clamp the level below it. The
+  bitmap kinds in the game's shapes are 1002h (kind 2, mirrored with 1000h),
+  0C01h (kind 1, with 800h and 400h) and a fixed angle (+1A bit 15); the
+  code for 200h, for kind 2 without 1000h and for kinds above 2 is never
+  reached. 1,722 shape calls at Monza (A30A jumps into 88A5 as well as 9E2A
+  calling it), 12,000 made-up shapes, 5,000 vertices and 5,000 poles match.
+- **The objects** (`scene.rs`): the sort (5149: 51D7 splits, 53BF sorts each
+  list by its key, greatest first; it keeps two words in the code segment,
+  CS:53AC and 53AE), the lists drained (541B), the object (9E2A, with the car
+  path A07D) and the pit lane (9C05, 9BE0, 817A). At A001 a setting with
+  shape 0, 2 or 3 and an offset at +8 is moved by its shape number times the
+  offset, then by that times the offset again: the code loads the object's
+  direction into DX and then multiplies AX. No setting in the caught races
+  takes that path. The pit lane's walk keeps SP (R:0132) for its early exits,
+  so the ports move SP down by what the game pushes on the way to it (6
+  bytes into 9E2A, 22 into 9C05, 80 into the walk).
+- **The fences and kerbs** (6425 to 725B, `road.rs`): the road's rings,
+  four parts like the walls (fences 20h and 10h in the strip's +0E and +0F,
+  kerbs 8 and 4 in R:0248 by +09's low nibble) and two like the lines (the
+  ground between kerb and road edge, R:0248 by the high nibble), with each
+  strip's due objects drawn before it (R:0074) and, where both fences go on,
+  after it (R:0072). Every call matches; so do 3,000 made-up sorts and 12,000
+  made-up objects (other levels of detail, the starting lights, parked cars,
+  cars with parts, the pit lane's way in), and all 176 frames.
+
 ### Open questions (objects)
 
 - The game's edge rasteriser (0F47:0000–0999) in detail.
-- How objects interleave with the fences of their segment (0F47:518A, R:006A–0070)
-  and the +0A high-byte clamp (bit 7).
-- The pit-lane pass 0F47:9C05 (which part of the pit lane, its fences).
+- The pit-lane pass 0F47:9C05 in frames (which part of the pit lane, its
+  fences); its code is rewritten above.
 - The polygon LODs of the car and the cockpit path of the own car; 0F47:8261.
 - Wet-weather haze for objects (SS:0182).
 
@@ -1264,6 +1366,18 @@ floating-point instead of the game's integer arithmetic −1 to −1.5 (polygon)
 - "Cars (for Phase 3)": 88A5's 8A09–8B9E is the mirror path, not the cockpit
   view of the own car; the colour bit 6 test compares columns, not depths.
 
+### Rewritten (cars)
+
+`spike/machine/src/r3d/cars.rs` has the car drawer (A30A) and its parts
+(A406 placing a part, A2CC and A2D3 drawing it, A19E for the camera's own
+car, A1C1 ordering a part and the car), the parked cars' palette (A7B2) and,
+from segment 0, the pose (14A2, 14D1, 1544), the interpolated sine (03C8) and
+the arctangent (043C). The races call the car drawer, the pose and the sine
+2,800 times, all matching. They never draw a car with parts nor call the
+arctangent, so those are checked on calls made up from the car drawer's and
+the pose's: 3,000 each match, and 329 of the 330 instructions from A19E to
+A532 ran.
+
 ### Open questions (cars)
 
 - Wet races (spray or darkening of cars) were not captured.
@@ -1290,7 +1404,7 @@ pointed at the same buffer in our runs)
 to A000:0000, by view (DS:0981):
 
 - Outside views (DS:0981 ≠ 0): rows 0–179 (7080h words), all of them.
-- Cockpit (0): rows 0–102 and 64 pixels of row 103 (4060h words); then, for
+- Cockpit (0): rows 0–102 (4060h words, 103 rows exactly); then, for
   rows 103–163 (table SS:6364, a row's screen offset, 0 = none), the two spans
   [SS:6364+1F2h, +A6h) and [+14Ch, +298h) of the row, the gaps between the
   cockpit's sides where the road shows; then, for rows 116–137, the spans
@@ -1346,3 +1460,88 @@ scaler (`drawSprite` in objects.mjs, 0F47:19E8), clipped to the glass
 fill in place the cockpit shows its mirrors, housings and start lights; the
 pause screen stops the routine (0 calls) while the session continues; the
 Esc menu ends the session.
+
+## Drawing the frame finer: the display list
+
+Our port can draw the frame again at s times the resolution with the game's
+rules (`spike/machine/src/r3d/list.rs`, `fine.rs`; `docs/web-port-plan.md`,
+Step 2 item 6). The routine runs at 320 x 200 as before and makes every one of
+its decisions there: what is drawn, in what order, the level of detail, the
+colours and the haze, which faces are back faces, which bitmap frame. As it
+draws, it records a display list:
+
+- **Polygons**, at the filler (0F47:0999): the colour, the caller's mode bits
+  (5 for the road and grass), and the ring of edges as it was pushed (road
+  5470: each ring's left and right lists; shapes 9052: in order), the edges the
+  game left out included, since a finer screen may draw them. Each edge keeps
+  what the edge code (03E9, 02E4) read when it was built: both ends' records
+  and, for a point the projection (2168) made, the values it divided (the
+  32-bit sideways value, the scaled height, the depth and the horizon row).
+  Edges are taken when they are built, not when the ring is filled, because
+  the strips build all their edges before any is filled and the shapes reuse
+  their vertex records.
+- **Rows**, at 19ED:3112 and 3181: the sky bands, the road band between
+  blocks and the far ground, whole or through the cockpit's window.
+- **Texels**, at the ground texture (7F64): the shade added to a pixel of road
+  or grass.
+- **Pixels** of everything else, in runs: bitmaps, poles, the crowd (a
+  polygon in colour 1Bh), the scenery strip, the dithered sky rows and the
+  cockpit's pieces.
+
+`fine.rs` draws the list at scale s. Decided again there, as the game's
+rasteriser decides them, on a screen s times larger:
+
+- each point projected again from the values the game divided, the column
+  truncated and the row rounded as 2168 rounds it. A point raised from another
+  (a fence's top, 2334; a mirror vertex, 84D6) is projected again from its
+  source's values with its own height, so the edges between the two stay
+  upright. A point made otherwise (1FAD's placement far off the screen, the
+  strips' dummy point, a point behind the near plane) goes at s times its game
+  position; a point the game moved by a row or column after projecting it
+  (226B, 875A, 2334's row the same as its source's) moves by s;
+- each edge built as 03E9 and 02E4 build it: flat or not, clipped to the
+  screen's sides, cut at depth 8 from the same camera-space values (with the
+  same number of halvings), stepped with the same error term. Of the 41,918
+  edges built in the caught frames, 15,871 are lines the game leaves with
+  nothing to draw (flags 80h: flat, or both ends behind the camera), never put
+  in a ring; 4,553 of those draw at s = 4, so the flags cannot be copied from
+  the game's run;
+- each ring walked as 0999 walks it, with the border lists s times longer and
+  the cockpit's window read at the game row each fine row lies in (its limits
+  and gap s times wider).
+
+The rest is drawn as game pixels made s x s for now, and the texels go on the
+fine pixels of road or grass within their game pixel.
+
+Checked: at s = 1 the list gives back the frame our routine drew, byte for
+byte, on all 176 caught frames (`r3d list`) and on every frame of the three
+recorded races (3,193, `r3d shadow`); on 34,263 made-up edges and 35,209
+made-up border edges the edge rebuilt from the list has the game's flags and
+record (`r3d fine-edges`). The WebGPU rasteriser (`spike/lib/gpu-r3d.mjs`)
+paints the list's primitives to the same bytes as `fine.rs` at scales 1, 2 and
+4 on all 176 frames (`spike/probes/p9-gpu-r3d.mjs`).
+
+### The frame around the 3D view, traced for the composite
+
+Found by replaying the Monza race with a hook on each call of the race loop
+and comparing the screen and the back buffer before and after each (scratch
+code, not committed):
+
+- There is one back buffer and no page flipping: DS:04B4 and DS:04C0 are the
+  screen (A000:0000), DS:04BC the copy's source, DS:04B8 and R:001C the 3D's
+  target (16 rows down in the outside views).
+- The cockpit picture (DS:8783, 320 x 200 in screen layout) goes straight to
+  the screen when the view changes to the cockpit (0:E9F5 → 0:CE21 →
+  19ED:32D9, then 0:CE8A for the dash's labels) and stays there; only the
+  copy, the dash (19ED:142B, through DS:04C0) and the position and lap digits
+  (drawn by the car step, 0:EE85) change it each frame. Its rows 0–102 are a
+  sheet of pieces: the mirror backdrops, the start-light board and lamps, the
+  gear digits, the dash labels and the two post tops.
+- The window tables (SS:6364) are made once a session from the picture's key
+  colours (0:CFFA → 0:CF2B, 0:CF9D): an opening is the first run of colour 3 in
+  each row 103–163 of the left half, a mirror's glass the run of colours 6 and
+  7 in rows 116–137, each mirrored for the right half.
+- The two 5 x 4 pieces 19ED:3C1A puts back at row 140 are the tops of two
+  posts that pass through the openings.
+- Messages (19ED:2127) are drawn into the back buffer each frame they show,
+  with DS:04B8 and R:001C pointed at row 0 for the call.

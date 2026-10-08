@@ -19,6 +19,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::Mem;
 
 /// The texture's code-segment variables (offsets in CS).
@@ -48,13 +49,16 @@ const PATTERN_AT: u16 = 0x7c72;
 /// The texture pass (0F47:7F64), BP as its caller has it. It leaves the registers as they were.
 pub fn ground(mut m: Mem, bp: u16) {
     m.r = m.w(m.ss, 0xf4);
-    let mut g = Ground { m, bp };
+    let rec = list::recording();
+    let mut g = Ground { m, bp, rec };
     g.run();
 }
 
 struct Ground<'a> {
     m: Mem<'a>,
     bp: u16,
+    /// the display list is being recorded
+    rec: bool,
 }
 
 /// IMUL: the 32-bit product.
@@ -354,6 +358,9 @@ impl Ground<'_> {
             };
             let t = (b & 3).wrapping_add(self.cb(SHADE));
             self.m.set_b(es, di, p.wrapping_add(t));
+            if self.rec {
+                list::texel(es, di, t as i8);
+            }
         }
     }
 

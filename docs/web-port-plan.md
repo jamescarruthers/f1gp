@@ -570,12 +570,82 @@ at any resolution.
    place, the game's own code runs 19–26% of the 3D routine's instructions;
    most of the rest is objects (0F47:9E2A: shapes, effects, bitmaps).
    The bitmap drawer (0F47:19E8, `bitmap.rs`) is next and exact: with it the
-   game's code runs 14–16%.
-4. **Up the routine:** shapes, bitmaps, cars, the segment walk and the
-   projection, each checked the same way, until the whole routine is ours.
-5. **Sharper and smoother:** the same rules at a higher resolution and with
-   the camera eased between frames, rasterised in WebGPU compute shaders; the
-   WebGL view stays for browsers without WebGPU.
+   game's code runs 14–16%. Then the segment walk with its cross-sections
+   and the projection (`walk.rs`, `section.rs`, `track.rs`, `point.rs`):
+   11%, and about half of the routine's code is now ours. Then the road's
+   blocks, strips and polygons (`blocks.rs`, `strips.rs`, `road.rs`), the
+   shapes (`shape.rs`), the cars (`cars.rs`) and the objects with their sort,
+   the fences and the pit lane (`scene.rs`): 4.1–5.3%.
+4. **The whole routine (done).** With the top (`frame.rs`: 81CE, 802A, the
+   sky, the cars on their segments, the cockpit's parts) and segment 19ED's
+   part (`screen.rs`), the whole 3D routine is ours: all 176 caught frames
+   come out with the same memory and registers as the game's, and the game's
+   own code runs none of it. Over three whole races (3,193 frames, every
+   call), our routine drawn beside the game's from the same state gives the
+   same frame every time (`r3d shadow`).
+5. **In the page (done).** With `machine=rust`, `r3d=ours` draws the game's
+   3D view with our routine where the game draws its own (`screen=original`):
+   a hook at the routine's entry in the WebAssembly machine. The game then
+   keeps 30 frames a second at 8,000 emulated cycles a millisecond, where its
+   own code needs 25,000 (12 frames a second at 8,000), and the host takes a
+   third of the time (`probes/p8-r3d-native.mjs`: 20 s of racing in 1.7 s
+   against 5.4 s). `cycles=auto` keeps the slow CPU while it does.
+6. **Sharper and smoother (started):** the same rules at a higher resolution
+   and with the camera eased between frames, rasterised in WebGPU compute
+   shaders; the WebGL view stays for browsers without WebGPU. The split: our
+   port, unchanged, decides everything at 320 x 200 as the game does, and
+   records what it draws as a display list (`machine/src/r3d/list.rs`); the
+   list is drawn again at s times the resolution by the game's own rasteriser
+   rules (`fine.rs`, the reference); WebGPU paints the result
+   (`lib/gpu-r3d.mjs`). Frames between the game's are the port run again on a
+   copy of the machine's memory with the camera and cars eased, then drawn the
+   same way (`docs/renderer-notes.md`, "Drawing the frame finer").
+
+   - **The list and the GPU's painting (done).** At scale 1 the list drawn
+     again gives the frame our routine drew: all 176 caught frames, all 3,193
+     frames of the three races, and 34,263 made-up edges and 35,209 made-up
+     border edges built the game's way (`r3d list`, `r3d shadow`, `r3d
+     fine-edges`). WebGPU paints the same bytes as `fine.rs` at scales 1, 2 and
+     4 on all 176 frames (`probes/p9-gpu-r3d.mjs`): each pixel keeps the
+     highest (primitive number << 8 | colour) written to it, which is painter's
+     order without sorting. In headless Chromium here (SwiftShader, a GPU run
+     on the CPU, so no measure of a real one) a frame takes 9 ms at scale 1,
+     25–28 ms at 2 and 99–118 ms at 4. For now the bitmaps, poles, crowd,
+     scenery, dithered sky rows and cockpit pieces are game pixels made s x s.
+     Natively our routine takes 0.14 ms a frame with recording off, as with
+     the recorder compiled out, and 0.47 ms with it on (`r3d time`, the 58
+     Monza frames); 20 s of racing in the WebAssembly machine takes the host
+     1.8–1.9 s, as before (`probes/p8-r3d-native.mjs`).
+   - **In the page (next).** `r3d=gpu` with `scale=1|2|3|4|screen`: the list
+     taken at the routine's end in the WebAssembly machine and painted on a
+     WebGPU canvas in the game's palette; the cockpit and dash from the game's
+     screen laid over it outside the region the game copies from the back
+     buffer (rows 0–102, the window's openings, the mirrors), with the window
+     tables made s times finer; the outside views' 16-row offset; messages.
+     Without WebGPU, `r3d=ours`. Check: at scale 1 the result is the game's
+     screen, byte for byte.
+   - **Smoother.** Frames between the game's: the port run on a copy of the
+     memory taken at the routine's entry, with the camera eased between two
+     frames' states as 0:7757 makes it (the position G:2259/225D, the eye
+     height, the heading G:2261, the pitch with the head nod, the sideways
+     offset; the camera's segment switched part-way) and the cars' poses
+     eased. Never on the live memory: the ground texture's sums
+     (CS:7394–739B) add up the camera's motion, and the pit signals' timers
+     (G:2919–291F), the random generator (G:08C3) and the head nod (G:2269)
+     are the game's own state. A first trial (scratch code, not committed) gave
+     frame N+1 exactly at t = 1 in 698 of 698 pairs of frames, and frame N at
+     t = 0 in 666 of 698 (the rest differ by inputs taken from N+1: the start
+     lights, the race order, a view change or a TV cut). One frame of the port
+     takes 0.2–0.3 ms in WebAssembly (0.9 ms at worst), the copy 0.07 ms.
+   - **The pixel art at the finer scale.** Bitmaps placed and sized from the
+     finer projection (their texels still the game's), poles s pixels wide from
+     their fine ends, the scenery scrolled finer, the crowd's game-sized texels
+     on fine spans, the ground texture worked out for each fine row, and the
+     sky and ground bands from the fine rows of the points they came from.
+   - **Edges on the GPU, if needed.** The CPU builds the edges and walks the
+     rings at scale s, and the GPU fills the spans. If that costs too much at
+     high scales, the edge stepping and the ring walk move to compute shaders;
+     they work in integers, so they can be held to `fine.rs` the same way.
 
 ## Risks and open questions
 

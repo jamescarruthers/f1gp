@@ -78,6 +78,16 @@ pub extern "C" fn mc_key(p: *mut Handle, byte: u32) {
 pub extern "C" fn mc_set_cycles(p: *mut Handle, per_ms: f64) {
     h(p).m.cycles_per_ms = per_ms;
 }
+/// Draw the 3D view with our routine (1) or the game's own code (0).
+#[no_mangle]
+pub extern "C" fn mc_native_3d(p: *mut Handle, on: u32) {
+    h(p).m.set_native_3d(on != 0);
+}
+/// The frames our 3D routine has drawn.
+#[no_mangle]
+pub extern "C" fn mc_native_frames(p: *mut Handle) -> f64 {
+    h(p).m.native_frames as f64
+}
 #[no_mangle]
 pub extern "C" fn mc_now(p: *mut Handle) -> f64 {
     h(p).m.hw.now

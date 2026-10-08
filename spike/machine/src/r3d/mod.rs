@@ -5,9 +5,24 @@
 //! picture drawn by us, then drawn sharper and smoother.
 
 pub mod bitmap;
+pub mod blocks;
+pub mod cars;
 pub mod edge;
 pub mod fill;
+pub mod fine;
+pub mod frame;
 pub mod ground;
+pub mod list;
+pub mod point;
+pub mod regs;
+pub mod road;
+pub mod scene;
+pub mod screen;
+pub mod section;
+pub mod shape;
+pub mod strips;
+pub mod track;
+pub mod walk;
 
 use crate::pc::Machine;
 

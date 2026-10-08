@@ -21,6 +21,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::Mem;
 
 /// R:02AA past this: no room for another edge record
@@ -35,7 +36,12 @@ struct Edge<'a> {
 /// Build the edge from the point at [bp+30]+cx to the one at [bp+30]+dx in the slot at R:di+ax
 /// (0F47:03E9, a near routine: it leaves the registers as they were).
 pub fn edge(m: Mem, bp: u16, ax: u16, cx: u16, dx: u16, di: u16) {
-    Edge { m, bp }.build(di.wrapping_add(ax), cx, dx);
+    let slot = di.wrapping_add(ax);
+    let points = m.w(m.ss, bp.wrapping_add(0x30));
+    let k = list::edge(&m, slot, points.wrapping_add(cx), points.wrapping_add(dx));
+    let mut e = Edge { m, bp };
+    e.build(slot, cx, dx);
+    list::edge_flags(k, e.m.rw(slot));
 }
 
 /// The border edge (0F47:02E4, a near routine that leaves the registers): the point at
@@ -43,7 +49,12 @@ pub fn edge(m: Mem, bp: u16, ax: u16, cx: u16, dx: u16, di: u16) {
 /// with bl ORed into the slot's flags and si the caller's segment record.
 #[allow(clippy::too_many_arguments)]
 pub fn border(m: Mem, bp: u16, ax: u16, bl: u8, cx: u16, dx: u16, si: u16, di: u16) {
-    Edge { m, bp }.border(di.wrapping_add(ax), bl, cx, dx, si);
+    let slot = di.wrapping_add(ax);
+    let at = m.w(m.ss, bp.wrapping_add(0x30)).wrapping_add(dx);
+    let k = list::border(&m, slot, at, cx, bl, si);
+    let mut e = Edge { m, bp };
+    e.border(slot, bl, cx, dx, si);
+    list::edge_flags(k, e.m.rw(slot));
 }
 
 /// The screen's side a point is off, across: 8 left (x below 0), 4 right (x 320 or more).
