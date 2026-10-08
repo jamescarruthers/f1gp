@@ -2229,6 +2229,119 @@ fn time_frames(out: &Path, reps: usize) {
     }
 }
 
+/// The recorded race played with our routine in the game, its frames shown for the page
+/// (src/r3d/shown.rs) at `scale`: each frame the game shows, its 3D view drawn from the display
+/// list where the mask says the screen shows it, the game's screen elsewhere. At scale 1 that
+/// must be the screen itself, byte for byte. PAGE_SHOTS=<folder> saves every 300th frame at the
+/// scale asked, as the page would show it.
+fn page_check(files: &Path, ops: &str, scale: u32) {
+    let mut m = session::machine(files, "GP.EXE", " /g");
+    m.set_native_3d(true);
+    m.set_r3d_scale(scale);
+    let (mut seen, mut same, mut shown, mut masked) = (0u32, 0, 0, 0u64);
+    let mut ms = 0.0f64;
+    for op in session::parse(ops) {
+        match op {
+            Op::Cycles(c) => m.cycles_per_ms = c,
+            Op::Key(k) => m.key_byte(k),
+            Op::Write(at, bytes) => m.hw.mem[at..at + bytes.len()].copy_from_slice(&bytes),
+            Op::Mark | Op::End(_) => {}
+            Op::Run(t) => {
+                let t0 = std::time::Instant::now();
+                m.run(t);
+                ms += t0.elapsed().as_secs_f64() * 1000.0;
+                let sh = &m.r3d_shown;
+                if sh.serial == seen {
+                    continue;
+                }
+                seen = sh.serial;
+                shown += 1;
+                let s = sh.scale as usize;
+                let (w, top) = (320 * s, sh.top as usize);
+                let prims: Vec<r3d::fine::Prim> = sh
+                    .words
+                    .chunks(4)
+                    .map(|q| match q[0] >> 8 {
+                        0 => r3d::fine::Prim::Span {
+                            y: q[1],
+                            x0: q[2],
+                            x1: q[3],
+                            colour: q[0] as u8,
+                        },
+                        1 => r3d::fine::Prim::Run {
+                            y: q[1],
+                            x0: q[2],
+                            x1: q[3],
+                            colour: q[0] as u8,
+                        },
+                        _ => r3d::fine::Prim::Texel {
+                            x: q[2],
+                            y: q[1],
+                            delta: q[0] as u8 as i8,
+                        },
+                    })
+                    .collect();
+                let p = r3d::fine::Prims {
+                    s: sh.scale,
+                    w: w as u32,
+                    h: 164 * sh.scale,
+                    prims,
+                    stats: Default::default(),
+                };
+                let fine = r3d::fine::draw(&p, None);
+                // the page's picture: the 3D view where the mask says, the screen elsewhere
+                let mut pic = vec![0u8; w * 200 * s];
+                for y in 0..200 * s {
+                    for x in 0..w {
+                        let i = (y / s) * 320 + x / s;
+                        pic[y * w + x] = if sh.mask[i] != 0 {
+                            masked += 1;
+                            fine[(y - top * s) * w + x]
+                        } else {
+                            sh.screen[i]
+                        };
+                    }
+                }
+                if s == 1 && pic == sh.screen {
+                    same += 1;
+                } else if s == 1 && shown - same <= 5 {
+                    let d = pic.iter().zip(&sh.screen).filter(|(a, b)| a != b).count();
+                    println!("frame {seen}: {d} of 64000 pixels differ from the game's screen");
+                }
+                if let Ok(dir) = std::env::var("PAGE_SHOTS") {
+                    if shown % 300 == 0 {
+                        let rgba: Vec<u8> = pic
+                            .iter()
+                            .flat_map(|&c| {
+                                let v = |k: usize| {
+                                    let v = sh.dac[3 * c as usize + k] & 63;
+                                    v << 2 | v >> 4
+                                };
+                                [v(0), v(1), v(2), 255]
+                            })
+                            .collect();
+                        let png = f1gp_machine::png::encode(&rgba, w, 200 * s);
+                        std::fs::write(
+                            Path::new(&dir).join(format!("page-s{s}-{shown:04}.png")),
+                            png,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "{shown} frames shown at scale {scale}{}; {:.1} pixels a frame from the 3D view; {:.0} ms of the machine's time on the host",
+        if scale == 1 { format!(", {same} of them the game's screen exactly") } else { String::new() },
+        masked as f64 / shown.max(1) as f64 / (scale * scale) as f64,
+        ms
+    );
+    if scale == 1 && same != shown {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -2270,6 +2383,11 @@ fn main() {
         Some("time") => time_frames(
             Path::new(&a[2]),
             a.get(3).map(|s| s.parse().unwrap()).unwrap_or(5),
+        ),
+        Some("page") => page_check(
+            Path::new(&a[2]),
+            &std::fs::read_to_string(&a[3]).unwrap(),
+            a.get(4).map(|s| s.parse().unwrap()).unwrap_or(1),
         ),
         Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
         Some("fills") => fill_calls(

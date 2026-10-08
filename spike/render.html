@@ -45,11 +45,18 @@
                           in Rust (spike/machine, dist/machine.wasm: a 286 with the devices
                           and DOS services gp.exe uses; it starts gp /g, without the intro,
                           and has no AdLib sound: the Amiga sound plays)
-    r3d=game|ours         with machine=rust, where the game draws its own 3D view
+    r3d=game|ours|gpu     with machine=rust, where the game draws its own 3D view
                           (screen=original): its own code (game, the default), or our
                           Rust port of it (ours, spike/machine/src/r3d/: the same
                           picture, without emulating the 3D code, so the game keeps
-                          its frame rate on a slower emulated CPU)
+                          its frame rate on a slower emulated CPU); gpu: ours, with
+                          the 3D view drawn again by the game's rules at a higher
+                          resolution and painted by WebGPU, the game's cockpit, dash
+                          and messages over it (lib/gpu-r3d.mjs); ours without WebGPU
+    scale=auto|1..6       r3d=gpu: the 3D view's resolution, in game pixels (1: the
+                          game's own pixels); auto, the default: the screen's pixels
+    gpucheck=1            r3d=gpu at scale 1, for probes: every 15th frame read back
+                          and compared with the game's screen (renderApp.gpu)
     pad=auto|off          auto: a game controller drives (once the browser sees it: press
                           one of its buttons): in a session its left stick steers and its
                           triggers accelerate and brake through the game's own joystick
@@ -137,7 +144,8 @@
   #keys kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
-  #screen { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
+  #screen, #gpu { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
+  #gpu[hidden] { display: none; }
   #gl { width: min(100%, 960px); aspect-ratio: 16 / 9; display: block; }
   .glpane { flex: 1 1 560px; min-width: 0; }
   .glwrap { position: relative; }
@@ -155,7 +163,7 @@
   body.single main { display: block; padding: 0 16px 12px; }
   #stage { position: relative; width: 100%; height: calc(100vh - 72px); min-height: 240px; background: #000; overflow: hidden; border-radius: 6px; }
   #stage canvas { position: absolute; top: 0; height: 100%; display: block; image-rendering: pixelated; }
-  #stage #screen, #stage #hud, #stage #hudsmooth { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
+  #stage #screen, #stage #gpu, #stage #hud, #stage #hudsmooth { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
   #stage #gl { left: 0; width: 100%; aspect-ratio: auto; image-rendering: auto; }
   body.narrow #stage #gl { left: 50%; transform: translateX(-50%); width: auto; aspect-ratio: 4 / 3; }
   #stage #hud, #stage #hudsmooth { pointer-events: none; }
@@ -177,7 +185,7 @@
 <div id="keys" hidden></div>
 <div id="saves" hidden><p id="savesinfo"></p><p><button id="forget" type="button">Forget them and restart</button> <span id="forgetask" hidden>Forget every saved game, name, track record, car setup and option in this browser? <button id="forgetyes" type="button">Yes, forget</button> <button id="forgetno" type="button">Keep them</button></span></p></div>
 <main>
-  <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="overgl"></canvas></div>
+  <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="gpu" width="320" height="200" hidden></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
 </main>
 <script src="node_modules/js-dos/dist/emulators/emulators.js"></script>
@@ -201,6 +209,7 @@ import { makeSmoother } from './lib/pixel-smooth.mjs';
 import { readPad, firstPad, padKeys } from './lib/gamepad.mjs';
 import { virtualJoystick } from './lib/joystick.mjs';
 import { createPC, pcCommandInterface } from './lib/pc.mjs';
+import { gpuView } from './lib/gpu-r3d.mjs';
 import { changeStore, keeper, menuChoices } from './lib/saves.mjs';
 import { unzipSync, zipSync } from './node_modules/fflate/esm/browser.js';
 
@@ -237,7 +246,10 @@ const opts = {
   // the PC the game runs on: js-dos's DOSBox, or ours in Rust (machine/, dist/machine.wasm)
   machine: q.get('machine') === 'rust' ? 'rust' : 'dosbox',
   // with our PC, the game's 3D drawn by our port of its routine (machine/src/r3d/)
-  r3d: q.get('r3d') === 'ours' ? 'ours' : 'game',
+  r3d: ['ours', 'gpu'].includes(q.get('r3d')) ? q.get('r3d') : 'game',
+  // r3d=gpu: the 3D view's scale (auto: the screen's pixels), and checks for probes
+  scale: /^[1-6]$/.test(q.get('scale') ?? '') ? +q.get('scale') : 'auto',
+  gpucheck: q.get('gpucheck') === '1',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
   fps: q.get('fps') === 'game' ? null : Math.min(30, Math.max(8, +(q.get('fps') ?? 30) || 30)),
@@ -313,7 +325,7 @@ if (opts.layout === 'single') {
   hudSmooth.id = 'hudsmooth'; hudSmooth.hidden = true;
   const gl = $('gl'), scr = $('screen'), perfEl = $('perf');
   document.querySelector('main').prepend(stage);
-  stage.append(gl, hudCanvas, hudSmooth, scr);
+  stage.append(gl, hudCanvas, hudSmooth, scr, $('gpu'));
   gl.hidden = true;
   stage.after(perfEl);
   document.querySelector('.origpane').remove();
@@ -493,6 +505,10 @@ let cur = null;               // the newest game frame: { st, cam, cars, t, step
 const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
 let governor = null;          // the emulated CPU speed (cycles=auto)
 let rustPC = null;            // our PC (machine=rust), for r3d=ours
+let gpu = null;               // r3d=gpu: the WebGPU view (lib/gpu-r3d.mjs gpuView)
+// the frames shown through it, when the last came, the scale (auto: from the box's size), the
+// time each took to send, and the checks (gpucheck=1)
+const gpuSeen = { serial: 0, at: -1e9, shown: 0, scale: 2, ms: [], checked: 0, differ: 0, lastDiffer: 0 };
 const nativeSeen = { n: 0, at: -1e9 }; // the frames our 3D routine drew, and when the count last moved
 let carData = null;           // readCars(mem) for the circuit (source=memory)
 let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
@@ -588,13 +604,35 @@ function frame(now) {
     if (opts.screen === 'new' && !routine.installed) { rustPC?.native3d(false); if (routine.install()) log('game-3d-off', { marker: routine.k }); }
     else if (opts.screen === 'original' && routine.installed) { routine.uninstall(); log('game-3d-on'); }
   }
-  // where the game draws its 3D: by our port of its routine (r3d=ours) or its own code
+  // where the game draws its 3D: by our port of its routine (r3d=ours, gpu) or its own code
   if (rustPC) {
-    rustPC.native3d(opts.r3d === 'ours' && opts.screen === 'original' && !(routine && routine.installed));
+    rustPC.native3d(opts.r3d !== 'game' && opts.screen === 'original' && !(routine && routine.installed));
+    rustPC.r3dScale(gpu && opts.r3d === 'gpu' && opts.screen === 'original' ? gpuSeen.scale : 0);
     const n = rustPC.nativeFrames();
     if (n !== nativeSeen.n) { if (nativeSeen.n === 0) log('game-3d-ours'); nativeSeen.n = n; nativeSeen.at = now; }
   }
   const drawingOurs = now - nativeSeen.at < 500;
+  // r3d=gpu: each frame the game shows, its 3D view painted finer, on the WebGPU canvas
+  if (gpu && opts.r3d === 'gpu' && opts.screen === 'original') {
+    const sh = rustPC.r3dShown();
+    if (sh && sh.serial !== gpuSeen.serial) {
+      gpuSeen.serial = sh.serial; gpuSeen.at = now; gpuSeen.shown++;
+      const check = opts.gpucheck && sh.scale === 1 && gpuSeen.shown % 15 === 0;
+      const want = check ? sh.screen.slice() : null;
+      const t = performance.now();
+      const read = gpu.show(sh, { check });
+      gpuSeen.ms.push(performance.now() - t);
+      if (read) read.then((got) => {
+        let d = 0;
+        for (let i = 0; i < want.length; i++) if (got[i] !== want[i]) d++;
+        gpuSeen.checked++; gpuSeen.lastDiffer = d;
+        if (d) gpuSeen.differ++;
+      }).catch((e) => log('gpu-check-failed', { error: String(e) }));
+    }
+  }
+  const drawingGpu = !!gpu && opts.r3d === 'gpu' && opts.screen === 'original' && now - gpuSeen.at < 500;
+  if ($('gpu').hidden === drawingGpu) { $('gpu').hidden = !drawingGpu; log(drawingGpu ? 'gpu-shown' : 'gpu-hidden'); }
+  if (!swapped && $('screen').hidden !== drawingGpu) $('screen').hidden = drawingGpu;
   // the game draws a race view while the routine runs (it stops in pause, where the frame stays)
   if (routine && routine.installed) { const c = routine.calls; if (c !== routineSeen.calls) { routineSeen.calls = c; routineSeen.at = now; } }
   // (paused from the latest reading: a paused game makes no new frames, so the last frame kept says running)
@@ -750,6 +788,20 @@ setInterval(() => {
   const slowest = r.length ? Math.max(...r).toFixed(1) : '-';
   $('perf').textContent = `page ${r.length} fps · frame ${med(r)} ms, slowest ${slowest} · page work ${jsAt(0.5) ?? '-'} ms, slowest ${jsAt(1) ?? '-'} · draw ${med(d)} ms · game ${gameFps ?? '-'} fps, frames kept ${perf.kept}/s${cycles ? ` · ${cycles} cycles` : ''} · ${glCanvas.width}x${glCanvas.height} · style ${opts.style} · framing ${opts.framing}${opts.smooth ? ', smooth' : ''}, haze ${opts.haze}, texture ${opts.texture}, shadows ${opts.shadows}, lod ${opts.lod}, mirrors ${opts.mirrors}`;
   window.renderApp.perf = { pageFps: r.length, frameMs: +med(r) || null, drawMs: +med(d) || null, jsMs: jsAt(0.5), jsP90: jsAt(0.9), jsMax: jsAt(1), kept: perf.kept, gameFps, cycles, size: [glCanvas.width, glCanvas.height] };
+  if (gpu) {
+    // r3d=gpu: the scale (auto: the box's height in screen pixels, in game rows), what it showed
+    if (opts.scale === 'auto') {
+      const box = ($('stage') ?? ($('gpu').hidden ? $('screen') : $('gpu'))).getBoundingClientRect();
+      gpuSeen.scale = Math.max(1, Math.min(6, Math.round(box.height * (window.devicePixelRatio || 1) / 200)));
+    } else gpuSeen.scale = opts.scale;
+    const ms = gpuSeen.ms.splice(0);
+    // the 3D view's frame rate: the game's frames the page showed in the last second (no more
+    // than the game makes, nor than the page draws)
+    const fps = gpuSeen.shown - (gpuSeen.lastShown ?? gpuSeen.shown);
+    gpuSeen.lastShown = gpuSeen.shown;
+    window.renderApp.gpu = { scale: gpuSeen.scale, shown: gpuSeen.shown, fps, sendMs: +med(ms) || null, checked: gpuSeen.checked, differ: gpuSeen.differ, lastDiffer: gpuSeen.lastDiffer, errors: gpu.errors };
+    if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, ${med(ms)} ms a frame to send`;
+  }
   perf.kept = 0;
 }, 1000);
 
@@ -778,6 +830,23 @@ requestAnimationFrame(frameLoop);
     const pc = await createPC({ wasm: new URL('dist/machine.wasm', location.href), files, tail: ' /g' });
     rustPC = pc;
     ci = pcCommandInterface(pc, { zipSync, kept: kept?.files });
+    if (opts.r3d === 'gpu') {
+      // the 3D view drawn finer: WebGPU, or our port at the game's resolution without it
+      try {
+        gpu = await gpuView($('gpu'));
+        if (opts.scale !== 'auto') gpuSeen.scale = opts.scale;
+        log('gpu', { scale: opts.scale });
+        gpu.device.lost.then((info) => {
+          gpu = null; opts.r3d = 'ours';
+          log('gpu-lost', { reason: info.reason, message: info.message });
+          $('notice').textContent = 'WebGPU stopped: the 3D view is drawn at the game\'s resolution.';
+        });
+      } catch (e) {
+        opts.r3d = 'ours';
+        log('gpu-unavailable', { error: String(e) });
+        $('notice').textContent = 'No WebGPU in this browser: the 3D view is drawn at the game\'s resolution.';
+      }
+    }
     if (opts.sound === 'adlib') { opts.sound = 'amiga'; log('adlib-unavailable'); }
     log('machine', { machine: 'rust' });
   } else {

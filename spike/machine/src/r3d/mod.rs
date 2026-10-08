@@ -20,6 +20,7 @@ pub mod scene;
 pub mod screen;
 pub mod section;
 pub mod shape;
+pub mod shown;
 pub mod strips;
 pub mod track;
 pub mod walk;

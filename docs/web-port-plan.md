@@ -616,14 +616,26 @@ at any resolution.
      the recorder compiled out, and 0.47 ms with it on (`r3d time`, the 58
      Monza frames); 20 s of racing in the WebAssembly machine takes the host
      1.8–1.9 s, as before (`probes/p8-r3d-native.mjs`).
-   - **In the page (next).** `r3d=gpu` with `scale=1|2|3|4|screen`: the list
-     taken at the routine's end in the WebAssembly machine and painted on a
-     WebGPU canvas in the game's palette; the cockpit and dash from the game's
-     screen laid over it outside the region the game copies from the back
-     buffer (rows 0–102, the window's openings, the mirrors), with the window
-     tables made s times finer; the outside views' 16-row offset; messages.
-     Without WebGPU, `r3d=ours`. Check: at scale 1 the result is the game's
-     screen, byte for byte.
+   - **In the page (done).** `render.html?machine=rust&screen=original&r3d=gpu`
+     with `scale=auto|1..6` (auto: the box's height in screen pixels, in game
+     rows). The machine records our routine's frame and, when the game has
+     shown it (at the routine's next call), keeps the frame's primitives at the
+     scale, the screen, the palette and a mask of the pixels where the screen
+     shows the 3D view (`machine/src/r3d/shown.rs`): those the game's copy takes
+     from the back buffer (19ED:31FA: rows 0–102, the window's openings, the
+     mirrors; rows 0–179 outside), in the 3D view's rows, still holding what our
+     routine left there (so the messages, drawn after it, stay the game's). The
+     page paints the 3D view on a WebGPU canvas, lays it into the screen through
+     the mask, the screen's pixels made s x s, and shows it in the game's
+     palette, fades included (`lib/gpu-r3d.mjs` `gpuView`). Menus and pauses
+     show the game's own screen. Without WebGPU it falls back to `r3d=ours`.
+     Checked: at scale 1 the result is the game's screen, byte for byte, on
+     every frame shown in the three recorded races (1,596, 1,131 and 1,130
+     frames, `r3d page`) and on every frame read back in the page (72 of 72 in
+     20 s, `probes/p10-r3d-gpu.mjs`). In headless Chromium the game keeps 30
+     frames a second at every scale; sending a frame takes the page 0.3–0.4
+     ms; SwiftShader paints on the CPU, so the page's own frame rate there
+     (60 at scale 1, 13–17 at 3) says nothing of a real GPU.
    - **Smoother.** Frames between the game's: the port run on a copy of the
      memory taken at the routine's entry, with the camera eased between two
      frames' states as 0:7757 makes it (the position G:2259/225D, the eye
