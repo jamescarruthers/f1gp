@@ -12,7 +12,7 @@
 // keeper() checks for changes every few seconds while the game is in its
 // menus (a check takes 2-4 ms), and when the page is hidden or closed.
 //
-// menuChoices() keeps the page's own menu choices (localStorage).
+// menuChoices() keeps the page's own menu and Options choices (localStorage).
 //
 // Plain ES module. The zip reader is passed in (fflate's unzipSync), so the
 // file comparison runs in Node too.
@@ -72,31 +72,40 @@ export function changeStore(idb = globalThis.indexedDB) {
   };
 }
 
+/** Put k=v in the address (v null: take k out), with no reload and no new history entry. */
+export function putInAddress(k, v) {
+  if (!globalThis.location || !globalThis.history) return;
+  const u = new URL(location.href);
+  if (v === null || v === undefined) u.searchParams.delete(k); else u.searchParams.set(k, v);
+  history.replaceState(null, '', u);
+}
+
 /**
  * The page's menu choices between visits (localStorage, this browser only).
  * apply(q) fills the URLSearchParams q with the stored choices it does not
- * set itself; set(k, v) stores a choice and puts it in the address.
+ * set itself; set(k, v) stores a choice and puts it in the address; forget(k)
+ * takes it out of both; keep(k, v) stores only (v null: drops it); clear()
+ * drops every stored choice.
  * @param {string[]} keys  the query options the menus set
  */
 export function menuChoices(keys, storage = globalThis.localStorage, name = 'f1gp-menus') {
   const read = () => { try { return JSON.parse(storage?.getItem(name) ?? '{}') ?? {}; } catch { return {}; } };
+  const keep = (k, v) => {
+    const stored = read();
+    if (v === null || v === undefined) delete stored[k]; else stored[k] = v;
+    try { storage?.setItem(name, JSON.stringify(stored)); } catch { /* storage blocked */ }
+  };
   return {
     read,
+    keep,
     apply(q) {
       const stored = read();
       for (const k of keys) if (!q.has(k) && typeof stored[k] === 'string') q.set(k, stored[k]);
       return q;
     },
-    set(k, v) {
-      const stored = read();
-      stored[k] = v;
-      try { storage?.setItem(name, JSON.stringify(stored)); } catch { /* storage blocked */ }
-      if (globalThis.location && globalThis.history) {
-        const u = new URL(location.href);
-        u.searchParams.set(k, v);
-        history.replaceState(null, '', u);
-      }
-    },
+    set(k, v) { keep(k, v); putInAddress(k, v); },
+    forget(k) { keep(k, null); putInAddress(k, null); },
+    clear() { try { storage?.removeItem(name); } catch { /* storage blocked */ } },
   };
 }
 

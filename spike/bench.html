@@ -87,6 +87,7 @@
 </main>
 <script type="module">
 import { startAutopilot } from './lib/autopilot.mjs';
+import { withDefaults } from './lib/options.mjs';
 
 const $ = (id) => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -115,14 +116,15 @@ async function until(f, ms, what) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-// the game page on a machine, with the same options for both (nothing kept, no sound, no controller)
+// the game page on a machine, with the same options for both (nothing kept, no sound, no controller;
+// every other option the page keeps at its default, so no choice kept in this browser applies)
 async function openGame(machine) {
   const frame = $('frame');
   const size = $('size').value;
   if (size === 'fit') { frame.style.width = '100%'; frame.style.height = '72vh'; }
   else { const [w, h] = size.split('x'); frame.style.width = `${w}px`; frame.style.height = `${h}px`; }
-  const p = new URLSearchParams({ machine, screen: 'original', saves: 'off', audio: 'off', manual: 'off', pad: 'off',
-    sound: 'amiga', framing: 'wide', style: 'modern', cockpit: 'smooth' });
+  const p = withDefaults(new URLSearchParams({ machine, screen: 'original', saves: 'off', audio: 'off', manual: 'off', pad: 'off',
+    sound: 'amiga', framing: 'wide', style: 'modern', cockpit: 'smooth' }));
   frame.src = `render.html?${p}`;
   await until(() => frame.contentWindow?.emuReady === true && frame.contentWindow, 120000, `${NAMES[machine]} to start`);
   return frame.contentWindow;

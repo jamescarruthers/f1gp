@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { zipSync, unzipSync } from 'fflate';
-import { zipFiles, sameFiles, keeper, menuChoices } from '../lib/saves.mjs';
+import { zipFiles, sameFiles, keeper, menuChoices, putInAddress } from '../lib/saves.mjs';
 
 const enc = (s) => new TextEncoder().encode(s);
 const zip = (files) => zipSync({ 'GPSAVES/': new Uint8Array(0), ...files });
@@ -78,4 +78,38 @@ test('keeps menu choices; the address wins', () => {
   assert.equal(menuChoices(['style'], undefined).apply(new URLSearchParams()).get('style'), null);
   mem.set('f1gp-menus', '{not json');
   assert.equal(c.apply(new URLSearchParams()).get('style'), null);
+});
+
+test('forgets, keeps and clears menu choices, and puts them in the address', () => {
+  const mem = new Map();
+  const storage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: (k) => mem.delete(k) };
+  // a stand-in for the page's address
+  const was = { location: globalThis.location, history: globalThis.history };
+  globalThis.location = { href: 'http://x/render.html?bundle=b&haze=off' };
+  globalThis.history = { replaceState: (s, t, u) => { globalThis.location.href = String(u); } };
+  try {
+    const c = menuChoices(['haze', 'style', 'layout'], storage);
+    c.set('style', 'classic');
+    assert.equal(new URL(location.href).searchParams.get('style'), 'classic');
+    c.forget('haze');
+    assert.equal(new URL(location.href).searchParams.has('haze'), false);
+    assert.equal(new URL(location.href).searchParams.get('bundle'), 'b');
+    c.keep('layout', 'side');                     // stored, not in the address
+    assert.equal(new URL(location.href).searchParams.has('layout'), false);
+    assert.deepEqual(c.read(), { style: 'classic', layout: 'side' });
+    c.keep('layout', null);
+    c.forget('style');
+    assert.deepEqual(c.read(), {});
+    c.set('style', 'classic');
+    c.clear();
+    assert.deepEqual(c.read(), {});
+    assert.equal(c.apply(new URLSearchParams()).get('style'), null);
+    putInAddress('scale', '2');
+    putInAddress('bundle', null);
+    assert.equal(new URL(location.href).search, '?style=classic&scale=2');
+  } finally {
+    globalThis.location = was.location; globalThis.history = was.history;
+    if (was.location === undefined) delete globalThis.location;
+    if (was.history === undefined) delete globalThis.history;
+  }
 });
