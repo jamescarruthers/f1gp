@@ -21,6 +21,7 @@
 //!
 //! These routines keep no registers: the ports set AX, CX and DX as the game's leave them.
 
+use super::list;
 use super::Mem;
 
 /// Which entry the routine was called at.
@@ -157,6 +158,7 @@ impl Point<'_, '_> {
             c |= self.m.rw(0x2a4);
             self.set_p(0xa, c);
             self.r[AX] = c;
+            list::unprojected(self.r[SI]);
             return;
         }
         // 219F: the height scaled, then the column
@@ -164,6 +166,7 @@ impl Point<'_, '_> {
         self.r[CX] = (h >> 16) as u16;
         let ss = self.m.ss;
         self.m.set_b(ss, 0xc0, 0);
+        let x32 = self.s32(0x10);
         let (q, rem) = self.m.idiv(self.s(0x12), self.s(0x10), depth);
         self.r[AX] = q;
         self.r[DX] = rem;
@@ -185,7 +188,8 @@ impl Point<'_, '_> {
         let (q, rem) = self.m.idiv((n >> 16) as u16, n as u16, depth);
         let mut ax = q;
         let mut dx = rem;
-        if self.m.b(ss, 0xc0) != 0 {
+        let over = self.m.b(ss, 0xc0) != 0;
+        if over {
             ax = if (dx as i16) < 0 { 0x8000 } else { 0x7fff };
         } else {
             let carry = dx & 0x8000 != 0;
@@ -205,12 +209,26 @@ impl Point<'_, '_> {
         let c = self.outcode();
         self.set_p(0xa, c);
         self.r[AX] = c;
+        if over {
+            list::unprojected(self.r[SI]);
+        } else {
+            let p = list::Proj {
+                x32,
+                n,
+                depth,
+                h: self.s(0x130) as i16,
+                col: x as u16 as i16,
+                row: y as i16,
+            };
+            list::projected(self.r[SI], p);
+        }
     }
 
     /// 1FAD: a point whose column overflows, placed in its direction: sideways and height
     /// doubled together until the sideways is at least 3800h in its high word, then their high
     /// words taken as the column and row.
     fn far(&mut self) {
+        list::unprojected(self.r[SI]);
         let mut h = (self.r[CX] as i16 as i32) << 5;
         if self.fine() {
             h <<= 3;

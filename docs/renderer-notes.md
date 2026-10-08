@@ -70,8 +70,11 @@ same state is the same (`r3d shadow`).
 The renderer draws into the back buffer at 50BA (the far pointer R:001C, used
 by the sky and horizon routines, held 50BA:0000 in our dumps; 19ED:31FA copies
 the buffer to A000). The 3D view is 320×164 and appears at screen rows 16–179
-in external views and from row 0 in the cockpit (see the memory map). How the
-16-row offset is applied was not traced.
+in external views and from row 0 in the cockpit (see the memory map). The
+16-row offset is added each frame by the view-key step (0:E576): at
+0:E761–E776, in an outside view (DS:0981 ≠ 0), it adds 1400h to DS:04B8 and to
+R:001C, after the frame limiter (0:C2A6) has set them back; DS:04BC, where the
+copy to the screen reads from, stays at row 0. SC.
 
 ## 2. Which segments are drawn
 
@@ -1401,7 +1404,7 @@ pointed at the same buffer in our runs)
 to A000:0000, by view (DS:0981):
 
 - Outside views (DS:0981 ≠ 0): rows 0–179 (7080h words), all of them.
-- Cockpit (0): rows 0–102 and 64 pixels of row 103 (4060h words); then, for
+- Cockpit (0): rows 0–102 (4060h words, 103 rows exactly); then, for
   rows 103–163 (table SS:6364, a row's screen offset, 0 = none), the two spans
   [SS:6364+1F2h, +A6h) and [+14Ch, +298h) of the row, the gaps between the
   cockpit's sides where the road shows; then, for rows 116–137, the spans
@@ -1457,3 +1460,85 @@ scaler (`drawSprite` in objects.mjs, 0F47:19E8), clipped to the glass
 fill in place the cockpit shows its mirrors, housings and start lights; the
 pause screen stops the routine (0 calls) while the session continues; the
 Esc menu ends the session.
+
+## Drawing the frame finer: the display list
+
+Our port can draw the frame again at s times the resolution with the game's
+rules (`spike/machine/src/r3d/list.rs`, `fine.rs`; `docs/web-port-plan.md`,
+Step 2 item 6). The routine runs at 320 x 200 as before and makes every one of
+its decisions there: what is drawn, in what order, the level of detail, the
+colours and the haze, which faces are back faces, which bitmap frame. As it
+draws, it records a display list:
+
+- **Polygons**, at the filler (0F47:0999): the colour, the caller's mode bits
+  (5 for the road and grass), and the ring of edges as it was pushed (road
+  5470: each ring's left and right lists; shapes 9052: in order), the edges the
+  game left out included, since a finer screen may draw them. Each edge keeps
+  what the edge code (03E9, 02E4) read when it was built: both ends' records
+  and, for a point the projection (2168) made, the values it divided (the
+  32-bit sideways value, the scaled height, the depth and the horizon row).
+  Edges are taken when they are built, not when the ring is filled, because
+  the strips build all their edges before any is filled and the shapes reuse
+  their vertex records.
+- **Rows**, at 19ED:3112 and 3181: the sky bands, the road band between
+  blocks and the far ground, whole or through the cockpit's window.
+- **Texels**, at the ground texture (7F64): the shade added to a pixel of road
+  or grass.
+- **Pixels** of everything else, in runs: bitmaps, poles, the crowd (a
+  polygon in colour 1Bh), the scenery strip, the dithered sky rows and the
+  cockpit's pieces.
+
+`fine.rs` draws the list at scale s. Decided again there, as the game's
+rasteriser decides them, on a screen s times larger:
+
+- each point projected again from the values the game divided, the column
+  truncated and the row rounded as 2168 rounds it. A point made otherwise (a
+  copy, 1FAD's placement far off the screen, the strips' dummy point) goes at
+  s times its game position; a point the game moved by a row or column after
+  projecting it (226B, 2334, 875A) moves by s;
+- each edge built as 03E9 and 02E4 build it: flat or not, clipped to the
+  screen's sides, cut at depth 8 from the same camera-space values (with the
+  same number of halvings), stepped with the same error term. Of the 41,918
+  edges built in the caught frames, 15,871 are lines the game leaves with
+  nothing to draw (flags 80h: flat, or both ends behind the camera), never put
+  in a ring; 3,445 of those draw at s = 4, so the flags cannot be copied from
+  the game's run;
+- each ring walked as 0999 walks it, with the border lists s times longer and
+  the cockpit's window read at the game row each fine row lies in (its limits
+  and gap s times wider).
+
+The rest is drawn as game pixels made s x s for now, and the texels go on the
+fine pixels of road or grass within their game pixel.
+
+Checked: at s = 1 the list gives back the frame our routine drew, byte for
+byte, on all 176 caught frames (`r3d list`) and on every frame of the three
+recorded races (3,193, `r3d shadow`); on 34,263 made-up edges and 35,209
+made-up border edges the edge rebuilt from the list has the game's flags and
+record (`r3d fine-edges`). The WebGPU rasteriser (`spike/lib/gpu-r3d.mjs`)
+paints the list's primitives to the same bytes as `fine.rs` at scales 1, 2 and
+4 on all 176 frames (`spike/probes/p9-gpu-r3d.mjs`).
+
+### The frame around the 3D view, traced for the composite
+
+Found by replaying the Monza race with a hook on each call of the race loop
+and comparing the screen and the back buffer before and after each (scratch
+code, not committed):
+
+- There is one back buffer and no page flipping: DS:04B4 and DS:04C0 are the
+  screen (A000:0000), DS:04BC the copy's source, DS:04B8 and R:001C the 3D's
+  target (16 rows down in the outside views).
+- The cockpit picture (DS:8783, 320 x 200 in screen layout) goes straight to
+  the screen when the view changes to the cockpit (0:E9F5 → 0:CE21 →
+  19ED:32D9, then 0:CE8A for the dash's labels) and stays there; only the
+  copy, the dash (19ED:142B, through DS:04C0) and the position and lap digits
+  (drawn by the car step, 0:EE85) change it each frame. Its rows 0–102 are a
+  sheet of pieces: the mirror backdrops, the start-light board and lamps, the
+  gear digits, the dash labels and the two post tops.
+- The window tables (SS:6364) are made once a session from the picture's key
+  colours (0:CFFA → 0:CF2B, 0:CF9D): an opening is the first run of colour 3 in
+  each row 103–163 of the left half, a mirror's glass the run of colours 6 and
+  7 in rows 116–137, each mirrored for the right half.
+- The two 5 x 4 pieces 19ED:3C1A puts back at row 140 are the tops of two
+  posts that pass through the openings.
+- Messages (19ED:2127) are drawn into the back buffer each frame they show,
+  with DS:04B8 and R:001C pointed at row 0 for the call.

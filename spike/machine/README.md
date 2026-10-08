@@ -21,7 +21,7 @@ the default until it has been tried on real machines.
 | `src/bin/boot.rs` | Boots a program from a folder of files natively and saves the screen each second: for development. |
 | `src/session.rs` | A recorded session (the machine calls a run in Node made, from boot) and how to play it again. |
 | `src/bin/replay.rs` | Runs a recorded session natively (`probes/p6-bench.mjs --record`), instruction for instruction, and checks it ends as the recording did: for timing and profiling the interpreter. |
-| `src/r3d/` | The game's 3D renderer in Rust, a routine at a time: the filler and edge code, the ground texture, bitmaps, the projection, the segment walk and cross-sections, the road and fences, shapes, cars and objects. |
+| `src/r3d/` | The game's 3D renderer in Rust, a routine at a time: the filler and edge code, the ground texture, bitmaps, the projection, the segment walk and cross-sections, the road and fences, shapes, cars and objects. `list.rs` records what it draws as a display list; `fine.rs` draws the list again at any scale by the same rules. |
 | `src/bin/r3d.rs` | The game's 3D routine caught in a recorded race, as the reference for rewriting it (below). |
 | `tests/cpu286.rs` | The CPU against the SingleStepTests 80286 real-mode set. |
 | `tests/pc.rs` | DOS wildcards, the timer, the interrupt controller, EMS, a small program run end to end. |
@@ -114,6 +114,18 @@ as our frames take none of the game's time; NATIVE_CYCLES=<per ms> runs the race
 `probes/p8-r3d-native.mjs` races in the WebAssembly machine: with ours the game keeps 30 frames a
 second at 8,000 cycles a millisecond (the host a third of the time the game's own 3D takes at
 25,000, which it needs for 30).
+
+Our routine can record what it draws (`src/r3d/list.rs`): each polygon's colour and ring of
+edges with the values the projection divided for each end, the rows of sky and ground, the
+ground texture's texels, and the rest (bitmaps, poles, the crowd, the scenery, the cockpit's
+pieces) as game pixels. `src/r3d/fine.rs` draws that list again at s times the resolution: the
+points projected again s times finer, the edges built and the polygons filled by the game's
+rules on an s times larger screen, the rest as game pixels s x s. `r3d list <out> [scales]
+[keep]` checks that at scale 1 the list gives back the frame our routine drew, byte for byte
+(all 176 caught frames), and saves the primitives of the first `keep` frames at each scale for
+the WebGPU rasteriser's check (`probes/p9-gpu-r3d.mjs`, `lib/gpu-r3d.mjs`: the same bytes at
+scales 1, 2 and 4). `r3d shadow` checks the list on every frame of a race too, and `r3d
+fine-edges <out> [trials]` builds made-up edges both ways.
 
 `capture` hooks the routine and its return in the replayed race and saves, for every 18th frame,
 the state the routine starts from and the 64,000 bytes it leaves in the back buffer. `check`

@@ -17,7 +17,7 @@
 
 use super::point::{self, Entry};
 use super::regs::*;
-use super::{bitmap, edge, fill, track};
+use super::{bitmap, edge, fill, list, track};
 
 /// SHR of a word by CL (the 286 takes the count's low 5 bits).
 fn shr(v: u16, n: u16) -> u16 {
@@ -290,6 +290,7 @@ pub fn pole(c: &mut Cpu) {
     let al = c.ssb(0x2ee4);
     for _ in 0..n.wrapping_add(1) {
         c.set_b(seg, p, al);
+        list::px(seg, p, al);
         p = p.wrapping_sub(0x140);
     }
     c.r[CX] = 0;
@@ -886,6 +887,7 @@ fn pole_of(c: &mut Cpu, si: u16) {
 /// listed from R:0E9E; a back face (R:02F4 bit 6, by the columns of a vertex and its
 /// neighbour) left out; then filled in its colour hazed.
 fn polygon(c: &mut Cpu, mut si: u16) {
+    list::shape_clear();
     c.set_d(0xe98, 0xe9e);
     c.set_d(0xe9a, 0xe9e);
     c.set_d(0xe9c, 0);
@@ -905,6 +907,7 @@ fn polygon(c: &mut Cpu, mut si: u16) {
         }
         // 99A5
         let at = (k << 2).wrapping_add(0xfe6);
+        list::shape_push(at, c.db(0x46) & 0x80 != 0);
         let mut ax = c.d(at);
         if ax & 0x80 == 0 {
             if c.db(0x46) & 0x80 != 0 {
@@ -950,6 +953,7 @@ fn polygon(c: &mut Cpu, mut si: u16) {
     // 9A34
     let col = c.ssb(0x2ee4u16.wrapping_add(c.d(0x2f4)));
     c.set_db(0x2f4, col);
+    list::shape_fill();
     let (m, r) = c.split();
     fill::fill(m, r[BP]);
 }

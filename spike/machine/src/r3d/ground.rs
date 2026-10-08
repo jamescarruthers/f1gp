@@ -19,6 +19,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::Mem;
 
 /// The texture's code-segment variables (offsets in CS).
@@ -354,6 +355,7 @@ impl Ground<'_> {
             };
             let t = (b & 3).wrapping_add(self.cb(SHADE));
             self.m.set_b(es, di, p.wrapping_add(t));
+            list::texel(es, di, t as i8);
         }
     }
 

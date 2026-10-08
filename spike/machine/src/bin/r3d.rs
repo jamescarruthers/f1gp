@@ -1927,7 +1927,7 @@ fn shadow_check(files: &Path, ops: &str) {
     let mut entry_old: Option<[u8; 3]> = None;
     let mut ret: Option<(u32, [u8; 3])> = None;
     let mut ours: Option<Vec<u8>> = None;
-    let (mut same, mut total, mut shown) = (0, 0, 0);
+    let (mut same, mut total, mut shown, mut unlisted) = (0, 0, 0, 0);
     for op in session::parse(ops) {
         match op {
             Op::Cycles(c) => m.cycles_per_ms = c,
@@ -1946,11 +1946,19 @@ fn shadow_check(files: &Path, ops: &str) {
                     if n == AT_ENTRY {
                         let old = entry_old.take().unwrap();
                         m.unhook(entry, old);
-                        // ours, from this state
+                        // ours, from this state, with its display list drawn again at scale 1
                         let mut o = Machine::new();
                         o.restore(&m.snapshot());
-                        r3d::frame::step(&mut o, 0, r3d::frame::Service::Skip);
                         let bb = back_buffer(&o) as usize;
+                        let view = (r3d::list::W * r3d::list::H) as usize;
+                        let before = o.hw.mem[bb..bb + view].to_vec();
+                        r3d::list::begin(&o);
+                        r3d::frame::step(&mut o, 0, r3d::frame::Service::Skip);
+                        let l = r3d::list::end().unwrap();
+                        let again = r3d::fine::draw(&r3d::fine::prims(&l, 1), Some(&before));
+                        if again[..] != o.hw.mem[bb..bb + view] {
+                            unlisted += 1;
+                        }
                         ours = Some(o.hw.mem[bb..bb + FRAME].to_vec());
                         let sp = lin(m.cpu.s[2], m.cpu.r[4]);
                         let at = lin(rd16(&m, sp + 2), rd16(&m, sp));
@@ -1977,8 +1985,209 @@ fn shadow_check(files: &Path, ops: &str) {
             }
         }
     }
-    println!("{same} of {total} frames the same, ours drawn beside the game's in the whole race");
+    println!("{same} of {total} frames the same, ours drawn beside the game's in the whole race; {unlisted} drawn otherwise from the display list");
+    if same != total || unlisted != 0 {
+        std::process::exit(1);
+    }
+}
+
+/// Our routine drawn from each caught state with its display list recorded (src/r3d/list.rs);
+/// the list drawn again by src/r3d/fine.rs at scale 1 must give the frame our routine drew,
+/// byte for byte. At the other scales asked for (`scales`, as 1,2,4) the list is drawn too, and
+/// for the first `keep` frames its primitives are saved for the GPU's check
+/// (probes/p9-gpu-r3d.mjs) in <out>/gpu: NNNN-sS.prims (four words a primitive), .init (the
+/// fine pixels it starts from: at scale 1 the frame before, else none), .want (fine.rs's
+/// picture) and, for the first four, a PNG of it.
+fn list_check(out: &Path, scales: &str, keep: usize) {
+    let scales: Vec<u32> = scales.split(',').map(|s| s.parse().unwrap()).collect();
+    let gpu = out.join("gpu");
+    if keep > 0 {
+        std::fs::create_dir_all(&gpu).unwrap();
+    }
+    let view = (r3d::list::W * r3d::list::H) as usize;
+    let (mut same, mut total) = (0, 0);
+    let mut sum = r3d::fine::Stats::default();
+    let (mut missing, mut outside, mut pixels, mut cmds) = (0, 0, 0, 0);
+    let (mut flat, mut unflat) = (0, 0);
+    for (k, p) in caught(out).into_iter().enumerate() {
+        let snap = Snapshot::from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+        let mut m = Machine::new();
+        m.restore(&snap);
+        let at = back_buffer(&m) as usize;
+        let before = m.hw.mem[at..at + view].to_vec();
+        r3d::list::begin(&m);
+        r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
+        let l = r3d::list::end().unwrap();
+        let drawn = &m.hw.mem[at..at + view];
+        let name = p.file_stem().unwrap().to_string_lossy().to_string();
+        total += 1;
+        missing += l.missing;
+        outside += l.outside;
+        pixels += l.as_pixels;
+        cmds += l.cmds.len();
+        // edges flat on the game's screen (nothing to draw, 80h) that draw at the largest scale
+        let top = *scales.iter().max().unwrap();
+        for (k, e) in l.edges.iter().enumerate() {
+            if matches!(e.of, r3d::list::EdgeOf::Line { .. }) && e.flags as u8 == 0x80 {
+                flat += 1;
+                if top > 1 && r3d::fine::edge_at(&l, k, top).0 & 0x80 == 0 {
+                    unflat += 1;
+                }
+            }
+        }
+        let p1 = r3d::fine::prims(&l, 1);
+        let got = r3d::fine::draw(&p1, Some(&before));
+        let diff = got.iter().zip(drawn).filter(|(a, b)| a != b).count();
+        let st = p1.stats;
+        sum.edges += st.edges;
+        sum.flags_differ += st.flags_differ;
+        sum.cut_wrapped += st.cut_wrapped;
+        sum.polys += st.polys;
+        sum.empty += st.empty;
+        if diff == 0 {
+            same += 1;
+        } else {
+            let first = got.iter().zip(drawn).position(|(a, b)| a != b).unwrap();
+            println!(
+                "{name}: {diff} of {view} bytes differ (first at row {}, column {}); {} of {} edges' flags differ",
+                first / 320,
+                first % 320,
+                st.flags_differ,
+                st.edges
+            );
+        }
+        if k < keep {
+            // the game's copy of the palette (SS:05DA, 6-bit), as the page reads it
+            let pal = lin(m.cpu.s[2], 0x5da) as usize;
+            let pal = &m.hw.mem[pal..pal + 768];
+            for &s in &scales {
+                let ps = r3d::fine::prims(&l, s);
+                let init = if s == 1 { Some(&before[..]) } else { None };
+                let img = r3d::fine::draw(&ps, init);
+                let words: Vec<u8> = r3d::fine::words(&ps)
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .collect();
+                let base = gpu.join(format!("{name}-s{s}"));
+                std::fs::write(base.with_extension("prims"), words).unwrap();
+                std::fs::write(base.with_extension("want"), &img).unwrap();
+                if let Some(init) = init {
+                    std::fs::write(base.with_extension("init"), init).unwrap();
+                }
+                if k >= 4 {
+                    continue;
+                }
+                let rgba: Vec<u8> = img
+                    .iter()
+                    .flat_map(|&c| {
+                        let v = |k: usize| {
+                            let v = pal[3 * c as usize + k] & 63;
+                            v << 2 | v >> 4
+                        };
+                        [v(0), v(1), v(2), 255]
+                    })
+                    .collect();
+                let png = f1gp_machine::png::encode(&rgba, ps.w as usize, ps.h as usize);
+                std::fs::write(base.with_extension("png"), png).unwrap();
+            }
+        }
+    }
+    println!(
+        "{same} of {total} frames the same drawn from the display list at scale 1; {cmds} commands, {} polygons ({} drew nothing), {} as pixels; {} edges, {} with other flags; {} cuts wrapped; {missing} ring entries without an edge, {outside} writes outside the view",
+        sum.polys, sum.empty, pixels, sum.edges, sum.flags_differ, sum.cut_wrapped
+    );
+    println!(
+        "{flat} edges with nothing to draw on the game's screen (flags 80h), {unflat} of them drawn at scale {}",
+        scales.iter().max().unwrap()
+    );
     if same != total {
+        std::process::exit(1);
+    }
+}
+
+/// Made-up calls of the edge builders (03E9, 02E4, as `fuzz` makes them) built again by
+/// src/r3d/fine.rs at scale 1 from what the display list keeps of them: the slot's flags and the
+/// record must be those our port of the game's code leaves. Calls whose made-up outcodes
+/// disagree with their points (the game's never do), or with no room left for a record (never
+/// reached in a race), are left out.
+fn fine_edges(out: &Path, trials: usize) {
+    let snap = Snapshot::from_bytes(&std::fs::read(&caught(out)[0]).unwrap()).unwrap();
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rng = move |n: i32| -> i32 {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        ((x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) % n as u64) as i32
+    };
+    let mut failed = false;
+    for o in ours().iter().filter(|o| o.off == EDGE || o.off == BORDER) {
+        let calls = calls_in(&snap, o.seg, o.off, o.near);
+        let (mut same, mut checked, mut drawn, mut wrapped) = (0, 0, 0, 0);
+        for t in 0..trials {
+            let mut m = Machine::new();
+            m.restore(&calls[t % calls.len()].before);
+            made_up_edge(&mut m, o, &mut rng);
+            let (ss, ds, r) = (m.cpu.s[2], m.cpu.s[3], m.cpu.r);
+            let points = rd16(&m, lin(ss, r[5].wrapping_add(0x30)));
+            let ends: Vec<u16> = if o.off == EDGE {
+                vec![points.wrapping_add(r[1]), points.wrapping_add(r[2])]
+            } else {
+                vec![points.wrapping_add(r[2])]
+            };
+            let agrees = ends.iter().all(|&p| {
+                let w = |o: u16| rd16(&m, lin(ds, p.wrapping_add(o)));
+                let (col, row, code) = (w(0) as i16, w(2) as i16, w(4));
+                let sides = match col {
+                    ..0 => 8,
+                    320.. => 4,
+                    _ => 0,
+                } | match row {
+                    ..0 => 2,
+                    164.. => 1,
+                    _ => 0,
+                };
+                code & 0x10 != 0 || code & 0xff == sides
+            });
+            if !agrees || rd16(&m, lin(ds, 0x2aa)) >= 0xd58c {
+                continue;
+            }
+            checked += 1;
+            r3d::list::begin(&m);
+            o.run(&mut m);
+            let l = r3d::list::end().unwrap();
+            let (flags, rec, st) = r3d::fine::edge_at(&l, 0, 1);
+            wrapped += st.cut_wrapped;
+            let slot = r[7].wrapping_add(r[0]);
+            let want = m.hw.mem[lin(ds, slot) as usize];
+            let ok = flags == want
+                && (want & 0x80 != 0 || {
+                    let at = rd16(&m, lin(ds, slot.wrapping_add(2)));
+                    let rec = rec.unwrap_or_default();
+                    rec.iter().enumerate().all(|(k, &v)| {
+                        let w = rd16(&m, lin(ds, at.wrapping_add(2 * k as u16)));
+                        if v == i32::MIN {
+                            w == 0x8000
+                        } else {
+                            w as i16 as i32 == v
+                        }
+                    }) && !rec.is_empty()
+                });
+            if want & 0x80 == 0 {
+                drawn += 1;
+            }
+            if ok {
+                same += 1;
+            } else if !failed {
+                failed = true;
+                println!(
+                    "{} trial {t}: flags {flags:02x}, the game's {want:02x}",
+                    o.name
+                );
+            }
+        }
+        println!("{}: {same} of {checked} made-up edges the same built at scale 1 ({drawn} with something to draw; {wrapped} near-plane cuts where the game's 16-bit arithmetic wraps)", o.name);
+    }
+    if failed {
         std::process::exit(1);
     }
 }
@@ -2011,6 +2220,15 @@ fn main() {
             Path::new(&a[2]),
             a.get(3).map(|s| s.as_str()).unwrap_or("all"),
             a.get(4).map(|s| s.parse().unwrap()).unwrap_or(20_000),
+        ),
+        Some("list") => list_check(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.as_str()).unwrap_or("1"),
+            a.get(4).map(|s| s.parse().unwrap()).unwrap_or(0),
+        ),
+        Some("fine-edges") => fine_edges(
+            Path::new(&a[2]),
+            a.get(3).map(|s| s.parse().unwrap()).unwrap_or(20_000),
         ),
         Some("dumpfills") => dump_fills(Path::new(&a[2]), a[3].parse().unwrap(), Path::new(&a[4])),
         Some("fills") => fill_calls(

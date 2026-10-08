@@ -7,6 +7,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::regs::*;
 
 /// `n` bytes of `v` from seg:at (the game's STOSB and REP STOSW).
@@ -21,6 +22,7 @@ fn copy(c: &mut Cpu, to: (u16, u16), from: (u16, u16), n: u16) {
     for k in 0..n {
         let v = c.b(from.0, from.1.wrapping_add(k));
         c.set_b(to.0, to.1.wrapping_add(k), v);
+        list::px(to.0, to.1.wrapping_add(k), v);
     }
 }
 
@@ -35,6 +37,7 @@ pub fn rows(c: &mut Cpu) {
     }
     let (seg, at) = (c.d(0x1e), c.d(0x1c).wrapping_add(cx.wrapping_mul(0x140)));
     let words = dx.wrapping_sub(cx).wrapping_mul(0x140) >> 1;
+    list::rows(cx, dx, c.r[AX] as u8, false);
     fill(c, seg, at, words.wrapping_mul(2), c.r[AX] as u8);
 }
 
@@ -73,6 +76,7 @@ fn open_rows(c: &mut Cpu) {
     }
     let (seg, screen) = (c.d(0x1e), c.d(0x1c));
     let al = c.r[AX] as u8;
+    list::rows(cx, dx, al, true);
     for row in cx..dx {
         let t = (row - 0x67).wrapping_mul(2).wrapping_add(0x6364);
         let start = c.ss(t);
@@ -151,6 +155,7 @@ pub fn scenery(c: &mut Cpu) {
             let v = c.b(es, at);
             let h = c.b(tables, base.wrapping_add(v as u16));
             c.set_b(es, at, h);
+            list::px(es, at, h);
         }
     }
 }

@@ -7,7 +7,7 @@
 
 use super::regs::*;
 use super::scene::{deeper, drain, pits, rings, sort};
-use super::{bitmap, blocks, ground, road, screen, shape, strips, walk};
+use super::{bitmap, blocks, ground, list, road, screen, shape, strips, walk};
 use crate::pc::Machine;
 
 /// The hook that stops the machine at the game's 3D routine when ours runs in its place.
@@ -405,6 +405,8 @@ fn row(c: &mut Cpu) {
     let ax = c.r[AX];
     for _ in 0..0xa0 {
         c.set_w(es, di, ax);
+        list::px(es, di, ax as u8);
+        list::px(es, di.wrapping_add(1), (ax >> 8) as u8);
         di = di.wrapping_add(2);
     }
     c.s[ES] = es;

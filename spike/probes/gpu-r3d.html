@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GPU 3D from the display list</title>
+<!--
+  Paints the primitives `r3d list` saved (machine/src/r3d/fine.rs) with WebGPU compute
+  (lib/gpu-r3d.mjs) and compares each frame with what fine.rs drew, byte for byte. Driven by
+  probes/p9-gpu-r3d.mjs:
+    probes/gpu-r3d.html?dir=out/r3d/monza/gpu&frames=0000,0010&scales=1,2,4
+  The page sets window.gpuR3d = { ok, results: [{ frame, s, prims, differ, ms }], error }.
+-->
+</head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+import { gpuRaster } from '../lib/gpu-r3d.mjs';
+
+const q = new URLSearchParams(location.search);
+const dir = q.get('dir'), frames = q.get('frames').split(','), scales = q.get('scales').split(',').map(Number);
+const log = (s) => { document.getElementById('log').textContent += s + '\n'; };
+const get = async (p) => { const r = await fetch(`/${dir}/${p}`); if (!r.ok) throw new Error(`${p}: ${r.status}`); return new Uint8Array(await r.arrayBuffer()); };
+window.gpuR3d = null;
+try {
+  const gpu = await gpuRaster();
+  const results = [];
+  for (const frame of frames) {
+    for (const s of scales) {
+      const name = `${frame}-s${s}`;
+      const prims = new Uint32Array((await get(`${name}.prims`)).buffer);
+      const want = await get(`${name}.want`);
+      const init = s === 1 ? await get(`${name}.init`) : null;
+      const t0 = performance.now();
+      const got = await gpu.paint({ prims, s, init });
+      const ms = performance.now() - t0;
+      let differ = 0, first = -1;
+      for (let i = 0; i < want.length; i++) if (got[i] !== want[i]) { differ++; if (first < 0) first = i; }
+      results.push({ frame, s, prims: prims.length / 4, differ, first, ms: Math.round(ms) });
+      log(`${name}: ${prims.length / 4} primitives, ${differ} of ${want.length} bytes differ, ${ms.toFixed(0)} ms`);
+    }
+  }
+  window.gpuR3d = { ok: results.every((r) => r.differ === 0), results };
+} catch (e) {
+  log(String(e));
+  window.gpuR3d = { ok: false, error: String(e) };
+}
+</script>
+</body>
+</html>

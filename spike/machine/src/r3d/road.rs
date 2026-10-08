@@ -15,6 +15,7 @@
 //! Each step below names the game's instruction it stands for.
 
 use super::fill;
+use super::list;
 use super::regs::*;
 use super::scene::objects;
 
@@ -53,6 +54,7 @@ fn slot(c: &Cpu, k: u16) -> u16 {
 /// The edge at DI+p.slot onto the ring (if it is drawn: bit 7 clear), its flags ORed in.
 fn push(c: &mut Cpu, ring: u16, p: Push) {
     let at = base(c).wrapping_add(ring);
+    list::ring_push(at, c.r[DI].wrapping_add(p.slot), p.left, p.turn);
     let mut ax = slot(c, p.slot);
     if (ax as i8) >= 0 {
         if p.turn {
@@ -82,6 +84,7 @@ fn push(c: &mut Cpu, ring: u16, p: Push) {
 /// A new ring, started with the edge at DI+k (turned or not).
 fn restart(c: &mut Cpu, ring: u16, k: u16, turn: bool) {
     let at = base(c).wrapping_add(ring);
+    list::ring_restart(at, c.r[DI].wrapping_add(k), turn);
     let mut bx = at.wrapping_add(0x86);
     c.set_d(at, bx);
     let mut ax = slot(c, k);
@@ -158,6 +161,7 @@ fn fill_ring(c: &mut Cpu, ring: u16, colour: u8, depth: u16, mode: u16) {
     c.set_db(0x2f4, al);
     let v = c.d(at.wrapping_add(4)) | mode;
     c.set_d(0x640, v);
+    list::ring_fill(at, mode);
     let (m, r) = c.split();
     let bp = r[BP];
     r[AX] = fill::fill(m, bp);

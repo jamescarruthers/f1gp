@@ -17,6 +17,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::Mem;
 
 /// Where a side's next x comes from.
@@ -46,8 +47,10 @@ struct Fill<'a> {
 /// Fill the polygon at R:0010..R:000C (with DS the renderer's segment R, SS the game's, BP as the
 /// game's caller has it). Returns AX as the game's routine leaves it.
 pub fn fill(m: Mem, bp: u16) -> u16 {
+    list::fill_begin(&m);
     let size = m.rw(0x0c).wrapping_sub(m.rw(0x10));
     if size == 0 {
+        list::fill_end();
         return 0; // 09A2
     }
     let mut f = Fill {
@@ -60,6 +63,7 @@ pub fn fill(m: Mem, bp: u16) -> u16 {
         bp,
     };
     f.run(size);
+    list::fill_end();
     size
 }
 
@@ -611,11 +615,14 @@ impl Fill<'_> {
         let mut d = row.wrapping_add(x);
         if n & 1 == 1 {
             self.m.set_b(self.es, d, lo);
+            list::fill_px(self.es, d, lo);
             d = d.wrapping_add(1);
         }
         for _ in 0..n / 2 {
             self.m.set_b(self.es, d, lo);
             self.m.set_b(self.es, d.wrapping_add(1), hi);
+            list::fill_px(self.es, d, lo);
+            list::fill_px(self.es, d.wrapping_add(1), hi);
             d = d.wrapping_add(2);
         }
     }
@@ -717,6 +724,7 @@ impl Fill<'_> {
         for _ in 0..n {
             let v = self.m.b(seg, s);
             self.m.set_b(self.es, d, v);
+            list::fill_px(self.es, d, v);
             s = s.wrapping_add(1);
             d = d.wrapping_add(1);
         }

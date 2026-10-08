@@ -17,6 +17,7 @@
 //!
 //! Each step below names the game's instruction it stands for.
 
+use super::list;
 use super::Mem;
 
 /// The bitmap's id (AX), its anchor row (CX) and the offset of its object's colours (DX), with
@@ -441,10 +442,13 @@ impl Bitmap<'_> {
         let mut words = n >> 1;
         if n & 1 != 0 {
             self.m.set_b(es, di, colour as u8);
+            list::px(es, di, colour as u8);
             di = di.wrapping_add(1);
         }
         while words > 0 {
             self.m.set_w(es, di, colour);
+            list::px(es, di, colour as u8);
+            list::px(es, di.wrapping_add(1), (colour >> 8) as u8);
             di = di.wrapping_add(2);
             words -= 1;
         }
