@@ -795,8 +795,12 @@ setInterval(() => {
       gpuSeen.scale = Math.max(1, Math.min(6, Math.round(box.height * (window.devicePixelRatio || 1) / 200)));
     } else gpuSeen.scale = opts.scale;
     const ms = gpuSeen.ms.splice(0);
-    window.renderApp.gpu = { scale: gpuSeen.scale, shown: gpuSeen.shown, sendMs: +med(ms) || null, checked: gpuSeen.checked, differ: gpuSeen.differ, lastDiffer: gpuSeen.lastDiffer, errors: gpu.errors };
-    if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, ${med(ms)} ms a frame to send`;
+    // the 3D view's frame rate: the game's frames the page showed in the last second (no more
+    // than the game makes, nor than the page draws)
+    const fps = gpuSeen.shown - (gpuSeen.lastShown ?? gpuSeen.shown);
+    gpuSeen.lastShown = gpuSeen.shown;
+    window.renderApp.gpu = { scale: gpuSeen.scale, shown: gpuSeen.shown, fps, sendMs: +med(ms) || null, checked: gpuSeen.checked, differ: gpuSeen.differ, lastDiffer: gpuSeen.lastDiffer, errors: gpu.errors };
+    if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, ${med(ms)} ms a frame to send`;
   }
   perf.kept = 0;
 }, 1000);

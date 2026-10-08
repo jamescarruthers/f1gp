@@ -37,15 +37,20 @@ try {
   await route.toTrack(emu.driver, { mode: 'quickrace', log: () => {} });
   await page.evaluate(installAutopilot, { pollMs: 8 });
   const gpu = () => page.evaluate(() => ({ gpu: window.renderApp.gpu ?? null, perf: window.renderApp.perf, opts: { r3d: window.renderApp.opts.r3d }, hidden: document.getElementById('gpu').hidden }));
+  // the game's own pace: its frame counter and session clock against real time
+  const clock = () => page.evaluate(() => { const st = window.renderApp.reader.read(); return { frame: st.frame, ms: st.sessionMs, at: performance.now() }; });
+  const c0 = await clock();
   await sleep(SECONDS * 1000);
+  const c1 = await clock();
   const a = await gpu();
   await emu.driver.pageShot(path.join(OUT, `${SCALE}-cockpit.png`));
   await emu.driver.press(267, 150); // Page Down: the chase view
   await sleep(SECONDS * 1000);
   const b = await gpu();
+  const pace = (x, y) => ({ framesPerS: +((y.frame - x.frame) / ((y.at - x.at) / 1000)).toFixed(1), speed: +((y.ms - x.ms) / (y.at - x.at)).toFixed(2) });
   await emu.driver.pageShot(path.join(OUT, `${SCALE}-chase.png`));
   const r = { scale: SCALE, r3d: b.opts.r3d, shown: b.gpu?.shown ?? 0, scaleUsed: b.gpu?.scale, checked: b.gpu?.checked ?? 0, differ: b.gpu?.differ ?? null,
-    lastDiffer: b.gpu?.lastDiffer, errors: b.gpu?.errors, sendMs: [a.gpu?.sendMs, b.gpu?.sendMs], gameFps: [a.perf?.gameFps, b.perf?.gameFps], pageFps: [a.perf?.pageFps, b.perf?.pageFps], canvasShown: !b.hidden };
+    lastDiffer: b.gpu?.lastDiffer, errors: b.gpu?.errors, fps3d: [a.gpu?.fps, b.gpu?.fps], framesKept: [a.perf?.kept, b.perf?.kept], sendMs: [a.gpu?.sendMs, b.gpu?.sendMs], gameFps: [a.perf?.gameFps, b.perf?.gameFps], pageFps: [a.perf?.pageFps, b.perf?.pageFps], game: pace(c0, c1), canvasShown: !b.hidden };
   console.log(JSON.stringify(r));
   if (r.r3d !== 'gpu' || !r.shown || !r.canvasShown) { failed = true; console.log('the WebGPU view did not show', JSON.stringify(await events())); }
   if (SCALE === '1' && (!r.checked || r.differ !== 0)) { failed = true; console.log(`at scale 1, ${r.differ} of ${r.checked} frames checked differ from the game's screen`); }
