@@ -546,10 +546,14 @@ fn zero(c: &mut Cpu, hdr: u16) {
 
 /// 8BAF: the level of detail for the depth, then a bitmap or the model. (Each level's greatest
 /// depth times `list::detail`: on a screen that many times larger the game would keep each
-/// level as much further.)
+/// level as much further; for the car, shape 0 at R:004E, `list::car_detail`.)
 fn lod(c: &mut Cpu, hdr: u16, depth: u16) {
     let mut di = hdr;
-    let s = list::detail();
+    let s = if c.d(0x4e) == 0 {
+        list::car_detail()
+    } else {
+        list::detail()
+    };
     while depth as i16 as i32 > c.e(di.wrapping_add(0x16)) as i16 as i32 * s {
         di = di.wrapping_add(0xa);
     }

@@ -88,10 +88,27 @@ pub extern "C" fn mc_native_3d(p: *mut Handle, on: u32) {
 pub extern "C" fn mc_r3d_scale(p: *mut Handle, scale: u32) {
     h(p).m.set_r3d_scale(scale);
 }
+/// How far the cars keep their 3D model while the 3D view is drawn finer: 0 as the game does,
+/// 1 as on a screen the scale times larger, 2 at every distance.
+#[no_mangle]
+pub extern "C" fn mc_r3d_cars(p: *mut Handle, mode: u32) {
+    use crate::r3d::list::Cars;
+    h(p).m.set_r3d_cars(match mode {
+        0 => Cars::Game,
+        2 => Cars::All,
+        _ => Cars::Scale,
+    });
+}
+/// The bitmaps drawn larger than their art smoothed (1) or as their pixels (0).
+#[no_mangle]
+pub extern "C" fn mc_r3d_smooth(p: *mut Handle, on: u32) {
+    h(p).m.set_r3d_smooth(on != 0);
+}
 /// The last frame the game showed with its 3D view drawn finer (src/r3d/shown.rs): what = 0 its
 /// serial number, 1 its scale, 2 the screen row the 3D view starts on, 3 its primitives' count
 /// of words, 4 their pointer, 5 the screen's pointer (320 x 200), 6 the mask's (1 where the
-/// screen shows the 3D view), 7 the palette's (768 bytes, 6-bit).
+/// screen shows the 3D view), 7 the palette's (768 bytes, 6-bit), 8 whether its bitmaps were
+/// smoothed (1) or drawn as their pixels (0).
 #[no_mangle]
 pub extern "C" fn mc_r3d_shown(p: *mut Handle, what: u32) -> u32 {
     let s = &h(p).m.r3d_shown;
@@ -104,6 +121,7 @@ pub extern "C" fn mc_r3d_shown(p: *mut Handle, what: u32) -> u32 {
         5 => s.screen.as_ptr() as u32,
         6 => s.mask.as_ptr() as u32,
         7 => s.dac.as_ptr() as u32,
+        8 => (s.art == crate::r3d::fine::Art::Smooth) as u32,
         _ => 0,
     }
 }

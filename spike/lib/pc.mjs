@@ -41,7 +41,8 @@ const SCAN = (() => {
  */
 export async function createPC(o) {
   let bytes = o.wasm;
-  if (typeof bytes === 'string' || bytes instanceof URL) bytes = await (await fetch(bytes)).arrayBuffer();
+  // (asked again of the server each time: an unversioned file a browser may keep for minutes after a deploy)
+  if (typeof bytes === 'string' || bytes instanceof URL) bytes = await (await fetch(bytes, { cache: 'no-cache' })).arrayBuffer();
   const { instance } = await WebAssembly.instantiate(bytes, {});
   const x = instance.exports;
   const memory = x.memory;
@@ -102,10 +103,18 @@ export async function createPC(o) {
      */
     r3dScale: (s) => x.mc_r3d_scale(h, s),
     /**
+     * How far the cars keep their 3D model when the view is drawn finer: 'scale' (as the game
+     * would on a screen that many times larger), 'all' (at every distance) or 'game' (as the
+     * game does at its own resolution).
+     */
+    r3dCars: (mode) => x.mc_r3d_cars(h, { game: 0, scale: 1, all: 2 }[mode] ?? 1),
+    /** The bitmaps drawn larger than their art smoothed (fine.rs Art::Smooth), or as pixels. */
+    r3dSmooth: (on) => x.mc_r3d_smooth(h, on ? 1 : 0),
+    /**
      * The last frame shown that way, or null: { serial, scale, top (the screen row the 3D view
-     * starts on), words (its primitives, four words each), screen (320 x 200 palette indices),
-     * mask (1 where the screen shows the 3D view), dac (768 bytes, 6-bit) }, views to use
-     * before the next run.
+     * starts on), art ('smooth' or 'pixels', how its bitmaps were drawn), words (its
+     * primitives, four words each), screen (320 x 200 palette indices), mask (1 where the screen
+     * shows the 3D view), dac (768 bytes, 6-bit) }, views to use before the next run.
      */
     r3dShown() {
       const g = (k) => x.mc_r3d_shown(h, k) >>> 0;
@@ -113,7 +122,7 @@ export async function createPC(o) {
       if (!serial) return null;
       const v = view();
       return {
-        serial, scale: g(1), top: g(2),
+        serial, scale: g(1), top: g(2), art: g(8) ? 'smooth' : 'pixels',
         words: new Uint32Array(v.buffer, g(4), g(3)),
         screen: v.subarray(g(5), g(5) + 64000), mask: v.subarray(g(6), g(6) + 64000), dac: v.subarray(g(7), g(7) + 768),
       };

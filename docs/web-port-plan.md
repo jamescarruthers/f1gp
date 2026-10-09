@@ -666,9 +666,15 @@ at any resolution.
    - **The pixel art at the finer scale.** Poles s pixels wide from their fine
      ends, the scenery scrolled finer, the crowd's game-sized texels on fine
      spans, the ground texture worked out for each fine row, the sky and
-     ground bands from the fine rows of the points they came from, and perhaps
-     a pixel-art filter (xBR, as the cockpit has) for bitmaps drawn larger than
-     their art.
+     ground bands from the fine rows of the points they came from.
+   - **Smoothed bitmaps (done, an option).** `art=smooth` draws the bitmaps
+     shown 1.5 times the size of their art or more with xBR level 2's corner
+     cuts, as the cockpit's filter makes them, but with hard edges in the
+     bitmap's own colours, and without the cuts that would round the corners of
+     boards and digits or bend one-pixel stripes (`machine/src/r3d/smooth.rs`;
+     `docs/renderer-notes.md`, "Drawing the frame finer"). The cuts are spans,
+     so the GPU paints them unchanged; `art=pixels`, the default, draws as
+     before, and `gpucheck=1` draws pixels so scale 1 is still the game's.
    - **Edges on the GPU, if needed.** The CPU builds the edges and walks the
      rings at scale s, and the GPU fills the spans. If that costs too much at
      high scales, the edge stepping and the ring walk move to compute shaders;

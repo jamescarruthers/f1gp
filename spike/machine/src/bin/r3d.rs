@@ -1952,7 +1952,7 @@ fn shadow_check(files: &Path, ops: &str) {
                         let bb = back_buffer(&o) as usize;
                         let view = (r3d::list::W * r3d::list::H) as usize;
                         let before = o.hw.mem[bb..bb + view].to_vec();
-                        r3d::list::begin(&o, 1);
+                        r3d::list::begin(&o, 1, r3d::list::Cars::Scale);
                         r3d::frame::step(&mut o, 0, r3d::frame::Service::Skip);
                         let l = r3d::list::end().unwrap();
                         let again = r3d::fine::draw(&r3d::fine::prims(&l, 1), Some(&before));
@@ -1997,9 +1997,18 @@ fn shadow_check(files: &Path, ops: &str) {
 /// for the first `keep` frames its primitives are saved for the GPU's check
 /// (probes/p9-gpu-r3d.mjs) in <out>/gpu: NNNN-sS.prims (four words a primitive), .init (the
 /// fine pixels it starts from: at scale 1 the frame before, else none), .want (fine.rs's
-/// picture) and, for the first four, a PNG of it.
+/// picture) and, for the first four, a PNG of it; with LIST_ART=smooth, the bitmaps smoothed
+/// (fine::Art::Smooth). At every scale asked for, the list drawn with Art::Pixels must be
+/// `fine::prims` exactly, and Art::Smooth with the art kept from the frames before
+/// (fine::Smoother) the same as with none kept.
 fn list_check(out: &Path, scales: &str, keep: usize) {
     let scales: Vec<u32> = scales.split(',').map(|s| s.parse().unwrap()).collect();
+    let art = match std::env::var("LIST_ART").as_deref() {
+        Ok("smooth") => r3d::fine::Art::Smooth,
+        _ => r3d::fine::Art::Pixels,
+    };
+    let mut kept: Vec<r3d::fine::Smoother> = scales.iter().map(|_| Default::default()).collect();
+    let mut smoothed = vec![0usize; scales.len()];
     let gpu = out.join("gpu");
     if keep > 0 {
         std::fs::create_dir_all(&gpu).unwrap();
@@ -2015,7 +2024,7 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
         m.restore(&snap);
         let at = back_buffer(&m) as usize;
         let before = m.hw.mem[at..at + view].to_vec();
-        r3d::list::begin(&m, 1);
+        r3d::list::begin(&m, 1, r3d::list::Cars::Scale);
         r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
         let l = r3d::list::end().unwrap();
         let drawn = &m.hw.mem[at..at + view];
@@ -2039,6 +2048,19 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
                     unflat += 1;
                 }
             }
+        }
+        for (i, &s) in scales.iter().enumerate() {
+            let px = r3d::fine::prims(&l, s).prims;
+            assert!(
+                r3d::fine::prims_in(&l, s, r3d::fine::Art::Pixels).prims == px,
+                "{name} at scale {s}: Art::Pixels is not fine::prims"
+            );
+            let sm = r3d::fine::prims_in(&l, s, r3d::fine::Art::Smooth).prims;
+            assert!(
+                r3d::fine::prims_with(&l, s, Some(&mut kept[i])).prims == sm,
+                "{name} at scale {s}: Art::Smooth with the art kept is not as with none"
+            );
+            smoothed[i] += (sm != px) as usize;
         }
         let p1 = r3d::fine::prims(&l, 1);
         let got = r3d::fine::draw(&p1, Some(&before));
@@ -2066,7 +2088,7 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
             let pal = lin(m.cpu.s[2], 0x5da) as usize;
             let pal = &m.hw.mem[pal..pal + 768];
             for &s in &scales {
-                let ps = r3d::fine::prims(&l, s);
+                let ps = r3d::fine::prims_in(&l, s, art);
                 let init = if s == 1 { Some(&before[..]) } else { None };
                 let img = r3d::fine::draw(&ps, init);
                 let words: Vec<u8> = r3d::fine::words(&ps)
@@ -2105,6 +2127,9 @@ fn list_check(out: &Path, scales: &str, keep: usize) {
         "{flat} edges with nothing to draw on the game's screen (flags 80h), {unflat} of them drawn at scale {}",
         scales.iter().max().unwrap()
     );
+    for (s, n) in scales.iter().zip(&smoothed) {
+        println!("scale {s}: {n} of {total} frames drawn otherwise with the bitmaps smoothed");
+    }
     if same != total {
         std::process::exit(1);
     }
@@ -2157,7 +2182,7 @@ fn fine_edges(out: &Path, trials: usize) {
                 continue;
             }
             checked += 1;
-            r3d::list::begin(&m, 1);
+            r3d::list::begin(&m, 1, r3d::list::Cars::Scale);
             o.run(&mut m);
             let l = r3d::list::end().unwrap();
             let (flags, rec, st) = r3d::fine::edge_at(&l, 0, 1);
@@ -2213,7 +2238,7 @@ fn time_frames(out: &Path, reps: usize) {
                 m.restore(snap);
                 let t = std::time::Instant::now();
                 if listing {
-                    r3d::list::begin(&m, 1);
+                    r3d::list::begin(&m, 1, r3d::list::Cars::Scale);
                 }
                 r3d::frame::step(&mut m, 0, r3d::frame::Service::Skip);
                 if listing {
@@ -2237,8 +2262,8 @@ fn time_frames(out: &Path, reps: usize) {
 /// The recorded race played with our routine in the game, its frames shown for the page
 /// (src/r3d/shown.rs) at `scale`: each frame the game shows, its 3D view drawn from the display
 /// list where the mask says the screen shows it, the game's screen elsewhere. At scale 1 that
-/// must be the screen itself, byte for byte. PAGE_SHOTS=<folder> saves every 300th frame at the
-/// scale asked, as the page would show it.
+/// must be the screen itself, byte for byte (with the bitmaps as pixels). PAGE_SHOTS=<folder>
+/// saves every 300th frame at the scale asked, as the page would show it.
 fn page_check(files: &Path, ops: &str, scale: u32) {
     let mut m = session::machine(files, "GP.EXE", " /g");
     m.set_native_3d(true);
@@ -2248,6 +2273,16 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
     // PAGE_OFF=n: the scale 0 for one run in n (the page turning r3d=gpu off and on, often in
     // the middle of a frame)
     let off: Option<u32> = std::env::var("PAGE_OFF").ok().and_then(|v| v.parse().ok());
+    // PAGE_CARS=game|scale|all: how far the cars keep their model (list::Cars)
+    m.set_r3d_cars(match std::env::var("PAGE_CARS").as_deref() {
+        Ok("game") => r3d::list::Cars::Game,
+        Ok("all") => r3d::list::Cars::All,
+        _ => r3d::list::Cars::Scale,
+    });
+    // PAGE_ART=pixels|smooth: how the bitmaps drawn larger than their art look (fine::Art; at
+    // scale 1 smoothed ones are not the game's screen)
+    let smooth = std::env::var("PAGE_ART").as_deref() == Ok("smooth");
+    m.set_r3d_smooth(smooth);
     let (mut seen, mut same, mut shown, mut masked) = (0u32, 0, 0, 0u64);
     let (mut ms, mut runs) = (0.0f64, 0u32);
     for op in session::parse(ops) {
@@ -2356,7 +2391,7 @@ fn page_check(files: &Path, ops: &str, scale: u32) {
     );
     let (copies, differ) = m.r3d_copy_check.unwrap();
     println!("{copies} copies to the screen by our port of 19ED:31FA, {differ} of them not as the game's");
-    if (scale == 1 && same != shown) || differ != 0 || copies == 0 {
+    if (scale == 1 && !smooth && same != shown) || differ != 0 || copies == 0 {
         std::process::exit(1);
     }
 }

@@ -55,8 +55,20 @@
                           and messages over it (lib/gpu-r3d.mjs); ours without WebGPU
     scale=auto|1..6       r3d=gpu: the 3D view's resolution, in game pixels (1: the
                           game's own pixels); auto, the default: the screen's pixels
+    art=pixels|smooth     r3d=gpu: the bitmaps (wheels, helmets, boards, trees) where they
+                          are drawn 1.5 times the size of their art or more: as the art's
+                          square pixels (the default), or smoothed by xBR's corner cuts
+                          with hard edges, every pixel one of the bitmap's own colours,
+                          the corners of boards and digits kept square and one-pixel
+                          stripes not bent (machine/src/r3d/smooth.rs); it shows most
+                          at scale 2 and up
+    cardetail=scale|all|game  r3d=gpu: how far the cars keep their 3D model: as the game
+                          would on a screen that many times finer (scale, the default),
+                          at every distance (all), or as the game does (game); the cars
+                          in the mirrors stay as the game draws them
     gpucheck=1            r3d=gpu at scale 1, for probes: every 15th frame read back
-                          and compared with the game's screen (renderApp.gpu)
+                          and compared with the game's screen (renderApp.gpu); the
+                          bitmaps drawn as pixels, whatever art says
     pad=auto|off          auto: a game controller drives (once the browser sees it: press
                           one of its buttons): in a session its left stick steers and its
                           triggers accelerate and brake through the game's own joystick
@@ -112,11 +124,13 @@
     saves=on|off          on (default): the files the game writes (C:\GPSAVES, F1PREFS.DAT)
                           are kept in this browser and laid over the bundle on the next
                           visit (lib/saves.mjs; the Saves button lists them and forgets
-                          them). The menu choices (screen, sound, shape, style, cockpit)
-                          are kept too; an option in the address wins.
+                          them)
     source=memory|file    build the scene from the game's memory (all parts,
                           the game's colours, sky and horizon image) or from
                           the track file (road, kerbs and verges only)
+
+  The Options button sets every option above but bundle (lib/options.mjs); a choice there or in a
+  menu goes in the address and is kept in this browser (not saves or For tests); the address wins.
 -->
 <style>
   :root { --bg: #f4f3ef; --fg: #1d1d1b; --muted: #6b6a66; --panel: #ffffff; --line: #d9d7d0; }
@@ -142,6 +156,20 @@
   #saves { margin: 0 16px 12px; padding: 4px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; max-width: 70ch; }
   #saves p { margin: 8px 0; }
   #keys kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
+  #options { margin: 0 16px 12px; padding: 0 16px 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+  #options p { margin: 8px 0; }
+  #options select, #options button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+  #options button { cursor: pointer; }
+  #optwait { position: sticky; top: 0; z-index: 1; margin: 0 -16px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; }
+  #optlist { columns: 2 340px; column-gap: 32px; }
+  #optlist h3 { font-size: 13px; margin: 12px 0 2px; break-after: avoid; }
+  #optlist .opt { break-inside: avoid; padding: 6px 0; border-top: 1px solid var(--line); }
+  #optlist .opthead { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; justify-content: space-between; }
+  #optlist .opthead label { font-weight: 600; }
+  #optlist .opthead select { min-width: 0; max-width: 100%; }
+  #optlist .opt p { margin: 3px 0 0; }
+  #optlist .optnote { color: var(--muted); font-size: 12px; }
+  #optlist h3 + .optnote { margin: 0 0 4px; }
   main { display: flex; gap: 12px; padding: 0 16px 16px; flex-wrap: wrap; align-items: flex-start; }
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
   #screen, #gpu { width: 480px; aspect-ratio: 4 / 3; image-rendering: pixelated; display: block; outline: none; }
@@ -181,9 +209,16 @@
   <label>Style <select id="style"><option value="modern">Modern: 3D cars</option><option value="classic">Classic: as the original</option></select></label>
   <button id="keysbtn" type="button" aria-expanded="false" aria-controls="keys">Keys</button>
   <button id="savesbtn" type="button" aria-expanded="false" aria-controls="saves">Saves</button>
+  <button id="optsbtn" type="button" aria-expanded="false" aria-controls="options">Options</button>
   <span id="status">loading...</span><span id="notice"></span></header>
 <div id="keys" hidden></div>
-<div id="saves" hidden><p id="savesinfo"></p><p><button id="forget" type="button">Forget them and restart</button> <span id="forgetask" hidden>Forget every saved game, name, track record, car setup and option in this browser? <button id="forgetyes" type="button">Yes, forget</button> <button id="forgetno" type="button">Keep them</button></span></p></div>
+<div id="saves" hidden><p id="savesinfo"></p><p><button id="forget" type="button">Forget them and restart</button> <span id="forgetask" hidden>Forget every saved game, name, track record and car setup, and the game's own options, in this browser? <button id="forgetyes" type="button">Yes, forget</button> <button id="forgetno" type="button">Keep them</button></span></p></div>
+<div id="options" hidden>
+  <div id="optwait" hidden><p><span id="optwaittext"></span> <button id="optreload" type="button">Reload now</button> <button id="optundo" type="button">Undo</button></p></div>
+  <p>Every option the page has, set to the value in use now. A choice goes in the address, so a copied link carries it, and stays in this browser for your next visit unless its note says it is not kept.</p>
+  <div id="optlist"></div>
+  <p><button id="optreset" type="button">Back to the defaults</button> <span id="optresetask" hidden>Put every option back to its default and start the game again? Your saved games stay. <button id="optresetyes" type="button">Yes, back to the defaults</button> <button id="optresetno" type="button">Keep my choices</button></span></p>
+</div>
 <main>
   <div class="pane origpane"><canvas id="screen" width="320" height="200" tabindex="0"></canvas><canvas id="gpu" width="320" height="200" hidden></canvas><canvas id="overgl"></canvas></div>
   <div class="pane glpane"><div class="glwrap"><canvas id="gl"></canvas><div id="glnote">The new view starts when you are in the car.</div></div><pre id="perf"></pre></div>
@@ -210,13 +245,19 @@ import { readPad, firstPad, padKeys } from './lib/gamepad.mjs';
 import { virtualJoystick } from './lib/joystick.mjs';
 import { createPC, pcCommandInterface } from './lib/pc.mjs';
 import { gpuView } from './lib/gpu-r3d.mjs';
-import { changeStore, keeper, menuChoices } from './lib/saves.mjs';
+import { changeStore, keeper, menuChoices, putInAddress } from './lib/saves.mjs';
+import { OPTIONS, GROUPS, KEPT, defaultOf, askedOf, valueLabel } from './lib/options.mjs';
 import { unzipSync, zipSync } from './node_modules/fflate/esm/browser.js';
 
 const $ = (id) => document.getElementById(id);
+// a notice that stays (no WebGPU, no Amiga sound): a passing one gives way to it again
+let lasting = '';
+const lastingNotice = (t) => { lasting = t; $('notice').textContent = t; };
 const q = new URLSearchParams(location.search);
-// the menu choices from the last visit; the address wins
-const choices = menuChoices(['screen', 'sound', 'framing', 'style', 'cockpit']);
+// the menus' and the Options panel's choices from the last visit; the address wins
+const choices = menuChoices(KEPT);
+const optionNamed = (name) => OPTIONS.find((o) => o.name === name);
+const addressAtStart = new URLSearchParams(location.search), keptAtStart = choices.read();
 choices.apply(q);
 const opts = {
   bundle: q.get('bundle') ?? 'dist/f1gp.jsdos',
@@ -249,6 +290,8 @@ const opts = {
   r3d: ['ours', 'gpu'].includes(q.get('r3d')) ? q.get('r3d') : 'game',
   // r3d=gpu: the 3D view's scale (auto: the screen's pixels), and checks for probes
   scale: /^[1-6]$/.test(q.get('scale') ?? '') ? +q.get('scale') : 'auto',
+  art: q.get('art') === 'smooth' ? 'smooth' : 'pixels',
+  cardetail: ['all', 'game'].includes(q.get('cardetail')) ? q.get('cardetail') : 'scale',
   gpucheck: q.get('gpucheck') === '1',
   framingParam: q.get('framing'),
   // the game's frame rate, set in the menus for the next session (30 at most); 'game' keeps the game's own
@@ -282,7 +325,7 @@ function applyStyle(style) {
 function showShape() {
   document.body.classList.toggle('narrow', opts.framing === 'original');
   const sel = document.getElementById('shape');
-  if (sel) { sel.value = opts.framing === 'original' ? 'original' : 'wide'; sel.disabled = opts.layout === 'overlay'; }
+  if (sel) { sel.value = optionNamed('framing').read(opts); sel.disabled = opts.layout === 'overlay'; }
 }
 applyStyle(opts.style);
 {
@@ -308,7 +351,7 @@ applyStyle(opts.style);
   sel.value = opts.style;
   sel.addEventListener('change', () => {
     applyStyle(sel.value);
-    choices.set('style', sel.value);
+    remember(optionNamed('style'), sel.value);
     sel.blur(); // keys go back to the game
   });
 }
@@ -336,7 +379,7 @@ if (opts.layout === 'single') {
   sel.value = opts.screen;
   sel.addEventListener('change', () => {
     opts.screen = sel.value;
-    choices.set('screen', sel.value);
+    remember(optionNamed('screen'), sel.value);
     sel.blur();
   });
 }
@@ -388,7 +431,7 @@ function setSound(v) {
     .then((a) => { amiga = a; window.renderApp.amiga = a; log('amiga-sound', { filter: v }); if (opts.sound === 'adlib') a.setEnabled(false); else a.setFilter(opts.sound === 'amiga-clean' ? 'off' : 'a500'); })
     .catch((e) => {
       log('amiga-sound-failed', { error: String(e) });
-      $('notice').textContent = `No Amiga sound: ${e.message}`;
+      lastingNotice(`No Amiga sound: ${e.message}`);
       opts.sound = 'adlib'; $('sound').value = 'adlib';
     })
     .finally(() => { amigaLoading = null; });
@@ -399,11 +442,11 @@ function setSound(v) {
   if (opts.audio === 'off') sel.disabled = true;
   sel.addEventListener('change', () => {
     setSound(sel.value);
-    choices.set('sound', sel.value);
+    remember(optionNamed('sound'), sel.value);
     sel.blur();
   });
 }
-if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; }
+if (opts.layout === 'overlay') { document.body.classList.add('overlay'); opts.framing = 'screen'; showShape(); }
 const events = window.emuEvents = [];
 const log = (type, extra = {}) => events.push({ t: Math.round(performance.now()), type, ...extra });
 
@@ -502,13 +545,15 @@ function cockpitLight(target) {
 }
 const wheelSpins = new Map(); // each car's wheels' turn (modern style), by slot
 let cur = null;               // the newest game frame: { st, cam, cars, t, step }
-const pacer = framePacer({ smooth: opts.smooth }); // the frames the page draws between
+const pacer = framePacer({ get smooth() { return opts.smooth; } }); // the frames the page draws between (smooth read each frame)
 let governor = null;          // the emulated CPU speed (cycles=auto)
 let rustPC = null;            // our PC (machine=rust), for r3d=ours
 let gpu = null;               // r3d=gpu: the WebGPU view (lib/gpu-r3d.mjs gpuView)
 // the frames shown through it, when the last came, the scale (auto: from the box's size), the
 // time each took to send, and the checks (gpucheck=1)
 const gpuSeen = { serial: 0, at: -1e9, shown: 0, scale: 2, ms: [], checked: 0, differ: 0, lastDiffer: 0 };
+// the bitmaps as pixels while the checks run: smoothed, scale 1 is no longer the game's screen
+const artNow = () => (opts.gpucheck ? 'pixels' : opts.art);
 const nativeSeen = { n: 0, at: -1e9 }; // the frames our 3D routine drew, and when the count last moved
 let carData = null;           // readCars(mem) for the circuit (source=memory)
 let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
@@ -608,6 +653,8 @@ function frame(now) {
   if (rustPC) {
     rustPC.native3d(opts.r3d !== 'game' && opts.screen === 'original' && !(routine && routine.installed));
     rustPC.r3dScale(gpu && opts.r3d === 'gpu' && opts.screen === 'original' ? gpuSeen.scale : 0);
+    rustPC.r3dSmooth(artNow() === 'smooth');
+    rustPC.r3dCars(opts.cardetail);
     const n = rustPC.nativeFrames();
     if (n !== nativeSeen.n) { if (nativeSeen.n === 0) log('game-3d-ours'); nativeSeen.n = n; nativeSeen.at = now; }
   }
@@ -617,7 +664,8 @@ function frame(now) {
     const sh = rustPC.r3dShown();
     if (sh && sh.serial !== gpuSeen.serial) {
       gpuSeen.serial = sh.serial; gpuSeen.at = now; gpuSeen.shown++;
-      const check = opts.gpucheck && sh.scale === 1 && gpuSeen.shown % 15 === 0;
+      // (a frame taken smoothed before gpucheck came on is not the game's screen: not checked)
+      const check = opts.gpucheck && sh.scale === 1 && sh.art === 'pixels' && gpuSeen.shown % 15 === 0;
       const want = check ? sh.screen.slice() : null;
       const t = performance.now();
       const read = gpu.show(sh, { check });
@@ -801,10 +849,176 @@ setInterval(() => {
     const fps = gpuSeen.shown - (gpuSeen.lastShown ?? gpuSeen.shown);
     gpuSeen.lastShown = gpuSeen.shown;
     window.renderApp.gpu = { scale: gpuSeen.scale, shown: gpuSeen.shown, fps, sendMs: +med(ms) || null, checked: gpuSeen.checked, differ: gpuSeen.differ, lastDiffer: gpuSeen.lastDiffer, errors: gpu.errors };
-    if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, ${med(ms)} ms a frame to send`;
+    if (opts.r3d === 'gpu' && opts.screen !== 'original') $('perf').textContent += ' · WebGPU view off: the Screen is New view';
+    else if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, cars ${opts.cardetail}, art ${artNow()}, ${med(ms)} ms a frame to send`;
   }
   perf.kept = 0;
+  if (!$('options').hidden) showOptions();
 }, 1000);
+
+// ------------------------------------------------------------ the Options panel
+// every address option (lib/options.mjs): its values, what it does, the value in use. A live one
+// applies at once, through the same code as its menu; one that needs a reload waits for Reload now.
+// A choice goes in the address and, unless the option says not, is kept like the menus' choices.
+const optRows = new Map();      // name -> { opt, sel, note }
+const waiting = {};             // the choices waiting for a reload: name -> value
+const changedLive = new Set();  // the options changed at once in this visit
+let optKeys = false;            // the panel is worked from the keyboard (Tab there): its controls keep the focus and keys
+const followStyle = (name, v) => { opts[`${name}Param`] = v || null; applyStyle(opts.style); };
+const setNow = {
+  screen: (v) => { opts.screen = v; $('screenmode').value = v; },
+  framing: (v) => { opts.framingParam = v || null; if (v) opts.framing = v; applyStyle(opts.style); },
+  smooth: (v) => { opts.smooth = v !== '0'; },
+  style: (v) => { applyStyle(v); $('style').value = v; },
+  sound: (v) => { setSound(v); $('sound').value = v; },
+  pad: (v) => { opts.pad = v; },
+  r3d: (v) => { opts.r3d = v; },
+  scale: (v) => { opts.scale = v === 'auto' ? 'auto' : +v; if (v !== 'auto') gpuSeen.scale = +v; },
+  art: (v) => { opts.art = v; },
+  cardetail: (v) => { opts.cardetail = v; },
+  gpucheck: (v) => { opts.gpucheck = v === '1'; },
+  fps: (v) => { opts.fps = v === 'game' ? null : Math.min(30, Math.max(8, +v)); },
+};
+// a reload: the reload options, WebGPU when the page started without its view, and the game's own
+// frame rate once the page has set one (the game keeps the last rate it was given)
+const needsReload = (o, v) => !!o.reload || (o.name === 'r3d' && v === 'gpu' && !gpu) || (o.name === 'fps' && v === 'game' && opts.fps !== null);
+// a choice into the address and, if kept, the browser; '' (from the style) takes it out of both,
+// and so does the default of an option the style does not set, so it follows the layout
+function remember(o, v) {
+  if (v === '' || (!o.styled && v === defaultOf(o, { style: opts.style, layout: opts.layout }))) choices.forget(o.name);
+  else if (o.kept !== false) choices.set(o.name, v);
+  else putInAddress(o.name, v);
+}
+// the address and the kept choice as they were when the page loaded
+function restore(o) {
+  putInAddress(o.name, addressAtStart.get(o.name));
+  if (o.kept !== false) choices.keep(o.name, typeof keptAtStart[o.name] === 'string' ? keptAtStart[o.name] : null);
+}
+function chooseOption(o, v) {
+  if (!needsReload(o, v)) {
+    delete waiting[o.name];
+    (setNow[o.name] ?? ((x) => followStyle(o.name, x)))(v);
+    changedLive.add(o.name);
+    remember(o, v);
+  } else if (v === o.read(opts)) { delete waiting[o.name]; restore(o); }
+  else { waiting[o.name] = v; remember(o, v); }
+  showOptions();
+}
+function undoWaiting() {
+  for (const name of Object.keys(waiting)) {
+    const o = optRows.get(name).opt;
+    delete waiting[name];
+    if (o.reload || !changedLive.has(name)) restore(o); else remember(o, o.read(opts));
+  }
+  showOptions();
+}
+// a game key pressed in the panel: its control keeps it while the panel is worked from the keyboard;
+// else the control lets go of the focus and the key is the game's, as for the menus. The F keys are
+// always the game's, and a modifier keeps the focus (Shift+Tab).
+function panelTakes(e) {
+  if (!(e.target instanceof HTMLElement && e.target.closest('#options')) || /^F\d+$/.test(e.code)) return false;
+  if (e.type === 'keydown' && e.code === 'Tab') optKeys = true;
+  if (!optKeys && !/^(Shift|Control|Alt)/.test(e.code)) e.target.blur();
+  return optKeys;
+}
+// the page loaded again: the game's files kept first (the store as the page goes may not finish)
+async function restart() {
+  for (const id of ['optreload', 'optresetyes']) $(id).disabled = true;
+  if (saves) await Promise.race([saves.check(true), new Promise((r) => setTimeout(r, 3000))]);
+  location.reload();
+}
+function buildOptions() {
+  for (const [group, title, line] of GROUPS) {
+    const sec = document.createElement('section'), h = document.createElement('h3');
+    h.textContent = title;
+    sec.append(h);
+    if (line) { const p = document.createElement('p'); p.className = 'optnote'; p.textContent = line; sec.append(p); }
+    for (const o of OPTIONS.filter((x) => x.group === group)) {
+      const row = document.createElement('div'), head = document.createElement('div'), label = document.createElement('label');
+      const sel = document.createElement('select'), text = document.createElement('p'), note = document.createElement('p');
+      row.className = 'opt'; head.className = 'opthead'; note.className = 'optnote';
+      sel.id = `opt-${o.name}`; label.htmlFor = sel.id; label.textContent = o.label; text.textContent = o.text;
+      for (const [v, l] of o.styled ? [['', ''], ...o.values] : o.values) sel.add(new Option(l, v));
+      sel.addEventListener('change', () => {
+        const v = sel.value;
+        if (!optKeys) sel.blur(); // keys go back to the game
+        chooseOption(o, v);
+      });
+      head.append(label, sel);
+      row.append(head, text, note);
+      sec.append(row);
+      optRows.set(o.name, { opt: o, sel, note });
+    }
+    $('optlist').append(sec);
+  }
+}
+// each row as the page is now, the bar of choices waiting for a reload, and the menus in step
+function showOptions() {
+  const c = { style: opts.style, layout: opts.layout };
+  for (const { opt: o, sel, note } of optRows.values()) {
+    const now = o.read(opts), def = defaultOf(o, c);
+    const fixed = o.name === 'framing' && opts.layout === 'overlay'; // (the game's shape)
+    const value = waiting[o.name] ?? (o.styled && !fixed ? askedOf(o, opts) : now);
+    if (![...sel.options].some((x) => x.value === value)) sel.add(new Option('', value));
+    for (const x of sel.options) {
+      const t = x.value === '' ? `From the style: ${valueLabel(o, def)}` : `${valueLabel(o, x.value)}${!o.styled && x.value === def ? ' (default)' : ''}`;
+      if (x.text !== t) x.text = t;
+      if (o.name === 'sound') x.disabled = x.value === 'adlib' && opts.machine === 'rust';
+    }
+    if (sel.value !== value && document.activeElement !== sel) sel.value = value;
+    sel.disabled = fixed || (o.name === 'sound' && opts.audio !== 'own');
+    const notes = o.note ? [o.note] : [];
+    if (o.name === 'texture' && mem && !textureOn(mem)) notes.push('The game\'s texture is off now.');
+    if (waiting[o.name] !== undefined) notes.push(`Waiting for a reload; in use now: ${valueLabel(o, now)}.`);
+    else if (o.reload) notes.push('Applies on a reload.');
+    if (o.kept === false) notes.push('Not kept between visits.');
+    const t = notes.join(' ');
+    if (note.textContent !== t) note.textContent = t;
+    note.hidden = !t;
+  }
+  const names = Object.keys(waiting);
+  $('optwait').hidden = !names.length;
+  $('optwaittext').textContent = names.length ? `Waiting for a reload, which starts the game again: ${names.map((n) => {
+    const o = optRows.get(n).opt;
+    return `${o.label}: ${valueLabel(o, waiting[n])}`;
+  }).join('; ')}.` : '';
+  // (the page changes some options itself: the sound under our PC, r3d without WebGPU)
+  const menus = { screenmode: optRows.get('screen').opt.read(opts), sound: opts.sound, style: opts.style, cockpit: opts.cockpit };
+  for (const [id, v] of Object.entries(menus)) if ($(id).value !== v && document.activeElement !== $(id)) $(id).value = v;
+}
+{
+  const panel = $('options'), btn = $('optsbtn');
+  buildOptions();
+  btn.addEventListener('click', () => {
+    panel.hidden = !panel.hidden;
+    btn.setAttribute('aria-expanded', String(!panel.hidden));
+    if (!panel.hidden) showOptions();
+    btn.blur();
+  });
+  // worked with the mouse, a button lets go of the focus and a row's label does not take it (keys go
+  // back to the game); worked from the keyboard (Tab), until the focus leaves the panel
+  panel.addEventListener('pointerdown', () => { optKeys = false; }, true);
+  panel.addEventListener('click', (e) => {
+    if (optKeys) return;
+    if (e.target instanceof HTMLButtonElement) e.target.blur();
+    else if (e.target instanceof HTMLLabelElement) e.preventDefault();
+  });
+  panel.addEventListener('focusout', (e) => { if (!panel.contains(e.relatedTarget)) optKeys = false; });
+  // the header's menus change the same options
+  for (const id of ['screenmode', 'sound', 'shape', 'cockpit', 'style']) $(id).addEventListener('change', showOptions);
+  $('optundo').addEventListener('click', undoWaiting);
+  $('optreload').addEventListener('click', restart);
+  $('optreset').addEventListener('click', () => { $('optresetask').hidden = false; $('optreset').hidden = true; });
+  $('optresetno').addEventListener('click', () => { $('optresetask').hidden = true; $('optreset').hidden = false; });
+  $('optresetyes').addEventListener('click', () => {
+    choices.clear();
+    const u = new URL(location.href);
+    for (const o of OPTIONS) u.searchParams.delete(o.name);
+    history.replaceState(null, '', u);
+    restart();
+  });
+  showOptions();
+}
 
 window.renderApp = { opts, renderer, state: null, track: null, perf: null, mem: null, reader: null, setStyle: (v) => { applyStyle(v); $('style').value = v; },
   // the time (ms) the page's frame loop has taken (bench.html)
@@ -840,12 +1054,12 @@ requestAnimationFrame(frameLoop);
         gpu.device.lost.then((info) => {
           gpu = null; opts.r3d = 'ours';
           log('gpu-lost', { reason: info.reason, message: info.message });
-          $('notice').textContent = 'WebGPU stopped: the 3D view is drawn at the game\'s resolution.';
+          lastingNotice('WebGPU stopped: the 3D view is drawn at the game\'s resolution.');
         });
       } catch (e) {
         opts.r3d = 'ours';
         log('gpu-unavailable', { error: String(e) });
-        $('notice').textContent = 'No WebGPU in this browser: the 3D view is drawn at the game\'s resolution.';
+        lastingNotice('No WebGPU in this browser: the 3D view is drawn at the game\'s resolution.');
       }
     }
     if (opts.sound === 'adlib') { opts.sound = 'amiga'; log('adlib-unavailable'); }
@@ -865,6 +1079,7 @@ requestAnimationFrame(frameLoop);
   // the game's own sound, unless the Amiga's plays instead
   if (ownAudio) ci.events().onSoundPush((samples) => { if (opts.sound === 'adlib') ownAudio.push(samples, ci.soundFrequency()); });
   if (opts.audio === 'own' && opts.sound !== 'adlib') setSound(opts.sound);
+  showOptions(); // (the sound and r3d as the start left them)
   if (opts.manual === 'auto') {
     // the game's manual question: type the word for the player
     const helper = manualHelper({
@@ -874,7 +1089,7 @@ requestAnimationFrame(frameLoop);
       onAnswer: (q) => {
         log('manual-answered', q);
         $('notice').textContent = `Typed the manual word for you: "${q.answer}" (page ${q.page}, paragraph ${q.paragraph}, line ${q.line}, word ${q.word}).`;
-        setTimeout(() => { $('notice').textContent = ''; }, 8000);
+        setTimeout(() => { $('notice').textContent = lasting; }, 8000);
       },
     });
     setInterval(helper.check, 250);
@@ -902,6 +1117,9 @@ requestAnimationFrame(frameLoop);
     if (e.metaKey) return;
     const code = CODE_TO_KEY[e.code];
     if (code === undefined) return;
+    // the Options panel's controls, worked from the keyboard, take their own keys (a held key let go
+    // there still reaches the game)
+    if (panelTakes(e) && (down || !held.has(code))) return;
     e.preventDefault();
     if (down && e.repeat) return;
     if (down && DRIVING_KEYS.has(e.code)) keysUsedAt = performance.now();

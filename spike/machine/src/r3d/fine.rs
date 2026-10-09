@@ -15,7 +15,8 @@
 //!   s times longer and the cockpit's window tables read at the game row each fine row lies in;
 //! - each bitmap stepped again as the drawer (19E8) steps it, from its anchor point projected
 //!   again, with its scale s times larger (and its greatest, 8000h, too), through the cockpit's
-//!   window row by row.
+//!   window row by row; as its art's square pixels, or (Art::Smooth) with the corners of its art
+//!   pixels cut where it is drawn larger than its art (src/r3d/smooth.rs).
 //!
 //! The rest is drawn as game pixels made s x s: poles, the crowd, the scenery, the dithered sky
 //! rows, the bitmaps in the mirrors and the cockpit's pieces (pixel art either way, for now);
@@ -26,6 +27,7 @@
 //! list with each pixel keeping the highest of (primitive number, colour).
 
 use super::list::{self, BitRun, Bitmap, Cmd, Edge, EdgeOf, Entry, List, Pt};
+use super::smooth;
 
 /// The end of an edge record's list of x.
 const END: i32 = i32::MIN;
@@ -52,6 +54,17 @@ pub enum Prim {
     /// the ground texture's shade added to the fine pixels of road (1Ah) or grass (12h) within
     /// game pixel (x, y)
     Texel { x: u32, y: u32, delta: i8 },
+}
+
+/// How the bitmaps drawn larger than their art look: the art's square pixels, as the game's
+/// drawer steps them, or smoothed by a pixel-art filter that keeps the bitmap's colours
+/// (src/r3d/smooth.rs: xBR's corner cuts, hard-edged, where a bitmap is drawn 1.5 fine pixels or
+/// more an art pixel both ways).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Art {
+    #[default]
+    Pixels,
+    Smooth,
 }
 
 /// The frame's primitives at scale `s`: `w` x `h` fine pixels.
@@ -1146,8 +1159,9 @@ impl Fill<'_> {
 /// 19E8 at the fine scale: the bitmap's columns and rows stepped from its anchor as the drawer
 /// steps them (1AC2, 1B45), with the scale s times larger, at most 8000h s; its rows from the
 /// cockpit's top through the window's game row, limits and gap s times wider (1DBF). At s = 1,
-/// the game's scale and so the game's pixels.
-fn bitmap(out: &mut Vec<Prim>, list: &List, b: &Bitmap, sc: Scale) {
+/// the game's scale and so the game's pixels. With `sm` (Art::Smooth), smoothed where it is drawn
+/// larger than its art.
+fn bitmap(out: &mut Vec<Prim>, list: &List, b: &Bitmap, sc: Scale, sm: Option<&mut Smoother>) {
     let s = sc.s as i64;
     let rows = &list.bitmaps[b.bits as usize];
     let (ax, ay) = match &b.anchor {
@@ -1201,37 +1215,421 @@ fn bitmap(out: &mut Vec<Prim>, list: &List, b: &Bitmap, sc: Scale) {
         }
         at = at.wrapping_add(row_step);
     }
+    // Art::Smooth, for a bitmap drawn MAGNIFIED or more both ways (across, the columns' step;
+    // down, the rows' own scale rs, rs << 3 fine rows an art row): its art classified
+    let grid = match sm {
+        Some(sm) if step >= MAGNIFIED && rs << 3 >= MAGNIFIED => sm.grid(list, b),
+        _ => None,
+    };
+    let mut smoothed = grid.map(|(g, pal)| SmoothRow {
+        g,
+        pal,
+        colours: b.colours,
+        mirrored: b.mirrored,
+        ax,
+        step,
+        at0: at as i64,
+        row_step: row_step as i64,
+        w,
+        ext: Vec::new(),
+        ext_of: None,
+        lost: None,
+        cur: None,
+    });
     let mut next = || {
         let r = (at >> 16) as usize;
         at = at.wrapping_add(row_step);
-        rows.get(r)
+        r
     };
     let h = sc.h as i64;
+    // (i counts the fine rows from the bitmap's bottom row, those below the screen too)
+    let mut i = 0i64;
     while y >= h {
-        if next().is_none() {
+        if rows.get(next()).is_none() {
             return;
         }
+        i += 1;
         y -= 1;
     }
     let top = b.top as i64;
     while y >= 0 {
-        let Some(runs) = next() else { return };
+        let r = next();
+        let Some(runs) = rows.get(r) else { return };
         let g = y / s;
-        if g >= top {
+        let win = if g >= top {
             let t = |k: usize| {
                 list.window
                     .get(k * 0x53 + (g - top) as usize)
                     .map_or(0, |&v| v as i16 as i64)
             };
-            if t(0) != 0 {
-                let win = [t(3) * s, t(4) * s, t(1) * s, t(2) * s];
-                bit_runs(out, runs, y, b, &col, Some(win));
+            if t(0) == 0 {
+                i += 1;
+                y -= 1;
+                continue;
             }
+            Some([t(3) * s, t(4) * s, t(1) * s, t(2) * s])
         } else {
-            bit_runs(out, runs, y, b, &col, None);
+            None
+        };
+        match &mut smoothed {
+            Some(sr) => sr.row(out, runs, r, i, y, &col, win),
+            None => bit_runs(out, runs, y, b, &col, win),
         }
+        i += 1;
         y -= 1;
     }
+}
+
+/// Fine pixels per art pixel (16.16) from which Art::Smooth smooths a bitmap: 1.5.
+const MAGNIFIED: i64 = 0x18000;
+
+/// Art::Smooth's art, kept from frame to frame (Machine keeps one for the page): each bitmap's art
+/// classified, found by its rows and its 16 colours, with the frame it was last drawn in; and
+/// the palette it was classified by. What it keeps makes a frame quicker to draw, never
+/// different.
+#[derive(Default)]
+pub struct Smoother {
+    pal_key: Vec<u8>,
+    pal: Option<smooth::Pal>,
+    frame: u32,
+    kept: Vec<Kept>,
+    bytes: usize,
+}
+
+struct Kept {
+    hash: u64,
+    rows: Vec<Vec<BitRun>>,
+    colours: [u8; 16],
+    used: u32,
+    bytes: usize,
+    grid: Option<smooth::ArtGrid>,
+}
+
+/// At most this many bitmaps' art kept, in about this many bytes (by the vectors' capacities;
+/// the allocator's own overhead adds about a quarter), each for at most this many frames unused.
+const KEEP: usize = 128;
+const KEEP_BYTES: usize = 4 << 20;
+const KEEP_FRAMES: u32 = 30;
+
+fn art_hash(rows: &[Vec<BitRun>], colours: &[u8; 16]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x100_0000_01b3);
+    for &c in colours {
+        mix(c as u64);
+    }
+    for r in rows {
+        mix(0x1_0000 | r.len() as u64);
+        for q in r {
+            mix(q.start.map_or(0x200, |k| k as u8 as u64)
+                | (q.end as u8 as u64) << 10
+                | (q.colour as u64) << 18);
+        }
+    }
+    h
+}
+
+impl Smoother {
+    /// A new frame's list: its palette (the art classified again if it is another), and the art
+    /// not drawn lately dropped.
+    fn begin(&mut self, list: &List) {
+        if self.pal.is_none() || list.pal != self.pal_key {
+            *self = Smoother {
+                pal_key: list.pal.clone(),
+                pal: Some(smooth::Pal::of(&list.pal)),
+                frame: self.frame,
+                ..Default::default()
+            };
+        }
+        self.frame = self.frame.wrapping_add(1);
+        let f = self.frame;
+        self.kept.retain(|k| f.wrapping_sub(k.used) <= KEEP_FRAMES);
+        self.bytes = self.kept.iter().map(|k| k.bytes).sum();
+    }
+
+    /// The bitmap's art classified (None if it has no corner to cut), and the palette.
+    fn grid(&mut self, list: &List, b: &Bitmap) -> Option<(&smooth::ArtGrid, &smooth::Pal)> {
+        let pal = self.pal.as_ref()?;
+        let rows = &list.bitmaps[b.bits as usize];
+        let hash = art_hash(rows, &b.colours);
+        let found = self
+            .kept
+            .iter()
+            .position(|k| k.hash == hash && k.colours == b.colours && k.rows == *rows);
+        let k = match found {
+            Some(k) => k,
+            None => {
+                let grid = smooth::ArtGrid::new(rows, &b.colours, pal);
+                let bytes = std::mem::size_of::<Kept>()
+                    + rows
+                        .iter()
+                        .map(|r| std::mem::size_of_val(&r[..]) + std::mem::size_of::<Vec<BitRun>>())
+                        .sum::<usize>()
+                    + grid.as_ref().map_or(0, |g| g.bytes());
+                // room for it: the art drawn longest ago dropped first
+                while !self.kept.is_empty()
+                    && (self.kept.len() >= KEEP || self.bytes + bytes > KEEP_BYTES)
+                {
+                    let f = self.frame;
+                    let old = (0..self.kept.len())
+                        .max_by_key(|&k| f.wrapping_sub(self.kept[k].used))
+                        .unwrap();
+                    self.bytes -= self.kept.swap_remove(old).bytes;
+                }
+                self.kept.push(Kept {
+                    hash,
+                    rows: rows.clone(),
+                    colours: b.colours,
+                    used: 0,
+                    bytes,
+                    grid,
+                });
+                self.bytes += bytes;
+                self.kept.len() - 1
+            }
+        };
+        let kept = &mut self.kept[k];
+        kept.used = self.frame;
+        kept.grid.as_ref().map(|g| (g, pal))
+    }
+}
+
+/// Fine pixels [x0, x1) of a row, or none.
+type Pixels = Option<(i64, i64)>;
+
+/// A smoothed bitmap's fine rows: its art and colours, its columns as 1AC2 steps them from the
+/// anchor, the rows' count at the bitmap's bottom row and its step (1B45); and on the row being
+/// drawn, each run's fine pixels as the game draws them and as its own art pixels lie (for which
+/// art row and window), where the window's gap leaves nothing of the row to its right, and the
+/// piece being put together.
+struct SmoothRow<'a> {
+    g: &'a smooth::ArtGrid,
+    pal: &'a smooth::Pal,
+    colours: [u8; 16],
+    mirrored: bool,
+    ax: i64,
+    step: i64,
+    at0: i64,
+    row_step: i64,
+    w: i64,
+    ext: Vec<(Pixels, Pixels)>,
+    ext_of: Option<(usize, Option<[i64; 4]>)>,
+    lost: Option<i64>,
+    cur: Option<(i64, i64, u16, u16)>,
+}
+
+impl SmoothRow<'_> {
+    /// 1AC2: art column k's left on the screen, art-wise (not mirrored, not clamped).
+    fn x(&self, k: i32) -> i64 {
+        let o = (k.unsigned_abs() as i64 * self.step) >> 16;
+        if k < 0 {
+            self.ax - o
+        } else {
+            self.ax + o
+        }
+    }
+
+    /// Art columns k0 to k1 less one: their fine pixels [x0, x1) on the screen.
+    fn bounds(&self, k0: i32, k1: i32) -> (i64, i64) {
+        let (a, b) = (self.x(k0), self.x(k1));
+        if self.mirrored {
+            (2 * self.ax - b, 2 * self.ax - a)
+        } else {
+            (a, b)
+        }
+    }
+
+    /// The first fine row (counted from the bitmap's bottom row) in art row r.
+    fn first(&self, r: i64) -> i64 {
+        ((r << 16) - self.at0 + self.row_step - 1).div_euclid(self.row_step)
+    }
+
+    /// The piece put together so far drawn: through its run's fine pixels if a run painted its
+    /// art pixel, else through the window on its own (1DBF), and not right of the gap where the
+    /// row's runs leave nothing there.
+    fn flush(&mut self, out: &mut Vec<Prim>, y: i64, win: Option<[i64; 4]>) {
+        let Some((x0, x1, colour, run)) = self.cur.take() else {
+            return;
+        };
+        let span = if run == smooth::NO_RUN {
+            let (mut a, mut b) = (x0.max(0), x1.min(self.w).min(self.lost.unwrap_or(i64::MAX)));
+            window_clip(&mut a, &mut b, win).then_some((a, b))
+        } else {
+            self.ext
+                .get(run as usize)
+                .and_then(|e| e.0)
+                .map(|(a, b)| (x0.max(a), x1.min(b)))
+        };
+        if let Some((a, b)) = span.filter(|(a, b)| b > a) {
+            out.push(Prim::Span {
+                y: y as u32,
+                x0: a as u32,
+                x1: b as u32,
+                colour: colour as u8,
+            });
+        }
+    }
+
+    /// Fine pixels x0 to x1 less one in `colour`, of an art pixel painted by `run`, the next
+    /// along the row: joined to the piece before if they go on from it in its colour and run.
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        &mut self,
+        out: &mut Vec<Prim>,
+        y: i64,
+        win: Option<[i64; 4]>,
+        x0: i64,
+        x1: i64,
+        colour: u16,
+        run: u16,
+    ) {
+        if x1 <= x0 {
+            return;
+        }
+        if let Some(c) = &mut self.cur {
+            if c.1 == x0 && c.2 == colour && c.3 == run {
+                c.1 = x1;
+                return;
+            }
+        }
+        self.flush(out, y, win);
+        if colour != smooth::CLEAR {
+            self.cur = Some((x0, x1, colour, run));
+        }
+    }
+
+    /// Fine row y, the i-th from the bitmap's bottom row, in art row r (whose runs are `runs`).
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        &mut self,
+        out: &mut Vec<Prim>,
+        runs: &[BitRun],
+        r: usize,
+        i: i64,
+        y: i64,
+        col: &dyn Fn(i8) -> i64,
+        win: Option<[i64; 4]>,
+    ) {
+        // each run's fine pixels as the game's drawer gives them (bit_runs), and its art pixels';
+        // and if a run went on past the gap and 1DBF left nothing of the row right of it, the
+        // gap's right
+        if self.ext_of != Some((r, win)) {
+            self.ext.clear();
+            let (mut last, mut crossed, mut right) = (0i32, false, false);
+            for (q, (span, over)) in runs.iter().zip(run_spans(runs, self.mirrored, col, win)) {
+                let k0 = q.start.map_or(last, |k| k as i32);
+                last = q.end as i32;
+                let own = (last > k0).then(|| self.bounds(k0, last));
+                self.ext.push((span, own));
+                crossed |= over;
+                right |= matches!((span, win), (Some((_, x1)), Some(w)) if x1 > w[3]);
+            }
+            self.lost = win.filter(|_| crossed && !right).map(|w| w[3]);
+            self.ext_of = Some((r, win));
+        }
+        // where this fine row is in its art row: j of n, from the top (n is 1 or more: under
+        // MAGNIFIED the row step is under 1)
+        let f = self.first(r as i64);
+        let n = (self.first(r as i64 + 1) - f) as i32;
+        let j = (n - 1 - (i - f) as i32).clamp(0, n - 1);
+        let segs = &self.g.rows[r];
+        let mut pieces = [(0i32, 0i32, 0u16); 5];
+        // along the screen's row: the art's columns the other way if mirrored
+        for t in 0..segs.len() {
+            let seg = segs[if self.mirrored { segs.len() - 1 - t } else { t }];
+            let (a, b) = self.bounds(seg.k0, seg.k1);
+            let Some(cut) = seg.cut else {
+                self.put(out, y, win, a, b, seg.colour, seg.run);
+                continue;
+            };
+            let m = smooth::pieces(
+                seg.colour,
+                &cut,
+                (b - a) as i32,
+                j,
+                n,
+                self.pal,
+                &mut pieces,
+            );
+            for p in 0..m {
+                let (x0, x1, c) = pieces[if self.mirrored { m - 1 - p } else { p }];
+                let (x0, x1) = if self.mirrored {
+                    (b - x1 as i64, b - x0 as i64)
+                } else {
+                    (a + x0 as i64, a + x1 as i64)
+                };
+                self.put(out, y, win, x0, x1, c, seg.run);
+            }
+        }
+        self.flush(out, y, win);
+        // what the game draws of a run beyond its own art pixels (from where the run before was
+        // cut, 1DBF), as the game draws it
+        for (q, &(span, own)) in runs.iter().zip(&self.ext) {
+            let Some((a, b)) = span else { continue };
+            let beyond = match own {
+                Some((o0, o1)) => [(a, b.min(o0)), (a.max(o1), b)],
+                None => [(a, b), (0, 0)],
+            };
+            for (x0, x1) in beyond.into_iter().filter(|(x0, x1)| x1 > x0) {
+                out.push(Prim::Span {
+                    y: y as u32,
+                    x0: x0 as u32,
+                    x1: x1 as u32,
+                    colour: self.colours[q.colour as usize],
+                });
+            }
+        }
+    }
+}
+
+/// 1DBF: fine pixels [dx, cx) through the window's left and right limits and out of its gap (a
+/// run across the gap keeps its part left of it), if there is a window; whether any are left.
+fn window_clip(dx: &mut i64, cx: &mut i64, win: Option<[i64; 4]>) -> bool {
+    if let Some([lo, hi, gap0, gap1]) = win {
+        if *dx < lo {
+            *dx = lo;
+        }
+        if *cx > hi {
+            *cx = hi;
+        }
+        if *cx > gap0 && *dx < gap1 {
+            if *dx < gap0 {
+                *cx = gap0;
+            } else if *cx <= gap1 {
+                return false;
+            } else {
+                *dx = gap1;
+            }
+        }
+    }
+    *cx > *dx
+}
+
+/// A bitmap row's runs on a fine row (the runs of 1D3A): each one's fine pixels through the
+/// window if given (1DBF), or none, and whether it went on past the window's gap (its part right
+/// of the gap not drawn); a run from where the last ended starts where it was cut.
+fn run_spans<'a>(
+    runs: &'a [BitRun],
+    mirrored: bool,
+    col: &'a dyn Fn(i8) -> i64,
+    win: Option<[i64; 4]>,
+) -> impl Iterator<Item = (Pixels, bool)> + 'a {
+    let (mut dx, mut cx) = (0i64, 0i64);
+    runs.iter().map(move |r| {
+        match r.start {
+            Some(k) if mirrored => cx = col(k),
+            Some(k) => dx = col(k),
+            None if mirrored => cx = dx,
+            None => dx = cx,
+        }
+        if mirrored {
+            dx = col(r.end);
+        } else {
+            cx = col(r.end);
+        }
+        let over =
+            matches!(win, Some([lo, hi, gap0, gap1]) if dx.max(lo) < gap0 && cx.min(hi) > gap1);
+        (window_clip(&mut dx, &mut cx, win).then_some((dx, cx)), over)
+    })
 }
 
 /// A bitmap row's runs on fine row y (the runs of 1D3A), through the window's left and right
@@ -1244,51 +1642,38 @@ fn bit_runs(
     col: &dyn Fn(i8) -> i64,
     win: Option<[i64; 4]>,
 ) {
-    let (mut dx, mut cx) = (0i64, 0i64);
-    for r in runs {
-        match r.start {
-            Some(k) if b.mirrored => cx = col(k),
-            Some(k) => dx = col(k),
-            None if b.mirrored => cx = dx,
-            None => dx = cx,
-        }
-        if b.mirrored {
-            dx = col(r.end);
-        } else {
-            cx = col(r.end);
-        }
-        let mut draw = true;
-        if let Some([lo, hi, gap0, gap1]) = win {
-            // 1DBF
-            if dx < lo {
-                dx = lo;
-            }
-            if cx > hi {
-                cx = hi;
-            }
-            if cx > gap0 && dx < gap1 {
-                if dx < gap0 {
-                    cx = gap0;
-                } else if cx <= gap1 {
-                    draw = false;
-                } else {
-                    dx = gap1;
-                }
-            }
-        }
-        if draw && cx > dx {
+    for (r, (span, _)) in runs.iter().zip(run_spans(runs, b.mirrored, col, win)) {
+        if let Some((x0, x1)) = span {
             out.push(Prim::Span {
                 y: y as u32,
-                x0: dx as u32,
-                x1: cx as u32,
+                x0: x0 as u32,
+                x1: x1 as u32,
                 colour: b.colours[r.colour as usize],
             });
         }
     }
 }
 
-/// The list's primitives at scale `s` (1 to 64).
+/// The list's primitives at scale `s` (1 to 64), the bitmaps as their pixels.
 pub fn prims(list: &List, s: u32) -> Prims {
+    prims_with(list, s, None)
+}
+
+/// The list's primitives at scale `s` (1 to 64), the bitmaps drawn larger than their art as
+/// `art` says.
+pub fn prims_in(list: &List, s: u32, art: Art) -> Prims {
+    match art {
+        Art::Pixels => prims_with(list, s, None),
+        Art::Smooth => prims_with(list, s, Some(&mut Smoother::default())),
+    }
+}
+
+/// As prims_in: Art::Smooth with the art `smoother` has kept from the frames before (the same
+/// primitives as with a new one), or Art::Pixels without one.
+pub fn prims_with(list: &List, s: u32, mut smoother: Option<&mut Smoother>) -> Prims {
+    if let Some(sm) = smoother.as_deref_mut() {
+        sm.begin(list);
+    }
     assert!((1..=64).contains(&s), "scale {s}");
     let sc = Scale {
         s: s as i32,
@@ -1397,7 +1782,7 @@ pub fn prims(list: &List, s: u32) -> Prims {
                 y: y as u32,
                 delta,
             }),
-            Cmd::Bitmap(b) => bitmap(&mut out, list, b, sc),
+            Cmd::Bitmap(b) => bitmap(&mut out, list, b, sc, smoother.as_deref_mut()),
         }
     }
     Prims {
@@ -1480,4 +1865,269 @@ pub fn words(p: &Prims) -> Vec<u32> {
         v.extend(w);
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A smoothed bitmap's runs through the cockpit's window as 1DBF cuts them: a run across the
+    /// gap keeps its part left of it, and the next, from where it ended, starts at the gap's
+    /// right (over the first run's art pixels there), as the game draws them.
+    #[test]
+    fn smoothed_through_the_window() {
+        let s = 4;
+        // six rows: a staircase on clear (cut), then runs in colours 1 and 2, the second from
+        // where the first ended
+        let rows: Vec<Vec<BitRun>> = (0..6)
+            .map(|r| {
+                vec![
+                    BitRun {
+                        start: Some(r - 10),
+                        end: 0,
+                        colour: 3,
+                    },
+                    BitRun {
+                        start: None,
+                        end: 20,
+                        colour: 1,
+                    },
+                    BitRun {
+                        start: None,
+                        end: 30,
+                        colour: 2,
+                    },
+                ]
+            })
+            .collect();
+        let list = through_the_gap(rows);
+        let (px, sm) = (prims(&list, s), prims_in(&list, s, Art::Smooth));
+        let (a, b) = (draw(&px, None), draw(&sm, None));
+        assert_ne!(a, b, "not smoothed");
+        let w = px.w as usize;
+        for y in 377..=400 {
+            // the first run's art pixels right of the gap's left, art columns 3 to 19
+            let (p, q) = (&a[y * w + 412..y * w + 480], &b[y * w + 412..y * w + 480]);
+            assert_eq!(p, q, "row {y}");
+            assert_eq!(p[20..], [32; 48], "row {y}");
+        }
+    }
+
+    /// The window from game row 90, open from 0 to 103 and from 108 to 320, for a bitmap at game
+    /// column 100 and row 100 drawn one game pixel to an art pixel, its rows bottom row first.
+    fn through_the_gap(rows: Vec<Vec<BitRun>>) -> List {
+        let mut window = vec![0u16; 5 * 0x53];
+        for g in 0..0x53 {
+            for (k, v) in [(0, 1), (1, 103), (2, 108), (3, 0), (4, 320)] {
+                window[k * 0x53 + g] = v;
+            }
+        }
+        let b = Bitmap {
+            bits: 0,
+            colours: std::array::from_fn(|c| 16 * c as u8),
+            anchor: None,
+            col: 100,
+            row: 100,
+            size: 1,
+            below: 0,
+            depth: 1,
+            scale: 0,
+            rows_by: None,
+            mirrored: false,
+            top: 90,
+        };
+        List {
+            cmds: vec![Cmd::Bitmap(Box::new(b))],
+            window,
+            bitmaps: vec![rows],
+            ..Default::default()
+        }
+    }
+
+    /// A staircase on clear (both ends) whose rows each go on past the window's gap: 1DBF draws
+    /// them only left of it, and the pieces grown into the clear cells at their right ends are
+    /// not drawn right of it either.
+    #[test]
+    fn grown_not_past_the_gap() {
+        let s = 4;
+        let rows: Vec<Vec<BitRun>> = (0..6)
+            .map(|r| {
+                vec![BitRun {
+                    start: Some(-r),
+                    end: 10 + r,
+                    colour: 1,
+                }]
+            })
+            .collect();
+        let list = through_the_gap(rows);
+        let (px, sm) = (prims(&list, s), prims_in(&list, s, Art::Smooth));
+        let (a, b) = (draw(&px, None), draw(&sm, None));
+        assert_ne!(a, b, "not smoothed");
+        let w = px.w as usize;
+        for y in 0..px.h as usize {
+            assert!(
+                a[y * w + 412..y * w + 640].iter().all(|&c| c == 0),
+                "row {y}"
+            );
+            assert!(
+                b[y * w + 412..y * w + 640].iter().all(|&c| c == 0),
+                "row {y}"
+            );
+        }
+    }
+
+    /// The pixels the primitives paint, later over earlier, row by row from x 0 (u16::MAX where
+    /// none paints).
+    fn raster(p: &Prims) -> std::collections::BTreeMap<u32, Vec<u16>> {
+        let mut rows = std::collections::BTreeMap::new();
+        for prim in &p.prims {
+            let Prim::Span { y, x0, x1, colour } = *prim else {
+                panic!("{prim:?}");
+            };
+            let row: &mut Vec<u16> = rows.entry(y).or_default();
+            if row.len() < x1 as usize {
+                row.resize(x1 as usize, u16::MAX);
+            }
+            row[x0 as usize..x1 as usize].fill(colour as u16);
+        }
+        rows
+    }
+
+    /// A made-up bitmap drawn magnified or not: rows of runs that start where the last ended or
+    /// further on (now and then over the last), in some of 16 colours, mirrored or not, at
+    /// scale s, through a window with a gap from some row or none; and a palette.
+    fn made_up(rnd: &mut dyn FnMut(u32) -> u32, window: bool) -> (List, u32) {
+        let big = rnd(16) == 0;
+        let s = 1 + rnd(if big { 64 } else { 8 });
+        let n = 1 + rnd(30) as usize;
+        let rows: Vec<Vec<BitRun>> = (0..n)
+            .map(|_| {
+                let mut runs = Vec::new();
+                let mut last = rnd(30) as i32 - 20;
+                for i in 0..rnd(6) {
+                    let start = if i == 0 || rnd(3) == 0 {
+                        last += rnd(4) as i32;
+                        if rnd(25) == 0 {
+                            last -= 1 + rnd(3) as i32;
+                        }
+                        Some(last as i8)
+                    } else {
+                        None
+                    };
+                    last += rnd(8) as i32;
+                    runs.push(BitRun {
+                        start,
+                        end: last as i8,
+                        colour: rnd(16) as u8,
+                    });
+                }
+                runs
+            })
+            .collect();
+        let mut win = vec![0u16; 5 * 0x53];
+        for g in 0..0x53 {
+            let gap0 = 100 + rnd(100) as u16;
+            for (k, v) in [
+                (0, (rnd(8) != 0) as u16),
+                (1, gap0),
+                (2, gap0 + rnd(30) as u16),
+                (3, rnd(100) as u16),
+                (4, 200 + rnd(121) as u16),
+            ] {
+                win[k * 0x53 + g] = v;
+            }
+        }
+        let b = Bitmap {
+            bits: 0,
+            colours: std::array::from_fn(|_| [0, 16, 31, 40, 64, 200, 201, 250][rnd(8) as usize]),
+            anchor: None,
+            col: if window { rnd(360) as i16 - 20 } else { 160 },
+            row: rnd(164) as i16,
+            size: 2 + rnd(80) as u16,
+            below: rnd(n as u32) as u16,
+            depth: 16,
+            scale: 0x1000 + rnd(0xb000) as u16,
+            rows_by: (rnd(3) != 0).then(|| 0x4000 + rnd(0xc000) as u16),
+            mirrored: rnd(2) == 0,
+            top: if window { 60 + rnd(110) as i16 } else { 1000 },
+        };
+        let list = List {
+            cmds: vec![Cmd::Bitmap(Box::new(b))],
+            window: win,
+            bitmaps: vec![rows],
+            pal: (0..768).map(|_| rnd(64) as u8).collect(),
+            ..Default::default()
+        };
+        (list, s)
+    }
+
+    fn rng(mut seed: u32) -> impl FnMut(u32) -> u32 {
+        move |n: u32| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) % n
+        }
+    }
+
+    /// With every cut left out, the smoothed path draws the drawer's pixels: art pixels as
+    /// pieces and as stretches, mirrored, through the window and its gap, by runs from where the
+    /// last ended, at scales 1 to 64.
+    #[test]
+    fn nothing_cut_is_pixels() {
+        smooth::NO_CUTS.set(true);
+        let mut rnd = rng(7);
+        let mut smoothed = 0;
+        for trial in 0..4000 {
+            let (list, s) = made_up(&mut rnd, true);
+            let sm = prims_in(&list, s, Art::Smooth);
+            let px = prims(&list, s);
+            smoothed += (sm.prims != px.prims) as u32;
+            assert_eq!(raster(&sm), raster(&px), "trial {trial}: {list:?} at {s}");
+        }
+        smooth::NO_CUTS.set(false);
+        assert!(smoothed > 1000, "{smoothed} drawn otherwise");
+    }
+
+    /// A bitmap turned the other way (no window, the screen's sides not reached) is the mirror
+    /// image of itself the right way round about its anchor, smoothed as drawn as pixels.
+    #[test]
+    fn mirrored_is_mirror_image() {
+        let mut rnd = rng(11);
+        let mut differ = 0;
+        for trial in 0..2000 {
+            let (mut list, s) = made_up(&mut rnd, false);
+            let Cmd::Bitmap(b) = &mut list.cmds[0] else {
+                unreachable!()
+            };
+            b.size = 2 + (b.size % 30);
+            let ax = b.col as i64 * s as i64;
+            let mut pics = Vec::new();
+            for mirrored in [false, true] {
+                let Cmd::Bitmap(b) = &mut list.cmds[0] else {
+                    unreachable!()
+                };
+                b.mirrored = mirrored;
+                let (px, sm) = (prims(&list, s), prims_in(&list, s, Art::Smooth));
+                differ += (mirrored && px.prims != sm.prims) as u32;
+                pics.push([raster(&px), raster(&sm)]);
+            }
+            let flip = |rows: &std::collections::BTreeMap<u32, Vec<u16>>| {
+                let mut out = std::collections::BTreeMap::new();
+                for (&y, row) in rows {
+                    for (x, &c) in row.iter().enumerate().filter(|(_, &c)| c != u16::MAX) {
+                        let fx = (2 * ax - 1 - x as i64) as usize;
+                        let r: &mut Vec<u16> = out.entry(y).or_default();
+                        if r.len() <= fx {
+                            r.resize(fx + 1, u16::MAX);
+                        }
+                        r[fx] = c;
+                    }
+                }
+                out
+            };
+            for (k, (right, other)) in pics[0].iter().zip(&pics[1]).enumerate() {
+                assert_eq!(flip(right), *other, "trial {trial} ({k}): {list:?}");
+            }
+        }
+        assert!(differ > 500, "{differ} smoothed");
+    }
 }
