@@ -1535,17 +1535,27 @@ and the lumas of the game's palette copy at SS:05DA, but with a hard edge: a
 fine pixel takes the colour of the art pixel the drawer's stepping puts it in,
 or of the neighbour beyond a corner's cut line from its centre, so the
 bitmap's colours stay its own. Two kinds of cut are left out, where the art is
-square on purpose: none at the corner of a block of one colour at least 2 x 2
-whose sides run straight on past it (boards, digits), and no shallow or steep
-cut where the art pixel or a neighbour at the corner is one pixel wide between
-opaque pixels unlike it (a tyre's wall); 45-degree cuts stay. Each art's
-corners are classified once and kept from frame to frame by the machine
-(`fine::Smoother`, up to 128 bitmaps and 4 MB); a fine row of an art pixel is
-then at most five spans, each cut by the window as the run that painted the
-art pixel is. Checked on the 176 caught frames at scales 1 to 6: with the cuts
-left out the drawing is the drawer's, byte for byte, and a mirrored bitmap is
-the mirror image of the unmirrored one. It adds about 0.2 ms a frame at scale
-6 natively (about 1 ms at most) and 2% more primitives.
+square on purpose. None is made at the corner of a block of one colour at
+least 2 x 2 whose sides run straight for two pixels and one of them for three
+(a board's corner, the end of a digit's stroke); on the bitmap's outline
+against clear, a side that steps out again after two pixels does not count,
+so a wheel's steps, two by two or onto its flat bottom, are still cut. And no
+shallow or steep cut is made where the art pixel is one pixel wide between
+opaque pixels unlike it (a tyre's wall), or where a neighbour at the corner is
+and the cut would give the art pixel that neighbour's colour; 45-degree cuts
+stay. Each art's corners are classified once and kept from frame to frame by
+the machine (`fine::Smoother`, up to 128 bitmaps and about 4 MB); a fine row
+of an art pixel is then at most five spans, each cut by the window as the run
+that painted the art pixel is. A piece grown into a clear art pixel is cut by
+the window alone, and not drawn right of the window's gap on a row where a run
+went on past the gap and 1DBF left nothing of the row right of it. Art whose
+runs go back over each other is drawn as pixels. The unit tests check that
+with the cuts left out the drawing is the drawer's (`nothing_cut_is_pixels`,
+made-up bitmaps at scales 1 to 64, mirrored, through the window and its gap)
+and that a mirrored bitmap is the mirror image of the unmirrored one
+(`mirrored_is_mirror_image`). On the caught frames at scale 6 natively it adds
+about 0.25 ms a frame, with the art kept from frame to frame (up to about
+1.4 ms on the few frames with the most drawn), and 2% more primitives.
 
 The rest is drawn as game pixels made s x s for now, and the texels go on the
 fine pixels of road or grass within their game pixel.

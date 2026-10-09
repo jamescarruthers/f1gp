@@ -1,9 +1,9 @@
 //! Bitmaps drawn larger than their art, smoothed (fine::Art::Smooth): xBR level 2's corner cuts,
 //! as the cockpit's filter makes them (spike/lib/pixel-smooth.mjs), with a hard edge, so that each
 //! fine pixel is one of the bitmap's own colours or clear. Two kinds of cut xBR makes are left
-//! out, where this art is square on purpose (`classify`): the corner of a block (a board, a
-//! digit's inner corners) stays square, and a stripe one art pixel wide between opaque ones (a
-//! tyre's wall) is not bent by the shallow and steep cuts.
+//! out, where this art is square on purpose (`classify`): the corner of a block with a long
+//! straight side (a board, a digit's stroke) stays square, and a stripe one art pixel wide
+//! between opaque ones (a tyre's wall) is not bent by the shallow and steep cuts.
 //!
 //! Each art pixel's four corners are classified once (its 5 x 5 neighbourhood, the lumas from the
 //! frame's palette, the see-through cells a colour of their own). A fine pixel then takes the art
@@ -18,6 +18,19 @@ use super::list::BitRun;
 /// A see-through cell, and a cell no run painted.
 pub const CLEAR: u16 = 0x100;
 pub const NO_RUN: u16 = u16::MAX;
+
+#[cfg(test)]
+thread_local! {
+    /// (tests) every other cell taken as cut, by no rule: the smoothed path with nothing cut
+    pub static NO_CUTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn no_cuts() -> bool {
+    #[cfg(test)]
+    return NO_CUTS.get();
+    #[cfg(not(test))]
+    false
+}
 
 /// The cockpit filter's luma (Rec. 709 weights times 48, of the page's 8-bit colours), in units
 /// of 1/53125: white is 48 units. Lumas within 15 units count as alike, an edge needs 0.1 unit
@@ -103,13 +116,19 @@ impl ArtGrid {
         pal: &Pal,
         ours: bool,
     ) -> Option<ArtGrid> {
-        // the art's columns: each run from its start (or where the last ended) to its end less one
+        // the art's columns: each run from its start (or where the last ended) to its end less one;
+        // none (the drawer's pixels) if a row starts without a start, or a run goes back over the
+        // last or ends before it starts: what the drawer paints there is not one run to a cell
+        // (the art has none of these)
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for runs in rows {
             let mut last = 0i32;
-            for q in runs {
+            for (i, q) in runs.iter().enumerate() {
                 let s = q.start.map_or(last, |k| k as i32);
                 let e = q.end as i32;
+                if (i == 0 && q.start.is_none()) || (i > 0 && s < last) || e < s {
+                    return None;
+                }
                 if e > s {
                     lo = lo.min(s);
                     hi = hi.max(e - 1);
@@ -153,15 +172,19 @@ impl ArtGrid {
             *t = ours && (between(a - 1, a + 1) || between(a - stride, a + stride));
         }
         let offs = offsets(stride);
-        let mut any = false;
+        let none = no_cuts();
+        let mut any = none;
         let mut out = Vec::with_capacity(n);
         for r in 0..n {
             let mut segs: Vec<Seg> = Vec::new();
             for k in lo..=hi {
                 let a = at(k, r);
                 let (colour, q) = (cell[a], run[a]);
-                let cut = classify(&cell, &lum, &thin, &offs, stride, a, ours);
-                if cut.rules != [0; 4] {
+                let mut cut = classify(&cell, &lum, &thin, &offs, stride, a, ours);
+                if none {
+                    cut.rules = [0; 4];
+                }
+                if cut.rules != [0; 4] || (none && (k as usize ^ r) & 1 == 0) {
                     any = true;
                     segs.push(Seg {
                         k0: k,
@@ -188,6 +211,7 @@ impl ArtGrid {
                     }),
                 }
             }
+            segs.shrink_to_fit();
             out.push(segs);
         }
         any.then_some(ArtGrid {
@@ -197,11 +221,11 @@ impl ArtGrid {
         })
     }
 
-    /// Roughly the bytes it holds.
+    /// The bytes it holds, by its vectors' capacities (not the allocator's own).
     pub fn bytes(&self) -> usize {
         self.rows
             .iter()
-            .map(|r| r.len() * std::mem::size_of::<Seg>() + std::mem::size_of::<Vec<Seg>>())
+            .map(|r| r.capacity() * std::mem::size_of::<Seg>() + std::mem::size_of::<Vec<Seg>>())
             .sum()
     }
 }
@@ -215,9 +239,11 @@ fn turn(c: usize, (mut x, mut y): (i32, i32)) -> (i32, i32) {
 }
 
 /// Corner by corner, the offsets in the grid of f, h, b, d, i, c, g, i4, i5, h5, f4 (the bottom
-/// right corner's names, pixel-smooth.mjs) and a, across E from i.
-fn offsets(stride: usize) -> [[isize; 12]; 4] {
-    const AT: [(i32, i32); 12] = [
+/// right corner's names, pixel-smooth.mjs), a (across E from i), and the cells two on from E
+/// along its sides away from the corner: b2 (beyond b) and c2 (beside it, toward f), d2 (beyond
+/// d) and g2 (beside it, toward h).
+fn offsets(stride: usize) -> [[isize; 16]; 4] {
+    const AT: [(i32, i32); 16] = [
         (1, 0),
         (0, 1),
         (0, -1),
@@ -230,8 +256,12 @@ fn offsets(stride: usize) -> [[isize; 12]; 4] {
         (0, 2),
         (2, 0),
         (-1, -1),
+        (0, -2),
+        (1, -2),
+        (-2, 0),
+        (-2, 1),
     ];
-    let mut o = [[0isize; 12]; 4];
+    let mut o = [[0isize; 16]; 4];
     for (c, oc) in o.iter_mut().enumerate() {
         for (k, &d) in AT.iter().enumerate() {
             let (x, y) = turn(c, d);
@@ -243,12 +273,13 @@ fn offsets(stride: usize) -> [[isize; 12]; 4] {
 
 /// xBR level 2 at the cell `at`'s four corners (pixel-smooth.mjs, corner by corner), from the
 /// cells' lumas; if `ours`, less two kinds of cut xBR makes on this art: none at the corner of a
-/// block, and no shallow or steep cut that would bend a stripe one cell wide (`thin`).
+/// block with a long straight side, and no shallow or steep cut that would bend a stripe one
+/// cell wide (`thin`).
 fn classify(
     cell: &[u16],
     lum: &[i32],
     thin: &[bool],
-    offs: &[[isize; 12]; 4],
+    offs: &[[isize; 16]; 4],
     stride: usize,
     at: usize,
     ours: bool,
@@ -268,9 +299,23 @@ fn classify(
         }
         let (lb, ld, li, lc, lg) = (l(2), l(3), l(4), l(5), l(6));
         let (li4, li5, lh5, lf4, la) = (l(7), l(8), l(9), l(10), l(11));
-        // (ours) the corner of a block at least 2 x 2 (E, b, d and a alike) whose sides go
-        // straight on past it (c and g not like E): drawn square, so left square
-        if ours && ld == le && lb == le && la == le && lc != le && lg != le {
+        // (ours) the corner of a block at least 2 x 2 (E, b, d and a alike) whose sides are
+        // straight for two cells (c and g not like E), one of them for three (b2 like E and c2
+        // not, or d2 and g2): a board's corner, a stroke's end, drawn square, so left square.
+        // On the art's outline (f and h clear), not if a side steps out after two (b2 and c2
+        // like E, or d2 and g2): a wheel's last step onto its flat bottom is cut, as the steps
+        // two by two are
+        let (lb2, lc2, ld2, lg2) = (l(12), l(13), l(14), l(15));
+        let outline = lf == SEE_THROUGH && lh == SEE_THROUGH;
+        if ours
+            && ld == le
+            && lb == le
+            && la == le
+            && lc != le
+            && lg != le
+            && ((lb2 == le && lc2 != le) || (ld2 == le && lg2 != le))
+            && !(outline && ((lb2 == le && lc2 == le) || (ld2 == le && lg2 == le)))
+        {
             continue;
         }
         let df = |a: i32, b: i32| (a - b).abs();
@@ -285,18 +330,18 @@ fn classify(
         let wd2 = df(lh, ld) + df(lh, li5) + df(lf, li4) + df(lf, lb) + 4 * df(le, li);
         let edri = wd1 <= wd2;
         let edr = wd2 >= wd1 + MARGIN && irlv1;
-        // (ours) the shallow and steep cuts move an edge along two cells: not where E, f or h is
-        // one cell wide between opaque cells, whose sides they would bend (45 degrees may cut)
-        let bends =
-            thin[at] || thin[(at as isize + o[0]) as usize] || thin[(at as isize + o[1]) as usize];
+        // the colour the cut gives E: of f or h, the nearer E's
+        let (fa, ha) = ((at as isize + o[0]) as usize, (at as isize + o[1]) as usize);
+        let to_f = df(le, lf) <= df(le, lh);
+        let ln = if to_f { lf } else { lh };
+        // (ours) the shallow and steep cuts move an edge along two cells: not where they would
+        // bend a stripe one cell wide between opaque cells, E itself or f or h when the cut gives
+        // E its colour (45 degrees may cut)
+        let bends = thin[at] || (thin[fa] && ln == lf) || (thin[ha] && ln == lh);
         let edrl = edr && irlv2l && df(lh, lc) >= 2 * df(lf, lg) && !bends;
         let edru = edr && irlv2u && df(lf, lg) >= 2 * df(lh, lc) && !bends;
         cut.rules[c] = edri as u8 | (edr as u8) << 1 | (edrl as u8) << 2 | (edru as u8) << 3;
-        let (f, h) = (
-            cell[(at as isize + o[0]) as usize],
-            cell[(at as isize + o[1]) as usize],
-        );
-        cut.near[c] = if df(le, lf) <= df(le, lh) { f } else { h };
+        cut.near[c] = if to_f { cell[fa] } else { cell[ha] };
     }
     cut
 }
@@ -506,11 +551,14 @@ mod tests {
             .map_or([0; 4], |c| c.rules)
     }
 
-    /// What we leave out of xBR's cuts. The corners of a block of one colour stay square, on
-    /// clear and on another colour (xBR rounds them). A stripe one cell wide between opaque
-    /// cells is not bent by the shallow or steep cuts: the notch in a tyre's wall (the cockpit
-    /// frame ck0301, the tyre of the car ahead) and the S in the wall of the own car's front tyre
-    /// (monza 0037). Staircases of single steps and of steps two long are cut as xBR cuts them.
+    /// What we leave out of xBR's cuts. The corners of a block of one colour with a side three
+    /// long stay square, on clear and on another colour, and so do the ends of a stroke two
+    /// wide (xBR rounds them); the steps of a wheel's outline, two by two and two high onto its
+    /// flat bottom, are cut as xBR cuts them, but not the same step inside a board. A stripe one
+    /// cell wide between opaque cells is not bent by the shallow or steep cuts: the notch in a
+    /// tyre's wall (the cockpit frame ck0301, the tyre of the car ahead) and the S in the wall of
+    /// the own car's front tyre (monza 0037); the outline beside a stripe's cell is. Staircases
+    /// of single steps and of steps two long are cut as xBR cuts them.
     #[test]
     fn guard() {
         for text in [
@@ -518,6 +566,7 @@ mod tests {
             &[
                 "2222222", "2222222", "2211122", "2211122", "2211122", "2222222", "2222222",
             ][..],
+            &[".......", ".11111.", ".11111.", "......."][..],
         ] {
             assert!(art(text, false).is_some(), "xBR cuts {text:?}");
             assert!(art(text, true).is_none(), "{text:?} cut");
@@ -542,6 +591,57 @@ mod tests {
                 assert_eq!(rules(&ours, n, k, row)[c], 3, "{text:?} at {k}, {row}");
             }
         }
+        // the bottom left of the car ahead's rear wheel (arts e979d792 and one nearer): its steps
+        // two by two cut at their corners, and the last step, two high on the tyre's flat
+        // bottom
+        let wheel = [
+            ".000000000",
+            ".000000000",
+            "..00000000",
+            "..00000000",
+            "....000000",
+            "....000000",
+            "......0000",
+            "......0000",
+            "......0000",
+            "......0000",
+        ];
+        let last = [
+            ".000000000000",
+            ".000000000000",
+            "..00000000000",
+            "....000000000",
+            "....000000000",
+        ];
+        for (text, at) in [
+            (&wheel[..], &[(2, 3, 3), (4, 5, 3)][..]),
+            (&last[..], &[(4, 4, 3)][..]),
+        ] {
+            let (xbr, ours) = (art(text, false), art(text, true));
+            for &(k, row, c) in at {
+                let r = rules(&ours, text.len(), k, row)[c];
+                assert_ne!(r, 0, "{text:?} at {k}, {row}, corner {c}");
+                assert_eq!(
+                    r,
+                    rules(&xbr, text.len(), k, row)[c],
+                    "{text:?} at {k}, {row}"
+                );
+            }
+        }
+        // the same step on a board (a digit's hook below its bar, black on white) left square
+        let mut hook: Vec<String> = last.iter().map(|r| r.replace('.', "1")).collect();
+        hook.push("1".repeat(13));
+        let hook: Vec<&str> = hook.iter().map(|r| r.as_str()).collect();
+        let (xbr, ours) = (art(&hook, false), art(&hook, true));
+        assert_ne!(rules(&xbr, hook.len(), 4, 4)[3], 0);
+        assert_eq!(rules(&ours, hook.len(), 4, 4)[3], 0);
+        // a grey cell of a tyre's highlight in the column of its black outline: the clear cell
+        // beside it takes the outline's shallow or steep cut, black, which leaves the grey as it is
+        let outline = ["...000", "...000", "...a00", "..0000", "..0000", "..0000"];
+        let (xbr, ours) = (art(&outline, false), art(&outline, true));
+        let r = rules(&ours, outline.len(), 2, 2)[0];
+        assert_ne!(r & 12, 0, "{outline:?}");
+        assert_eq!(r, rules(&xbr, outline.len(), 2, 2)[0], "{outline:?}");
         // single steps, on clear and on another colour: the top right corner of each row's last
         // cell and the bottom left of the next cut at 45 degrees
         for text in [

@@ -671,7 +671,7 @@ at any resolution.
      shown 1.5 times the size of their art or more with xBR level 2's corner
      cuts, as the cockpit's filter makes them, but with hard edges in the
      bitmap's own colours, and without the cuts that would round the corners of
-     blocks or bend one-pixel stripes (`machine/src/r3d/smooth.rs`;
+     boards and digits or bend one-pixel stripes (`machine/src/r3d/smooth.rs`;
      `docs/renderer-notes.md`, "Drawing the frame finer"). The cuts are spans,
      so the GPU paints them unchanged; `art=pixels`, the default, draws as
      before, and `gpucheck=1` draws pixels so scale 1 is still the game's.

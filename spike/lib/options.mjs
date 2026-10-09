@@ -123,7 +123,7 @@ export const OPTIONS = [
     note: 'Needs our PC and the WebGPU view.' },
   { name: 'art', group: 'pc', label: 'Enlarged art', def: 'pixels',
     values: [['pixels', 'Square pixels'], ['smooth', 'Smoothed']], read: (o) => o.art,
-    text: 'Wheels, helmets, boards and trees where they are drawn at least one and a half times the size of their art: as square pixels, or smoothed. Smoothed turns the steps along the art\'s edges into slopes and curves, as the Cockpit filter does, but with hard edges in the game\'s own colours. Boards, digits and thin stripes keep their square corners.',
+    text: 'Wheels, helmets, boards and trees where they are drawn at least one and a half times the size of their art: as square pixels, or smoothed. Smoothed turns the steps along the art\'s edges into slopes and curves, as the Cockpit option\'s Smoothed setting does, but with hard edges in the game\'s own colours. Boards and digits keep their square corners, and stripes one pixel wide stay straight.',
     note: 'Needs our PC and the WebGPU view, at 2x or more to show much. Square pixels while Check WebGPU frames is on.' },
   { name: 'cardetail', group: 'pc', label: 'Car detail', def: 'scale',
     values: [['scale', 'As the game would, that much finer'], ['all', '3D models at every distance'], ['game', 'As the game']], read: (o) => o.cardetail,

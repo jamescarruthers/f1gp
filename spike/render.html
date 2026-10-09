@@ -59,8 +59,9 @@
                           are drawn 1.5 times the size of their art or more: as the art's
                           square pixels (the default), or smoothed by xBR's corner cuts
                           with hard edges, every pixel one of the bitmap's own colours,
-                          the corners of blocks and one-pixel stripes kept square
-                          (machine/src/r3d/smooth.rs); it shows most at scale 2 and up
+                          the corners of boards and digits kept square and one-pixel
+                          stripes not bent (machine/src/r3d/smooth.rs); it shows most
+                          at scale 2 and up
     cardetail=scale|all|game  r3d=gpu: how far the cars keep their 3D model: as the game
                           would on a screen that many times finer (scale, the default),
                           at every distance (all), or as the game does (game); the cars
@@ -663,7 +664,8 @@ function frame(now) {
     const sh = rustPC.r3dShown();
     if (sh && sh.serial !== gpuSeen.serial) {
       gpuSeen.serial = sh.serial; gpuSeen.at = now; gpuSeen.shown++;
-      const check = opts.gpucheck && sh.scale === 1 && gpuSeen.shown % 15 === 0;
+      // (a frame taken smoothed before gpucheck came on is not the game's screen: not checked)
+      const check = opts.gpucheck && sh.scale === 1 && sh.art === 'pixels' && gpuSeen.shown % 15 === 0;
       const want = check ? sh.screen.slice() : null;
       const t = performance.now();
       const read = gpu.show(sh, { check });
