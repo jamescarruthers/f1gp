@@ -56,16 +56,18 @@
     scale=auto|1..6       r3d=gpu: the 3D view's resolution, in game pixels (1: the
                           game's own pixels); auto, the default: the screen's pixels
     art=pixels|smooth     r3d=gpu: the bitmaps (wheels, helmets, boards, trees) where they
-                          are drawn larger than their art: as its square pixels (the
-                          default), or smoothed by a pixel-art filter that keeps the
-                          game's colours (machine/src/r3d/fine.rs; not written yet: smooth
-                          draws as pixels for now)
+                          are drawn 1.5 times the size of their art or more: as the art's
+                          square pixels (the default), or smoothed by xBR's corner cuts
+                          with hard edges, every pixel one of the bitmap's own colours,
+                          the corners of blocks and one-pixel stripes kept square
+                          (machine/src/r3d/smooth.rs); it shows most at scale 2 and up
     cardetail=scale|all|game  r3d=gpu: how far the cars keep their 3D model: as the game
                           would on a screen that many times finer (scale, the default),
                           at every distance (all), or as the game does (game); the cars
                           in the mirrors stay as the game draws them
     gpucheck=1            r3d=gpu at scale 1, for probes: every 15th frame read back
-                          and compared with the game's screen (renderApp.gpu)
+                          and compared with the game's screen (renderApp.gpu); the
+                          bitmaps drawn as pixels, whatever art says
     pad=auto|off          auto: a game controller drives (once the browser sees it: press
                           one of its buttons): in a session its left stick steers and its
                           triggers accelerate and brake through the game's own joystick
@@ -549,6 +551,8 @@ let gpu = null;               // r3d=gpu: the WebGPU view (lib/gpu-r3d.mjs gpuVi
 // the frames shown through it, when the last came, the scale (auto: from the box's size), the
 // time each took to send, and the checks (gpucheck=1)
 const gpuSeen = { serial: 0, at: -1e9, shown: 0, scale: 2, ms: [], checked: 0, differ: 0, lastDiffer: 0 };
+// the bitmaps as pixels while the checks run: smoothed, scale 1 is no longer the game's screen
+const artNow = () => (opts.gpucheck ? 'pixels' : opts.art);
 const nativeSeen = { n: 0, at: -1e9 }; // the frames our 3D routine drew, and when the count last moved
 let carData = null;           // readCars(mem) for the circuit (source=memory)
 let routine = null;           // the fill that replaces the game's 3D drawing (lib/overlay.mjs)
@@ -648,7 +652,7 @@ function frame(now) {
   if (rustPC) {
     rustPC.native3d(opts.r3d !== 'game' && opts.screen === 'original' && !(routine && routine.installed));
     rustPC.r3dScale(gpu && opts.r3d === 'gpu' && opts.screen === 'original' ? gpuSeen.scale : 0);
-    rustPC.r3dSmooth(opts.art === 'smooth');
+    rustPC.r3dSmooth(artNow() === 'smooth');
     rustPC.r3dCars(opts.cardetail);
     const n = rustPC.nativeFrames();
     if (n !== nativeSeen.n) { if (nativeSeen.n === 0) log('game-3d-ours'); nativeSeen.n = n; nativeSeen.at = now; }
@@ -844,7 +848,7 @@ setInterval(() => {
     gpuSeen.lastShown = gpuSeen.shown;
     window.renderApp.gpu = { scale: gpuSeen.scale, shown: gpuSeen.shown, fps, sendMs: +med(ms) || null, checked: gpuSeen.checked, differ: gpuSeen.differ, lastDiffer: gpuSeen.lastDiffer, errors: gpu.errors };
     if (opts.r3d === 'gpu' && opts.screen !== 'original') $('perf').textContent += ' · WebGPU view off: the Screen is New view';
-    else if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, cars ${opts.cardetail}, art ${opts.art}, ${med(ms)} ms a frame to send`;
+    else if (opts.r3d === 'gpu') $('perf').textContent += ` · 3D ${fps} fps in WebGPU at ${gpuSeen.scale}x, ${$('gpu').width}x${$('gpu').height}, cars ${opts.cardetail}, art ${artNow()}, ${med(ms)} ms a frame to send`;
   }
   perf.kept = 0;
   if (!$('options').hidden) showOptions();

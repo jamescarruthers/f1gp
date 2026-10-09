@@ -123,8 +123,8 @@ export const OPTIONS = [
     note: 'Needs our PC and the WebGPU view.' },
   { name: 'art', group: 'pc', label: 'Enlarged art', def: 'pixels',
     values: [['pixels', 'Square pixels'], ['smooth', 'Smoothed']], read: (o) => o.art,
-    text: 'Wheels, helmets, boards and trees where they are drawn larger than their art: as square pixels, or smoothed by a filter for pixel art that keeps the game\'s colours.',
-    note: 'Not done yet: the filter is still to come, so Smoothed draws square pixels for now. Needs the WebGPU view at 2x or more.' },
+    text: 'Wheels, helmets, boards and trees where they are drawn at least one and a half times the size of their art: as square pixels, or smoothed. Smoothed turns the steps along the art\'s edges into slopes and curves, as the Cockpit filter does, but with hard edges in the game\'s own colours. Boards, digits and thin stripes keep their square corners.',
+    note: 'Needs our PC and the WebGPU view, at 2x or more to show much. Square pixels while Check WebGPU frames is on.' },
   { name: 'cardetail', group: 'pc', label: 'Car detail', def: 'scale',
     values: [['scale', 'As the game would, that much finer'], ['all', '3D models at every distance'], ['game', 'As the game']], read: (o) => o.cardetail,
     text: 'How far the cars keep their 3D model before the game draws them as flat pictures. The game swaps at 32 feet in the cockpit and 52 feet outside; the first choice keeps the model that many times further at the WebGPU detail, the second keeps it at every distance.',
@@ -162,7 +162,7 @@ export const OPTIONS = [
   { name: 'gpucheck', group: 'tests', label: 'Check WebGPU frames', kept: false, def: '0',
     values: [['0', 'Off'], ['1', 'On']], read: (o) => bit(o.gpucheck),
     text: 'For probes: the page reads back every 15th WebGPU frame, compares it with the game\'s own screen and puts the results in renderApp.gpu.',
-    note: 'Needs the WebGPU view at 1x.' },
+    note: 'Needs the WebGPU view at 1x. Enlarged art is drawn as square pixels while it is on.' },
 ];
 
 /** The options kept between visits, by name. */

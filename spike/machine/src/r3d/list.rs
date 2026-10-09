@@ -171,6 +171,9 @@ pub struct List {
     pub f: i16,
     /// the bitmaps drawn, each as its rows of runs, the bottom row first
     pub bitmaps: Vec<Vec<Vec<BitRun>>>,
+    /// the game's copy of the palette as the frame began (SS:05DA, 256 entries of 6-bit red,
+    /// green and blue): the colours fine::Art::Smooth weighs
+    pub pal: Vec<u8>,
     /// writes the recorder saw outside the 3D view, ring entries whose slot no edge was built
     /// into, and polygons drawn as pixels (the crowd)
     pub outside: u32,
@@ -295,6 +298,7 @@ pub fn begin(m: &Machine, scale: u32, cars: Cars) {
         window,
         top: word(mem, lin(ss, 0x132)) as i16,
         f: word(mem, lin(ss, 0x17c)) as i16,
+        pal: mem[lin(ss, 0x5da)..lin(ss, 0x5da) + 768].to_vec(),
         ..Default::default()
     };
     REC.with(|c| {

@@ -159,12 +159,14 @@ pub struct Machine {
     /// the frames our 3D routine has drawn
     pub native_frames: u64,
     /// with our routine, the 3D view drawn finer for the page (src/r3d/shown.rs): the scale (0
-    /// off), the frame being recorded, the last frame drawn (until the game copies it to the
-    /// screen), the frame on the screen, whether the game has copied since the page last took
-    /// a frame, and the last frame the page took
+    /// off), how far the cars keep their model, how the bitmaps are drawn and the art kept for
+    /// smoothing them, the frame being recorded, the last frame drawn (until the game copies it
+    /// to the screen), the frame on the screen, whether the game has copied since the page last
+    /// took a frame, and the last frame the page took
     r3d_scale: u32,
     r3d_cars: crate::r3d::list::Cars,
     r3d_art: crate::r3d::fine::Art,
+    r3d_smoother: crate::r3d::fine::Smoother,
     r3d_recording: bool,
     r3d_drawn: Option<crate::r3d::shown::Drawn>,
     r3d_on_screen: Option<crate::r3d::shown::OnScreen>,
@@ -257,6 +259,7 @@ impl Machine {
             r3d_scale: 0,
             r3d_cars: crate::r3d::list::Cars::Scale,
             r3d_art: crate::r3d::fine::Art::Pixels,
+            r3d_smoother: Default::default(),
             r3d_recording: false,
             r3d_drawn: None,
             r3d_on_screen: None,
@@ -425,6 +428,7 @@ impl Machine {
             }
             self.r3d_drawn = None;
             self.r3d_on_screen = None;
+            self.r3d_smoother = Default::default();
         } else {
             // the frame on the screen again at the new scale
             self.r3d_copied = self.r3d_on_screen.is_some();
@@ -447,8 +451,9 @@ impl Machine {
         };
         if art != self.r3d_art {
             self.r3d_art = art;
-            // the frame on the screen again, drawn the new way
+            // the frame on the screen again, drawn the new way (the art kept for smoothing let go)
             self.r3d_copied = self.r3d_on_screen.is_some();
+            self.r3d_smoother = Default::default();
         }
     }
 
@@ -482,8 +487,11 @@ impl Machine {
         self.r3d_copied = false;
         if let Some(mut o) = self.r3d_on_screen.take() {
             let mut last = std::mem::take(&mut self.r3d_shown);
-            let s = crate::r3d::shown::shown(self, &mut o, self.r3d_scale, self.r3d_art, &mut last);
+            let mut sm = std::mem::take(&mut self.r3d_smoother);
+            let (scale, art) = (self.r3d_scale, self.r3d_art);
+            let s = crate::r3d::shown::shown(self, &mut o, scale, art, &mut sm, &mut last);
             self.r3d_shown = s.unwrap_or(last);
+            self.r3d_smoother = sm;
             self.r3d_on_screen = Some(o);
         }
     }

@@ -1527,6 +1527,26 @@ rasteriser decides them, on a screen s times larger:
   33 rows are 1:1 at depth C8h, 25 ft); further off, where the game drops
   rows and columns, the finer screen keeps more of them.
 
+With `art=smooth` (`fine::Art::Smooth`, `smooth.rs`), a bitmap drawn 1.5 fine
+pixels or more to an art pixel both ways (down, by the rows' own scale, which
+for AAh, ABh and AFh is the whole scale) has the corners of its art pixels cut
+by xBR level 2, with the cockpit filter's rules (`spike/lib/pixel-smooth.mjs`)
+and the lumas of the game's palette copy at SS:05DA, but with a hard edge: a
+fine pixel takes the colour of the art pixel the drawer's stepping puts it in,
+or of the neighbour beyond a corner's cut line from its centre, so the
+bitmap's colours stay its own. Two kinds of cut are left out, where the art is
+square on purpose: none at the corner of a block of one colour at least 2 x 2
+whose sides run straight on past it (boards, digits), and no shallow or steep
+cut where the art pixel or a neighbour at the corner is one pixel wide between
+opaque pixels unlike it (a tyre's wall); 45-degree cuts stay. Each art's
+corners are classified once and kept from frame to frame by the machine
+(`fine::Smoother`, up to 128 bitmaps and 4 MB); a fine row of an art pixel is
+then at most five spans, each cut by the window as the run that painted the
+art pixel is. Checked on the 176 caught frames at scales 1 to 6: with the cuts
+left out the drawing is the drawer's, byte for byte, and a mirrored bitmap is
+the mirror image of the unmirrored one. It adds about 0.2 ms a frame at scale
+6 natively (about 1 ms at most) and 2% more primitives.
+
 The rest is drawn as game pixels made s x s for now, and the texels go on the
 fine pixels of road or grass within their game pixel.
 

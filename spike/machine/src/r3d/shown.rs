@@ -142,14 +142,16 @@ pub fn on_screen(was: Option<OnScreen>, drawn: Option<Drawn>, copied: Vec<u8>) -
 }
 
 /// The frame on the screen as the page takes it now, with its 3D view's primitives at `scale`
-/// (1 to 64) and its bitmaps drawn as `art` says, numbered after `last`; None if the screen,
-/// the palette, the scale and the art are as `last` had them and the frame is not new. The
-/// primitives are made again only for a new frame, scale or art (else taken from `last`).
+/// (1 to 64) and its bitmaps drawn as `art` says (Art::Smooth with the art `smoother` keeps),
+/// numbered after `last`; None if the screen, the palette, the scale and the art are as `last`
+/// had them and the frame is not new. The primitives are made again only for a new frame, scale
+/// or art (else taken from `last`).
 pub fn shown(
     m: &Machine,
     o: &mut OnScreen,
     scale: u32,
     art: fine::Art,
+    smoother: &mut fine::Smoother,
     last: &mut Shown,
 ) -> Option<Shown> {
     let vga = &m.hw.vga;
@@ -179,7 +181,8 @@ pub fn shown(
     let words = if same_frame {
         std::mem::take(&mut last.words)
     } else {
-        fine::words(&fine::prims_in(&d.list, scale, art))
+        let sm = (art == fine::Art::Smooth).then_some(smoother);
+        fine::words(&fine::prims_with(&d.list, scale, sm))
     };
     o.fresh = false;
     Some(Shown {
